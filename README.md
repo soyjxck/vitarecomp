@@ -1,200 +1,76 @@
-# vitarecomp
+# psvitarecomp
 
-### *The Vita has one good emulator. It has no static recompiler.*
+> A library of static-recompilation tools for PlayStation Vita games:
+> ARMv7 / Thumb-2 to native C, with the firmware surface implemented as HLE
+> rather than emulated.
 
-> Static recompilation toolkit for PlayStation Vita titles.
-> Turn ARM into native C. No emulator required, no keys required.
+This repository carries forward [sp00nznet/vitarecomp](https://github.com/sp00nznet/vitarecomp)
+(MIT, 38 commits, July to August 2026), the only Vita-to-PC static
+recompiler found anywhere. Its history is preserved here unchanged and the
+`upstream` remote still points at it. Everything that toolkit established is
+kept; this repo exists to finish what it stopped on and to widen it from one
+QA build to retail titles.
 
----
+**Status, measured on this machine (2026-10-10):**
 
-## What Is This?
+| Check | Result |
+|---|---|
+| Build (MSVC 14.50, CMake 4.3, Ninja) | `armrecomp.exe` + `vitarecomp.lib` build clean |
+| `ctest` | 4 / 4 suites pass (container, inflate, decode, runtime) |
+| `armrecomp info / extract / cover` on VitaShell 2.02 `eboot.bin` (homebrew, no keys) | 3 segments inflated, Adler-32 ok, ELF 4,882,182 bytes as declared; Thumb-2 dominant, 0.22 % unknown, 2.01 % SIMD |
 
-**vitarecomp** is an open-source toolkit that provides the analysis tools,
-recompiler, and runtime needed to **statically recompile PlayStation Vita games
-into native executables**.
+Upstream's last measurement on *Uncharted: Fight for Fortune* (a QA build):
+98.95 % of 1.8 M instructions translated, the whole module compiles to a 39 MB
+executable, boots through 551 C++ static constructors and stops on the first
+NEON instruction. NEON and the HLE layer (kernel, `SceLibc`, `sceGxm`) are
+where the work is. See [docs/PLAN.md](docs/PLAN.md).
 
-Instead of interpreting or dynamically recompiling ARM instructions at runtime
-(what Vita3K does), we take the opposite approach: **translate everything ahead
-of time** into C that compiles with any modern compiler on any modern platform.
+## Why this exists
 
-This is the same philosophy behind:
-- [N64Recomp](https://github.com/N64Recomp/N64Recomp) (N64 → native)
-- [UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) (Xbox 360 → native)
-- [ps3recomp](https://github.com/sp00nznet/ps3recomp) (PS3 → native)
-- [psprecomp](https://github.com/sp00nznet/psprecomp) (PSP → native)
+- **Nobody has shipped a Vita recomp.** Vita appears in recomp catalogues only
+  as a *target* (N64 ports to Vita) or as a host for PS2 recomp experiments.
+  The one source-to-PC toolkit stalled seven weeks before this repo was made.
+- **The Vita is a good recomp target.** One documented CPU (Cortex-A9,
+  ARMv7-A, Thumb-2 dominant), a documented OS boundary reached only through
+  NID-keyed import tables, and an MIT-licensed NID database
+  ([vita-headers](https://github.com/vitasdk/vita-headers)).
+- **Vita3K is the reference, not a dependency.** It has ~160 HLE module
+  directories, the loader and relocation code, and a GXP-to-SPIR-V shader
+  recompiler. It is GPLv2, so it is used as documentation and as a
+  behavioural oracle. What that means for licensing is in
+  [docs/DECISIONS.md](docs/DECISIONS.md).
 
-`vitarecomp` is the reusable toolkit. Games brought up on it live in separate
-repos that consume this one as a submodule — that split is deliberate: the
-toolkit is the thing other people fork to recompile *their* Vita game.
-
-> **No game data here.** Dumps, `eboot.bin`, `.suprx` modules, VPKs and any key
-> material are all `.gitignore`d. This repo is the recompiler, the runtime, and
-> docs — bring your own dump.
-
-## Why Vita?
-
-The Vita is a better target than its reputation suggests:
-
-- **One documented CPU.** A quad-core ARM Cortex-A9 running ARMv7-A. ARM is the
-  most widely documented architecture there is, and unlike the PSP's Allegrex it
-  has no vendor-specific opcode divergences to rediscover.
-- **A documented OS boundary.** Games call `sceKernel*` / `sceGxm*` / `sceCtrl*`
-  by NID through a module import table. That is a *library* surface, not a
-  hardware surface, which means it can be implemented as HLE C rather than
-  emulated — and the NID→name mapping is published and MIT-licensed.
-- **A corpus that needs no decryption.** Every segment of every QA/prototype
-  build measured so far is plaintext, zlib-compressed only. The whole pipeline
-  can be built and validated with no key material entering the picture. See
-  [docs/CORPUS.md](docs/CORPUS.md).
-
-## The Challenge
-
-| Component | What It Is | Why It's Hard |
-|-----------|-----------|---------------|
-| **Cortex-A9** | ARMv7-A, Thumb-2 dominant | Two instruction sets interleaved; one bad width desynchronises every instruction after it |
-| **NEON** | 128-bit SIMD | The only genuinely hard piece left — but 0.63% of instructions once scalar VFP is handled, not the wall its reputation suggests |
-| **SELF container** | SCE-wrapped ELF | Not the PS3 layout; every field after `0x20` is shifted by `0x10` |
-| **`.sce_module_info`** | Module metadata | `e_entry` points *at this structure*, not at code — and it mixes segment-relative with absolute addressing |
-| **`sceGxm`** | The GPU API | 107 imported functions, one of which is a shader compiler |
-| **`ET_SCE_EXEC`** | Statically linked modules | No relocations to mine, so function-pointer recovery is heuristic — and this is the entire launch window |
-
-## Architecture
+## Layout
 
 ```
-include/vitarecomp/   runtime API — cpu, mem, dispatch, vfp, loader
-src/                  runtime — CPU state, memory, semantic helpers, traps
-tools/armrecomp/      the toolkit:
-                        container.c  SELF / ELF / velf parsing
-                        inflate.c    DEFLATE + zlib, written not vendored
-                        decode.c     ARMv7-A + Thumb-2 decoder
-                        module.c     .sce_module_info, import/export tables
-                        analyze.c    function discovery
-                        nids.c       NID → name against vita-headers
-                        emit.c       ARM → C
-tests/                ctest — synthetic, no game data
-docs/                 the detail
+include/vitarecomp/   runtime API: cpu, mem, dispatch, vfp, hle, loader
+src/                  runtime: CPU state, memory, traps, dispatch, SceLibc batch 1
+tools/armrecomp/      the recompiler: container, inflate, decode, module, analyze, nids, emit
+tools/*.sh            helpers: MSVC env import, dependency fetch, smoke run
+tests/                synthetic ctest suites, no game data
+docs/                 upstream's design notes plus this repo's research, plan and decisions
+external/             (gitignored) vita-headers NID database, fetched by tools/fetch-deps.sh
+fixtures/             (gitignored) homebrew modules used as key-free regression inputs
 ```
 
-## How It Works
+## Build
 
-```
-  dump / .vpk ──► armrecomp ──► eboot.bin / *.suprx      peel the container
-                  (zip · dir)    (a SCE\0-wrapped ELF)    stack down to a module
-                      │
-                      ▼
-              ┌────────────────────┐   segment table is PLAINTEXT; segments are
-              │  inflate           │   zlib. QA builds need no keys at all.
-              └────────────────────┘   SELF ──► a plain ELF32 ARM module
-                      │
-                      ▼
-              ┌────────────────────┐   decode ARMv7 + Thumb-2, discover functions
-              │  armrecomp         │   (following the module's export table and
-              │  (tools/)          │   SCE_RELA relocations), translate to C:
-              └────────────────────┘   vita_func_<addr>
-                      │  generated/recomp_funcs.c
-                      ▼
-              ┌────────────────────┐   the runtime the generated C links against:
-              │  vitarecomp (lib)  │   CPU state · memory · semantic helpers ·
-              │  (src/, include/)  │   sceKernel/sceGxm HLE · dispatch
-              └────────────────────┘
-                      │
-                      ▼   (+ a per-game host: load module, register, run, present)
-              native executable — the recompiled game runs
+```sh
+# Windows, Git Bash: import the MSVC x64 environment first
+source tools/msvc_env.sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
+
+# NID database and a key-free fixture (VitaShell eboot.bin)
+tools/fetch-deps.sh
+tools/smoke.sh          # info, extract, cover on the fixture
 ```
 
-Stage-by-stage detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The core has no external dependencies: a fresh clone builds with CMake and a C
+compiler only. zlib inflate is written in-tree.
 
-## Status
-
-**Phases 1–5 complete, phase 6 (HLE) in progress.** The full pipeline runs end
-to end — SELF → ELF → decode → discover → emit → compile → link → run — with no
-key material anywhere in it.
-
-| Phase | What | Status |
-|---|---|---|
-| **1 — Container stack** | SCE/SELF, appinfo, ELF32, program headers, segment table; bounds-checked, named refusal for PFS retail dumps, encryption flag cross-checked against zlib headers | ✅ Complete |
-| **2 — Inflate & reassemble** | DEFLATE + zlib written not vendored; **15/15 corpus modules extract and round-trip**, 236 KB → 53 MB | ✅ Complete |
-| **3 — Decoder** | ARMv7-A + Thumb-2, width determination, control flow, IT blocks, NEON/VFP classed; `armrecomp cover` over 16 modules | ✅ Complete |
-| **4 — Discovery** | `.sce_module_info`, import/export tables, recursive descent carrying mode state, pointer-shape recovery over **both code and data** segments, with pointer tables read as tables; 21,495 functions, 83.3% of `.text` covered | ✅ Complete |
-| **5 — Emitter** | ARM → readable C, literal folding, run-time dispatch, scalar VFP, wide branches. **Generated C compiles, links, and runs** | ✅ Complete |
-| **6 — Runtime & HLE** | Runtime landed; NID resolution 519/524 (99.0%); imports bound so every firmware call traps *by name*. `sceGxm` / `sceKernel` / `SceLibc` bodies outstanding | 🔨 In progress |
-
-**Translation rate on *Uncharted: Fight for Fortune*: 98.95% of instructions**,
-measured over the whole module — all 21,495 discovered functions, 1,837,610
-instructions. The rest emit named traps, never silence:
-
-```
-still trapping, by kind:
-  simd/vfp                      10716    0.58% of all instructions
-  ?                              3009    0.16%
-  ldm/stm                        1575    0.09%
-  branch: target not a function   1428    0.08%
-  misc                            902    0.05%
-  indirect transfer               788    0.04%
-  mla/mls                         507    0.03%
-  alu (ARM stub bodies)           504    0.03%
-  ldm/stm.w                       401    0.02%
-  svc / sys                       335    0.02%
-```
-
-NEON is the largest remaining bucket at 0.58%, and it is now what the *running*
-program stops on — everything before it in the boot path is translated. The
-`alu`/`svc` entries are the ARM bodies of the 524 firmware import stubs, which
-are meant to be replaced by HLE rather than translated. Breakdown in
-[docs/TRANSLATION.md](docs/TRANSLATION.md).
-
-The `sbfx`/`bfi` residue is deliberate: those 11 are extracts running off the
-end of the register, which is UNPREDICTABLE and comes from a linear sweep over
-literal pools. They trap rather than being clamped.
-
-**The whole module builds and runs.** All 21,495 functions — 135 MB of
-generated C — compile and link into a 39 MB executable. It loads the ELF's own
-segments into guest memory, registers the dispatch table, calls `module_start`,
-walks all 551 C++ static constructors, and reaches game code before stopping
-on a NEON instruction:
-
-```
-vitarecomp: untranslated instruction at 0x81293F06 (raw 0xEF800050): simd
-```
-
-Getting there needed the boot path complete: indirect transfers resolve through
-the same table as direct ones (functions and import stubs merged and sorted),
-because a module reaches firmware through pointers as well as through `BL` and
-`module_start` makes its very first firmware call that way; and a first batch of
-`SceLibc` — the C++/CRT init, the mem/str family, and a guest heap.
-
-> **Compiling at this scale:** each function becomes its own COMDAT section and
-> a COFF object indexes at most 65,535, so MSVC needs `/bigobj` on the generated
-> file. It is a count limit, not a size limit. `armrecomp emit` says so itself.
-
-## Documentation
-
-| Document | What It Covers |
-|----------|---------------|
-| **[Architecture](docs/ARCHITECTURE.md)** | The pipeline stage by stage: container, inflate, decode, discovery, emit, runtime. Address conventions, indirect dispatch, import binding, and why each runtime helper exists |
-| **[Translation](docs/TRANSLATION.md)** | Coverage figures, `ThumbExpandImm` and its traps, what is still trapping ranked by value, the NEON/VFP breakdown |
-| **[Corpus](docs/CORPUS.md)** | The 15 measured modules, the plaintext finding, the `ET_SCE_EXEC` → `ET_SCE_RELEXEC` era split and why it makes the launch window the hard case |
-| **[Decryption](docs/DECRYPT.md)** | The SELF container, what is encrypted and what is not, and why the QA corpus needs no keys |
-| **[HLE](docs/HLE.md)** | The firmware surface, measured, and the order of work |
-| **[Lessons](docs/LESSONS.md)** | Corrections and bugs found by running rather than reasoning: `MOVT`, the wrong dominant-instruction-set metric, the SIMD undercount, the PS3-layout SELF header |
-| **[Roadmap](docs/ROADMAP.md)** | The six phases, checked off against what actually runs |
-
-## Getting Started
-
-> **Prerequisites**: CMake and a C compiler (MSVC on Windows; gcc/clang
-> elsewhere). The core has **no external dependencies** — a fresh clone builds
-> with nothing installed.
-
-```powershell
-git clone https://github.com/sp00nznet/vitarecomp.git
-cd vitarecomp
-
-cmake -S . -B build
-cmake --build build --config Release
-ctest --test-dir build -C Release
-# -> build/tools/armrecomp/Release/armrecomp.exe
-# -> the vitarecomp runtime static library
-```
+## The tool
 
 ```
 armrecomp info     <file>                       identify a module, report its structure
@@ -205,94 +81,45 @@ armrecomp discover <elf>                        function discovery
 armrecomp emit     <elf> <out.c> <n> [nid-db]   translate to C
 ```
 
-`info` accepts a SELF (`eboot.bin`, `*.suprx`) or a plain ELF/velf. The optional
-NID database is a path to
-[vita-headers](https://github.com/vitasdk/vita-headers) `db/360` — **loaded at
-run time, not vendored**: bundling it would be permitted, but it is data, and
-keeping it external means the toolkit carries no third-party source and a newer
-database needs no rebuild.
+`nid-db` is a directory from vita-headers, for example `external/vita-headers/db/360`.
 
-## Picking a Title
+## Inputs
 
-The toolkit is the product; a game brought up on it lives in its own repo
-consuming this one as a submodule. Selection criteria, all measurable before
-committing:
-
-1. **A QA/prototype build exists** — plaintext segments, no keys, no PFS.
-2. **Small `.text`** — less to reach full decode coverage on.
-3. **2D** — `sceGxm` is the deepest part of phase 6; a title that leans on it
-   lightly gets to "runs" sooner.
-4. **Low NEON density** — `armrecomp cover` reports it.
-
-| Title | Why | Status |
+| Source | Container | What is needed |
 |---|---|---|
-| ***Uncharted: Fight for Fortune*** (2012-11-01) | 5.6 MB `.text`, `ET_SCE_EXEC`, a turn-based card game — light on `sceGxm` | 21,495 functions emitted, **98.95% translated**, 18,563 firmware calls bound; runs into game code |
+| Homebrew `.vpk` / `eboot.bin` (vita-make-fself) | SELF, plaintext zlib segments | nothing |
+| QA / prototype builds | SELF, plaintext zlib segments | nothing |
+| Retail, decrypted on a console with FAGDec (the Vita3K input format) | plain SCE ELF | a dump you made from a game you own |
+| Retail NoNpDrm dumps | PFS + SELF | out of scope: refused by name |
 
-## Relationship to Other Projects
+No game data, keys, or decryption code are in this repo, now or later.
 
-| Project | License | How it is used |
+## Documentation
+
+| Document | Covers |
+|---|---|
+| [docs/PLAN.md](docs/PLAN.md) | What is done, what is next, in order, with the first milestone named |
+| [docs/PRIOR-ART.md](docs/PRIOR-ART.md) | Every related project found: Vita, ARM/Thumb recomps, Vita3K, loaders, databases |
+| [docs/VITA3K-REFERENCE.md](docs/VITA3K-REFERENCE.md) | Where in Vita3K each fact lives: loader, relocations, HLE bridge, shader recompiler, NID table |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Open decisions with recommendations: licence boundary, retail inputs, host graphics API |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Upstream: the pipeline stage by stage |
+| [docs/TRANSLATION.md](docs/TRANSLATION.md) | Upstream: coverage figures and what still traps |
+| [docs/CORPUS.md](docs/CORPUS.md) | Upstream: 15 measured modules, the static/relocatable era split |
+| [docs/DECRYPT.md](docs/DECRYPT.md) | Upstream: the SELF container and why QA builds need no keys |
+| [docs/HLE.md](docs/HLE.md) | Upstream: the firmware surface, measured |
+| [docs/LESSONS.md](docs/LESSONS.md) | Upstream: bugs found by running rather than reasoning |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Upstream: the six phases as they stood on 2026-08-20 |
+
+## Relationship to other projects
+
+| Project | Licence | Use |
 |---|---|---|
-| [vita-headers](https://github.com/vitasdk/vita-headers) | MIT | The NID database — the published mapping from import NIDs to function names. The reference for the HLE work list. |
-| [VitaSDK](https://github.com/vitasdk) | MIT | Headers and the published ABI for `sceGxm` / `sceKernel` / `sceCtrl`. |
-| **[Vita3K](https://github.com/Vita3K/Vita3K)** | **GPLv2** | **Oracle only** — run as a separate process and compared against. No code copied, linked, or vendored. |
-| [psprecomp](https://github.com/sp00nznet/psprecomp) | MIT | Sibling project for PSP. Same "`module_start` is not the program" shape, same oracle arrangement with PPSSPP. |
-| [ps3recomp](https://github.com/sp00nznet/ps3recomp) | MIT | Sibling project for PS3. Same project structure and conventions. |
+| [sp00nznet/vitarecomp](https://github.com/sp00nznet/vitarecomp) | MIT | The base of this repo; `git remote upstream` |
+| [vitasdk/vita-headers](https://github.com/vitasdk/vita-headers) | MIT | NID database, loaded at run time |
+| [vitasdk/vita-toolchain](https://github.com/vitasdk/vita-toolchain) | MIT | Reference for `sce_module_info`, import/export and process-param layouts |
+| [Vita3K/Vita3K](https://github.com/Vita3K/Vita3K) | GPLv2 | Reference and oracle only; nothing copied, linked or vendored |
 
-**Vita3K's license is the constraint that most shapes the runtime.** It is
-GPLv2, so the usual "chop the emulator into a link library" move is not
-available if the toolkit is to stay MIT — and the part you would most want from
-it (the `sceGxm` and kernel HLE) is exactly the part you would be tempted to
-vendor. There is no LGPL escape either: the arrangement that works for
-[xboxrecomp](https://github.com/sp00nznet/xboxrecomp), extracting LGPL-2.1
-components from xemu, depends on QEMU deliberately dual-tracking its hardware
-model under LGPL so it can be embedded. Vita3K has no equivalent.
+## Licence
 
-What does carry over is everything else — independently implemented algorithms
-with credit, and functional facts (NIDs, struct layouts, enum values, calling
-conventions) which are not copyrightable and are most of what the shallow work
-needs.
-
-*Licenses above are the working understanding and are re-checked before any code
-or data from a project is actually used.*
-
-## Contributing
-
-The gaps are named and ranked, which makes them pick-up-able:
-
-- **NEON** — ~1,300 instructions, the only genuinely hard piece left in the emitter
-- **Branch-target promotion** — a discovery fix, 0.65%
-- **`SceLibc` / `SceLibm`** — 72 of 96 left, largely host-forwardable
-- **Data-segment pointer recovery** — 551 static constructors are invisible to
-  discovery because shape recovery only scans the executable segment
-- **`sceGxm`** — ~85 shallow state setters, then the scene pipeline
-- **GXP shader translation** — a compiler, and the largest single piece
-- **A true negative for the corpus** — a module known to be encrypted, that the
-  parser correctly refuses
-
-## Credits & References
-
-All code here is original, but it stands on a great deal of prior
-reverse-engineering. With thanks to:
-
-- **[VitaSDK / vita-headers](https://github.com/vitasdk)** — the MIT-licensed
-  homebrew SDK and the NID database, without which the import table is just
-  hashes.
-- **[Vita3K](https://github.com/Vita3K/Vita3K)** — the best public description
-  of Vita behaviour that exists. Used as a behavioural oracle and as
-  documentation. **Reference only; no code copied.**
-- The **Vita homebrew and reverse-engineering community**, whose published work
-  on the SELF format, the module info structures and the NID scheme is what
-  makes any of this tractable.
-
-## Legal
-
-This project contains no proprietary Sony code, encryption keys, or copyrighted
-material. It provides clean-room implementations of system library interfaces
-based on publicly documented behaviour. Running a game requires a dump that
-**you** own. Key derivation, key extraction, and the PFS layer are out of scope,
-now and later.
-
-## License
-
-MIT — see [LICENSE](LICENSE). Independent, non-commercial preservation work; not
-affiliated with or endorsed by Sony Interactive Entertainment.
+MIT, inherited from upstream; see [LICENSE](LICENSE). Not affiliated with or
+endorsed by Sony Interactive Entertainment. Bring your own game.

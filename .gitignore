@@ -1,10 +1,21 @@
 build/
+build-*/
 out/
 *.obj
 *.exe
 *.lib
 *.pdb
 *.ilk
+.vs/
+CMakeUserPresets.json
+__pycache__/
+
+# Local notes and tool-specific files are never tracked
+*.local.md
+
+# Fetched by tools/fetch-deps.sh: the NID database and test inputs
+external/
+fixtures/
 
 # --- no game data, ever -------------------------------------------------------
 # The recompiler is the product; the game is yours. Nothing below is ever
@@ -32,5 +43,5 @@ modules/
 keys/
 !docs/vita_keys.example.txt
 
-# Generated recompiler output — millions of lines, rebuilt from your own dump.
+# Generated recompiler output: millions of lines, rebuilt from your own dump.
 generated/

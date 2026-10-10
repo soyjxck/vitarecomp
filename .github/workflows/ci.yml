@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Fetch NID database and fixture
+        shell: bash
+        run: tools/fetch-deps.sh
+
+      - name: Smoke run on the fixture
+        shell: bash
+        run: |
+          build_dir=build
+          if [ -x build/tools/armrecomp/Release/armrecomp.exe ]; then
+            mkdir -p build/smoke/tools/armrecomp
+            cp build/tools/armrecomp/Release/armrecomp.exe build/smoke/tools/armrecomp/
+            build_dir=build/smoke
+          fi
+          tools/smoke.sh "$build_dir"
