@@ -18,6 +18,8 @@ QA build to retail titles.
 | Build (MSVC 14.50, CMake 4.3, Ninja) | `armrecomp.exe` + `vitarecomp.lib` build clean |
 | `ctest` | 4 / 4 suites pass (container, inflate, decode, runtime) |
 | `armrecomp info / extract / cover` on VitaShell 2.02 `eboot.bin` (homebrew, no keys) | 3 segments inflated, Adler-32 ok, ELF 4,882,182 bytes as declared; Thumb-2 dominant, 0.22 % unknown, 2.01 % SIMD |
+| `armrecomp discover` on the same module (`ET_SCE_RELEXEC`, 2.56 MB `.text`) | 8,074 functions (4,523 from seeds, 3,551 from shape), 65.3 % of the segment covered, 1,915 unresolved indirect sites; no relocation seeding yet |
+| `armrecomp funcs` against vita-headers `db/360` (156 files, 9,596 names) | 294 imports across 40 libraries, 287 resolved (97.6 %); `SceGxm` alone is 57 of them |
 
 Upstream's last measurement on *Uncharted: Fight for Fortune* (a QA build):
 98.95 % of 1.8 M instructions translated, the whole module compiles to a 39 MB
