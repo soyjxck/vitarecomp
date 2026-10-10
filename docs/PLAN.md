@@ -142,9 +142,9 @@ What the measurement says about a flagship launch title:
 | Discovery | 70,967 functions (60,093 from seeds, 10,874 from shape), 75.0 % covered, 416 jump tables, 30,291 unresolved indirect sites |
 | Imports | 618 functions across 42 libraries, 585 named (94.7 %) |
 | Largest libraries | SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34, SceCommonDialog 27, SceNet 22, SceMp4 19, SceUlt 18 |
-| Discovery, second pass | GA_DISC functions: 19,222 more than before, from MOVW/MOVT pairs that build a Thumb address in a register; GA_WEAK weak pointer targets (no prologue, no table) walked but not roots, 621 of them promoted by a clean body |
-| Emit, whole module | GA_FUNCS functions emitted, the closure of entry point, exports and stored pointers under calls and tail calls; GA_INSNS M instructions, **GA_PCT % translated**, GA_MB MB of C. Before the reachability pass every discovered function was emitted: 13.07 M instructions at 99.7 %, 1.12 GB of C, four copies of every distinct instruction (96.23 % translated before milestone B's census pass) |
-| What traps | GA_TRAPS instructions: branches to addresses discovery never registered, and the last NEON forms |
+| Discovery, second pass | 77,455 functions: 19,222 more than before, from MOVW/MOVT pairs that build a Thumb address in a register; 7,322 weak pointer targets (no prologue, no table) walked but not roots, 621 of them promoted by a clean body |
+| Emit, whole module | 23,436 functions emitted, the closure of entry point, exports and stored pointers under calls and tail calls; 2.04 M instructions, **99.98 % translated**, 194 MB of C in 12 parts. Before the reachability pass every discovered function was emitted: 13.07 M instructions at 99.7 %, 1.12 GB of C, four copies of every distinct instruction (96.23 % translated before milestone B's census pass) |
+| What traps | 455 instructions: branches to addresses discovery never registered, and the last NEON forms |
 | Thread-local image | 84 bytes initialised of 1,140 per thread; the runtime builds each thread's block as the console does (0x800 bytes of kernel slots, then the image) |
 
 So the shape is the one upstream predicted for the launch window: no
@@ -192,7 +192,7 @@ stays game-agnostic.
   writes only the functions an entry point, an export or a stored pointer
   can reach, directly or through calls and tail calls (docs/ARCHITECTURE.md,
   "Only what can run is emitted"). *Golden Abyss* went from 1.12 GB of C to
-  GA_MB MB, VitaShell from 7.28 M emitted instructions to 4.47 M, the hello
+  194 MB, VitaShell from 7.28 M emitted instructions to 4.47 M, the hello
   sample from 94,005 to 15,705, all three still running or translating as
   before. Still open: a walk that falls through a call that never returns
   (`exit`, `abort`, `sceKernelExitProcess`) into whatever follows; and the

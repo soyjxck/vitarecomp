@@ -362,7 +362,7 @@ and non-local branches of their bodies, and writes nothing else. A function
 reached only by a branch its caller inlines is a copy; one reached only from
 data the linear sweep read as a `bl` is nothing at all. The hello sample
 dropped from 94,005 emitted instructions to 15,705 and runs the same; the
-retail title from 1.12 GB to GA_MB MB.
+retail title from 1.12 GB to 194 MB.
 
 Two things went wrong on the way, both found by running rather than reading.
 
