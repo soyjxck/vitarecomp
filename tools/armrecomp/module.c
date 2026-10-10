@@ -145,14 +145,19 @@ int vm_parse(const vm_image *img, uint32_t entry, vm_module *out,
             read_name_va(img, r32(e + 0x14), im->name, sizeof(im->name));
             im->func_nid_table   = r32(e + 0x1C);
             im->func_entry_table = r32(e + 0x20);
+            im->var_nid_table    = r32(e + 0x24);
+            im->var_entry_table  = r32(e + 0x28);
         } else {
             im->library_nid      = r32(e + 0x0C);
             read_name_va(img, r32(e + 0x10), im->name, sizeof(im->name));
             im->func_nid_table   = r32(e + 0x14);
             im->func_entry_table = r32(e + 0x18);
+            im->var_nid_table    = r32(e + 0x1C);
+            im->var_entry_table  = r32(e + 0x20);
         }
 
         out->total_func_imports += im->num_funcs;
+        out->total_var_imports  += im->num_vars;
         out->import_count++;
         p += size;
     }
@@ -193,6 +198,56 @@ int vm_parse(const vm_image *img, uint32_t entry, vm_module *out,
         qsort(out->stubs, out->stub_count, sizeof(vm_stub), stub_cmp);
     }
 
+    /* --- the variables ---------------------------------------------------- */
+    /*
+     * The same parallel arrays as the functions, but an entry names a block
+     * rather than a stub: a header word whose bits 4..27 give the block's
+     * size in bytes, header included, then two-word relocation entries, the
+     * ARM relocation code in bits 8..15 of the first and the offset into the
+     * executable segment in the second, and the addend in bits 16..27 of
+     * the first. The retail module uses three codes: ABS32 with an addend
+     * of 8 for the vtable pointers in its RTTI objects (past the vtable's
+     * two-word header), and the THM_MOVW_ABS_NC / THM_MOVT_ABS pair, addend
+     * 0, for the instructions that build a variable's address.
+     */
+    if (out->total_var_imports) {
+        out->vars = (vm_var *)calloc(out->total_var_imports, sizeof(vm_var));
+        if (!out->vars) return fail(err, errsz, "out of memory");
+
+        for (int i = 0; i < out->import_count; i++) {
+            const vm_import *im = &out->imports[i];
+            if (!im->num_vars) continue;
+            const uint8_t *nt = vm_va(img, im->var_nid_table,   (uint32_t)im->num_vars * 4);
+            const uint8_t *et = vm_va(img, im->var_entry_table, (uint32_t)im->num_vars * 4);
+            if (!nt || !et) continue;
+
+            for (uint32_t k = 0; k < im->num_vars; k++) {
+                if (out->var_count >= out->total_var_imports) break;
+                vm_var *v = &out->vars[out->var_count];
+                v->lib_nid = im->library_nid;
+                v->var_nid = r32(nt + k * 4);
+                v->stub    = r32(et + k * 4);
+
+                const uint8_t *hdr = vm_va(img, v->stub, 4);
+                uint32_t bytes = hdr ? (r32(hdr) >> 4) & 0x00FFFFFFu : 0;
+                uint32_t n = bytes >= 4 ? (bytes - 4) / 8 : 0;
+                const uint8_t *body = n ? vm_va(img, v->stub + 4, n * 8) : NULL;
+                if (body) {
+                    v->sites = (vm_var_site *)calloc(n, sizeof(vm_var_site));
+                    for (uint32_t s = 0; v->sites && s < n; s++) {
+                        uint32_t a = r32(body + s * 8), off = r32(body + s * 8 + 4);
+                        if (off >= img->seg_len) continue;      /* not in the code: ignored */
+                        v->sites[v->site_count].addr   = img->seg_vaddr + off;
+                        v->sites[v->site_count].addend = (a >> 16) & 0xFFFu;
+                        v->sites[v->site_count].code   = (uint8_t)((a >> 8) & 0xFF);
+                        v->site_count++;
+                    }
+                }
+                out->var_count++;
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -201,6 +256,10 @@ void vm_free(vm_module *m) {
     free(m->stubs);
     m->stubs = NULL;
     m->stub_count = 0;
+    for (uint32_t i = 0; i < m->var_count; i++) free(m->vars[i].sites);
+    free(m->vars);
+    m->vars = NULL;
+    m->var_count = 0;
 }
 
 const vm_stub *vm_find_stub(const vm_module *m, uint32_t addr) {

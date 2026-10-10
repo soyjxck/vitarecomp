@@ -42,6 +42,8 @@ typedef struct {
 struct nid_db {
     nid_entry *funcs;
     size_t     nfuncs, cfuncs;
+    nid_entry *vars;           /* a library's exported variables, same shape */
+    size_t     nvars, cvars;
     lib_entry *libs;
     size_t     nlibs, clibs;
 };
@@ -54,6 +56,17 @@ static void add_func(nid_db *db, uint32_t lib, uint32_t fn, const char *name) {
     nid_entry *e = &db->funcs[db->nfuncs++];
     e->lib_nid = lib;
     e->func_nid = fn;
+    snprintf(e->name, sizeof(e->name), "%s", name);
+}
+
+static void add_var(nid_db *db, uint32_t lib, uint32_t var, const char *name) {
+    if (db->nvars == db->cvars) {
+        db->cvars = db->cvars ? db->cvars * 2 : 256;
+        db->vars = (nid_entry *)realloc(db->vars, db->cvars * sizeof(nid_entry));
+    }
+    nid_entry *e = &db->vars[db->nvars++];
+    e->lib_nid = lib;
+    e->func_nid = var;
     snprintf(e->name, sizeof(e->name), "%s", name);
 }
 
@@ -105,6 +118,7 @@ static void parse_file(nid_db *db, const char *path, int *entries) {
     char cur_lib_name[64] = {0};
     uint32_t cur_lib_nid = 0;
     int in_functions = 0;
+    int in_variables = 0;
     int lib_indent = -1;
 
     while (fgets(line, sizeof(line), f)) {
@@ -116,16 +130,18 @@ static void parse_file(nid_db *db, const char *path, int *entries) {
          * `libraries:`. Its own nid arrives on a following line. */
         if (val[0] == '\0') {
             if (strcmp(key, "libraries") == 0) { lib_indent = ind + 2; continue; }
-            if (strcmp(key, "functions") == 0) { in_functions = 1; continue; }
+            if (strcmp(key, "functions") == 0) { in_functions = 1; in_variables = 0; continue; }
+            if (strcmp(key, "variables") == 0) { in_variables = 1; in_functions = 0; continue; }
             if (lib_indent >= 0 && ind == lib_indent) {
                 snprintf(cur_lib_name, sizeof(cur_lib_name), "%s", key);
                 cur_lib_nid = 0;
                 in_functions = 0;
+                in_variables = 0;
             }
             continue;
         }
 
-        if (!in_functions && strcmp(key, "nid") == 0 && cur_lib_name[0]) {
+        if (!in_functions && !in_variables && strcmp(key, "nid") == 0 && cur_lib_name[0]) {
             cur_lib_nid = (uint32_t)strtoul(val, NULL, 0);
             if (cur_lib_nid) add_lib(db, cur_lib_nid, cur_lib_name);
             continue;
@@ -134,6 +150,10 @@ static void parse_file(nid_db *db, const char *path, int *entries) {
         if (in_functions && cur_lib_nid) {
             uint32_t fn = (uint32_t)strtoul(val, NULL, 0);
             if (fn) { add_func(db, cur_lib_nid, fn, key); (*entries)++; }
+        }
+        if (in_variables && cur_lib_nid) {
+            uint32_t vn = (uint32_t)strtoul(val, NULL, 0);
+            if (vn) { add_var(db, cur_lib_nid, vn, key); (*entries)++; }
         }
     }
 
@@ -180,8 +200,19 @@ nid_db *nid_db_load(const char *dir, int *files_loaded, int *entries_loaded) {
 void nid_db_free(nid_db *db) {
     if (!db) return;
     free(db->funcs);
+    free(db->vars);
     free(db->libs);
     free(db);
+}
+
+const char *nid_var_name(const nid_db *db, uint32_t lib_nid, uint32_t var_nid) {
+    if (!db) return NULL;
+    for (size_t i = 0; i < db->nvars; i++)
+        if (db->vars[i].func_nid == var_nid && db->vars[i].lib_nid == lib_nid)
+            return db->vars[i].name;
+    for (size_t i = 0; i < db->nvars; i++)
+        if (db->vars[i].func_nid == var_nid) return db->vars[i].name;
+    return NULL;
 }
 
 const char *nid_func_name(const nid_db *db, uint32_t lib_nid, uint32_t func_nid) {

@@ -9,6 +9,9 @@
 #include "vitarecomp/recomp_rt.h"
 #include "vitarecomp/dispatch.h"
 #include "vitarecomp/hle.h"
+#include "vitarecomp/host.h"
+#include "../src/hle_format.h"
+#include <string.h>
 
 #include <assert.h>
 #include <stdio.h>
@@ -19,6 +22,62 @@
 void vita_host_vblank(void) { }
 uint32_t vita_host_buttons(void) { return 0; }
 void vita_host_exit(int status) { exit(status); }
+
+/* The generated code's variable-import table, with one entry the test binds:
+ * the C library's lowercase table, read through a word at 0x81001000. */
+static uint32_t g_var_tolotab;
+static const vita_var_site g_var_words[] = { { 0x81001000u, 0u }, { 0x81001004u, 8u } };
+const vita_var_import vita_var_imports[] = {
+    { 0xBE43BB07u, 0xD662E07Cu, "SceLibc::_Tolotab", &g_var_tolotab, g_var_words, 2u },
+};
+const uint32_t vita_var_import_count = 1u;
+
+static void test_scanf(void) {
+    assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
+    const char *text = "947.2009911,-100 947.1035061,-99.2 TAP,TAP,1,0,1,,0.1 0x1F end";
+    const char *fmt  = "%f,%f %f,%f %[^,],%[^,],%d,%d,%d,,%f %i %s";
+    for (uint32_t i = 0; text[i]; i++) vita_write8(0x81001000u + i, (uint8_t)text[i]);
+    vita_write8(0x81001000u + (uint32_t)strlen(text), 0);
+    for (uint32_t i = 0; fmt[i]; i++) vita_write8(0x81001200u + i, (uint8_t)fmt[i]);
+    vita_write8(0x81001200u + (uint32_t)strlen(fmt), 0);
+    /* the va_list: twelve pointers in guest memory */
+    uint32_t args = 0x81001400u, out = 0x81001500u;
+    for (uint32_t i = 0; i < 12; i++) vita_write32(args + 4 * i, out + 0x20 * i);
+    vita_vargs v = { 0, 0, args };
+    int n = vita_guest_vscanf(0x81001000u, 0x81001200u, &v);
+    assert(n == 12);
+    union { float f; uint32_t u; } f0, f1, f2, f3, f9;
+    f0.u = vita_read32(out); f1.u = vita_read32(out + 0x20); f2.u = vita_read32(out + 0x40); f3.u = vita_read32(out + 0x60);
+    assert(f0.f > 947.2f && f0.f < 947.21f && f1.f == -100.0f && f2.f > 947.1f && f2.f < 947.11f && f3.f == -99.2f);
+    assert(vita_read8(out + 0x80) == 'T' && vita_read8(out + 0x83) == 0);
+    assert(vita_read8(out + 0xA0) == 'T');
+    assert(vita_read32(out + 0xC0) == 1 && vita_read32(out + 0xE0) == 0 && vita_read32(out + 0x100) == 1);
+    f9.u = vita_read32(out + 0x120);
+    assert(f9.f > 0.09f && f9.f < 0.11f);
+    assert(vita_read32(out + 0x140) == 0x1F);
+    assert(vita_read8(out + 0x160) == 'e' && vita_read8(out + 0x163) == 0);
+    /* input exhausted before the first conversion: EOF */
+    vita_write8(0x81001000u, 0);
+    v.mem = args;
+    assert(vita_guest_vscanf(0x81001000u, 0x81001200u, &v) == -1);
+    printf("  scanf                          ok\n");
+}
+
+static void test_var_imports(void) {
+    assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
+    vita_memblock_init(0x81008000u, 0x8000u);
+    vita_write32(0x81001000u, 0x12345678u);           /* the placeholder */
+    vita_vars_bind();
+    assert(g_var_tolotab != 0);
+    assert(vita_read32(0x81001000u) == g_var_tolotab);
+    assert(vita_read32(0x81001004u) == g_var_tolotab + 8);   /* a vtable pointer's addend */
+    uint32_t tab = vita_read32(g_var_tolotab);         /* the short * the variable holds */
+    assert((int16_t)vita_read16(tab + 2u * 'A') == 'a');
+    assert((int16_t)vita_read16(tab + 2u * 'z') == 'z');
+    assert((int16_t)vita_read16(tab + 2u * '/') == '/');
+    assert((int16_t)vita_read16(tab - 2u) == -1);       /* EOF, one before the table */
+    printf("  variable imports                ok\n");
+}
 
 #ifdef NDEBUG
 #error "tests must be built with asserts enabled (NDEBUG is defined)"
@@ -367,6 +426,11 @@ static void test_parallel(void) {
     assert(vita_revsh(0x000080FFu) == 0xFFFFFF80u);
     assert(vita_revsh(0x0000017Fu) == 0x00007F01u);
 
+    assert(vita_sxtb16(0x00FF0080u) == 0xFFFFFF80u);
+    assert(vita_sxtb16(0x007F0001u) == 0x007F0001u);
+    assert(vita_uxtb16(0x12345678u) == 0x00340078u);
+    assert(vita_add16(0xFFFF0001u, 0x00010001u) == 0x00000002u);
+
     printf("  uadd8/usub8/sel, clz/rbit/rev   ok\n");
 }
 
@@ -484,6 +548,25 @@ static void test_neon_more(void) {
     printf("  neon lanes (float, misc, ext)   ok\n");
 }
 
+static void test_neon_structures(void) {
+    assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
+    assert(vita_neon_set_lane(0x1111111111111111ull, 2, 0xAB, 8) == 0x1111111111AB1111ull);
+    assert(vita_neon_set_lane(0, 1, 0xDEADBEEF, 32) == 0xDEADBEEF00000000ull);
+    /* vld2.8 {d0, d1}: even bytes to d0, odd to d1; vst2 puts them back */
+    for (uint32_t i = 0; i < 16; i++) vita_write8(0x81002000u + i, (uint8_t)i);
+    vita_neon_ldn(2, 0, 1, 1, 0x81002000u, 8);
+    assert(vita_d_get(0) == 0x0E0C0A0806040200ull);
+    assert(vita_d_get(1) == 0x0F0D0B0907050301ull);
+    vita_neon_stn(2, 0, 1, 1, 0x81002100u, 8);
+    for (uint32_t i = 0; i < 16; i++) assert(vita_read8(0x81002100u + i) == (uint8_t)i);
+    /* vld4.32 {d0, d2, d4, d6}: words 0,4 to d0; 1,5 to d2; ... */
+    for (uint32_t i = 0; i < 8; i++) vita_write32(0x81002200u + 4 * i, 0x100 + i);
+    vita_neon_ldn(4, 0, 2, 1, 0x81002200u, 32);
+    assert(vita_d_get(0) == 0x0000010400000100ull && vita_d_get(2) == 0x0000010500000101ull);
+    assert(vita_d_get(4) == 0x0000010600000102ull && vita_d_get(6) == 0x0000010700000103ull);
+    printf("  neon structure loads           ok\n");
+}
+
 static void test_neon_shifts(void) {
     assert(vita_neon_shl(0x0000000100000001ull, 32, 4) == 0x0000001000000010ull);
     assert(vita_neon_shl(0x00000000000000FFull, 8, 4) == 0x00000000000000F0ull);
@@ -561,7 +644,10 @@ int main(void) {
     test_neon();
     test_neon_more();
     test_neon_shifts();
+    test_neon_structures();
     test_memory();
+    test_var_imports();
+    test_scanf();
     printf("all runtime tests passed\n");
     return 0;
 }

@@ -919,6 +919,9 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
            st.insns ? 100.0 * st.trapped / st.insns : 0.0);
     printf("  literals      %u  folded to constants\n", st.literals);
     printf("  import calls  %u  bound to firmware\n", st.import_calls);
+    if (st.var_imports)
+        printf("  var imports   %u  variables bound at load, read at %u sites\n",
+               st.var_imports, st.var_refs);
     if (st.stub_shadowed)
         printf("  stubs shadowed %u  discovered as functions, routed as imports\n",
                st.stub_shadowed);

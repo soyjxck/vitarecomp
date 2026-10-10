@@ -69,6 +69,7 @@ typedef enum {
     OP_TBB, OP_TBH,     /* jump through a byte/halfword table at PC          */
     OP_ADR,
     OP_SXTB, OP_SXTH, OP_UXTB, OP_UXTH, OP_REV,
+    OP_SXTB16, OP_UXTB16,   /* both bytes of a halfword pair, each extended   */
     OP_REV16, OP_REVSH, OP_RBIT, OP_CLZ,
     OP_UADD8, OP_USUB8, OP_SEL,         /* byte-parallel, through the GE bits   */
     OP_IT, OP_NOP, OP_SVC, OP_CBZ, OP_CBNZ,
@@ -108,6 +109,14 @@ typedef enum {
     OP_NEON_SET32,      /* vd[imm] = rt                                     */
     OP_NEON_GET32,      /* rt = vn[imm]                                     */
     OP_NEON_LD1, OP_NEON_ST1,  /* imm registers from/to [rn], rm as ARM has it */
+    /* The structure forms. imm is the structure size n (elements per
+     * structure, one register each); bf_lsb the register spacing (1 or 2);
+     * bf_width the register count for LD_ALL (VLD1 with T loads two) or
+     * the group count for LDN/STN (VLD2 with four registers is two groups);
+     * neon_size the element width. The lane forms keep the lane in imm64. */
+    OP_NEON_LD_ALL,            /* one element of each register, to every lane */
+    OP_NEON_LD_LANE, OP_NEON_ST_LANE,
+    OP_NEON_LDN, OP_NEON_STN,  /* interleaved structures, de-interleaved      */
     OP_NEON_DUP_LANE,   /* every lane from lane imm of vm                   */
     OP_NEON_EXT,        /* bytes imm.. of the pair vm:vn, vn the low half   */
     OP_NEON_SWP,
@@ -136,6 +145,16 @@ typedef enum {
 /* Shift types, in the architecture's encoding order. */
 typedef enum { SH_LSL = 0, SH_LSR = 1, SH_ASR = 2, SH_ROR = 3 } arm_shift;
 
+#define ARM_COND_EQ 0x0
+#define ARM_COND_NE 0x1
+#define ARM_COND_CS 0x2
+#define ARM_COND_CC 0x3
+#define ARM_COND_HI 0x8
+#define ARM_COND_LS 0x9
+#define ARM_COND_GE 0xA
+#define ARM_COND_LT 0xB
+#define ARM_COND_GT 0xC
+#define ARM_COND_LE 0xD
 #define ARM_COND_AL 0xE
 #define ARM_NO_REG  (-1)
 
@@ -214,5 +233,14 @@ int arm_decode(const uint8_t *code, uint32_t code_addr, uint32_t code_len,
 uint32_t arm_table_count(const arm_insn *prev, uint32_t nprev, const arm_insn *tb);
 uint32_t arm_table_targets(const uint8_t *code, uint32_t code_addr, uint32_t code_len,
                            const arm_insn *tb, uint32_t count, uint32_t *out, uint32_t max);
+
+/* A guard that branches TO its table (`cmp r0, #37; bls table`) is seen by
+ * the walk that reaches the table only as a label. arm_table_guard reads the
+ * compare behind a conditional branch and says what the branch's target
+ * knows: the register and its largest valid value. arm_table_seed builds the
+ * compare that walk puts at the head of its window. */
+int  arm_table_guard(const arm_insn *prev, uint32_t nprev, const arm_insn *br,
+                     int8_t *reg, uint32_t *max);
+void arm_table_seed(arm_insn *out, int8_t reg, uint32_t max);
 
 #endif /* ARMRECOMP_DECODE_H */

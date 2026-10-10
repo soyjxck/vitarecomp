@@ -10,6 +10,7 @@
 
 #include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
+#include "sched.h"
 
 #define SCE_CTRL_ERROR_INVALID_ARG  0x80340001u
 #define SCE_CTRL_ERROR_INVALID_MODE 0x80340022u
@@ -55,3 +56,15 @@ void vita_hle_sceCtrlPeekBufferPositive(void) {
     }
     r0 = count;
 }
+
+/* int sceCtrlReadBufferPositive(int port, SceCtrlData *pad_data, int count): the
+ * blocking form waits for a fresh sample, one per frame; here the other
+ * threads get a turn, which is what the wait was for. */
+void vita_hle_sceCtrlReadBufferPositive(void) {
+    vita_hle_sceCtrlPeekBufferPositive();
+    vita_sched_yield();
+}
+void vita_hle_sceCtrlReadBufferPositive2(void)   { vita_hle_sceCtrlReadBufferPositive(); }
+void vita_hle_sceCtrlReadBufferPositiveExt(void) { vita_hle_sceCtrlReadBufferPositive(); }
+void vita_hle_sceCtrlPeekBufferPositive2(void)   { vita_hle_sceCtrlPeekBufferPositive(); }
+void vita_hle_sceCtrlPeekBufferPositiveExt(void) { vita_hle_sceCtrlPeekBufferPositive(); }

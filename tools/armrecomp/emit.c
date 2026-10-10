@@ -154,8 +154,21 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
     int sp_ = 0;
     stack[sp_++] = fn->addr;
 
+    /* Guards that branch to their table, as in discovery's walk. */
+    struct { uint32_t addr; int8_t reg; uint32_t max; } guard[256];
+    uint32_t nguard = 0;
+
     while (sp_ > 0 && b->n < MAX_INSNS_PER_FUNC) {
         uint32_t a = stack[--sp_];
+
+        /* The window a table branch looks back through is this walk's
+         * instructions, headed by the guard's compare when the walk starts
+         * at a guard's target. */
+        uint32_t walk0 = b->n;
+        arm_insn seed;
+        int seeded = 0;
+        for (uint32_t g = 0; g < nguard; g++)
+            if (guard[g].addr == a) { arm_table_seed(&seed, guard[g].reg, guard[g].max); seeded = 1; break; }
 
         /* IT state. The decoder is stateless, so the block structure is
          * applied here, where instructions are seen in order: after an IT,
@@ -213,8 +226,12 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
              * emitter can read the table again. Its targets are blocks of
              * this function. */
             if (in.cls == A_INDIRECT && (in.op == OP_TBB || in.op == OP_TBH)) {
-                uint32_t have = b->n < 4 ? b->n : 4;
-                uint32_t count = arm_table_count(b->v + (b->n - have), have, &in);
+                arm_insn win[17];
+                uint32_t have = b->n - walk0 < 16 ? b->n - walk0 : 16, nw = 0;
+                if (seeded) win[nw++] = seed;
+                memcpy(win + nw, b->v + (b->n - have), have * sizeof(arm_insn));
+                nw += have;
+                uint32_t count = arm_table_count(win, nw, &in);
                 uint32_t tg[256];
                 uint32_t nt = count ? arm_table_targets(text, base, img->seg_len, &in, count, tg, 256) : 0;
                 in.imm = nt ? count : 0;
@@ -255,6 +272,20 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
                 fb_label(b, in.target);
                 if (sp_ < (int)(sizeof(stack) / sizeof(stack[0])))
                     stack[sp_++] = in.target;
+                if (in.conditional && nguard < 256 && b->n > walk0) {
+                    /* The instructions of this walk before the branch,
+                     * which is already pushed. */
+                    uint32_t np = b->n - 1 - walk0;
+                    const arm_insn *pv = b->v + walk0;
+                    if (np > 16) { pv += np - 16; np = 16; }
+                    int8_t greg; uint32_t gmax;
+                    if (arm_table_guard(pv, np, &in, &greg, &gmax)) {
+                        guard[nguard].addr = in.target;
+                        guard[nguard].reg  = greg;
+                        guard[nguard].max  = gmax;
+                        nguard++;
+                    }
+                }
                 if (!in.conditional) break;          /* flow ends here */
             } else if (in.cls == A_BRANCH && !in.conditional) {
                 break;                               /* tail call */
@@ -444,6 +475,51 @@ static void hle_symbol(char *dst, size_t cap, const nid_db *db,
     else   snprintf(dst, cap, "vita_hle_nid_%08X", s->func_nid);
 }
 
+/* The C symbol for an imported variable: a host global holding the guest
+ * address the loader bound it to. */
+static void var_symbol(char *dst, size_t cap, const nid_db *db, const vm_var *v) {
+    const char *n = nid_var_name(db, v->lib_nid, v->var_nid);
+    if (n) snprintf(dst, cap, "vita_var_%s", n);
+    else   snprintf(dst, cap, "vita_var_nid_%08X", v->var_nid);
+}
+
+/* Every site in the code that an imported variable's address goes into,
+ * indexed by address. A MOVW/MOVT pair at one builds that address, so the
+ * emitter reads the symbol instead of folding the placeholder the image
+ * holds; a literal word at one is read the same way. */
+typedef struct { uint32_t addr; uint32_t var; uint8_t code; } vsite;
+static vsite   *g_vsites;
+static uint32_t g_nvsites;
+
+static int vsite_cmp(const void *a, const void *b) {
+    uint32_t x = ((const vsite *)a)->addr, y = ((const vsite *)b)->addr;
+    return x < y ? -1 : x > y;
+}
+static void vsites_build(const vm_module *mod) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < mod->var_count; i++) n += mod->vars[i].site_count;
+    g_vsites = n ? (vsite *)calloc(n, sizeof(vsite)) : NULL;
+    g_nvsites = 0;
+    if (!g_vsites) return;
+    for (uint32_t i = 0; i < mod->var_count; i++)
+        for (uint32_t s = 0; s < mod->vars[i].site_count; s++) {
+            g_vsites[g_nvsites].addr = mod->vars[i].sites[s].addr;
+            g_vsites[g_nvsites].var  = i;
+            g_vsites[g_nvsites].code = mod->vars[i].sites[s].code;
+            g_nvsites++;
+        }
+    qsort(g_vsites, g_nvsites, sizeof(vsite), vsite_cmp);
+}
+static const vsite *vsite_find(uint32_t addr) {
+    uint32_t lo = 0, hi = g_nvsites;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (g_vsites[mid].addr == addr) return &g_vsites[mid];
+        if (g_vsites[mid].addr < addr) lo = mid + 1; else hi = mid;
+    }
+    return NULL;
+}
+
 static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db,
                      const funcset *fs, const fbody *b,
                      const arm_insn *in, FILE *f, emit_stats *st) {
@@ -519,19 +595,50 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
 
     int ok = 1;
     switch (in->op) {
-        case OP_MOV:
+        case OP_MOV: {
+            /* A MOVW at a variable import's site builds the low half of an
+             * address the loader supplies; the immediate in the image is a
+             * placeholder. The symbol is read instead. */
+            const vsite *vs = in->has_imm ? vsite_find(in->addr) : NULL;
+            if (vs && vs->code == 0x2F) {
+                char vsym[96];
+                var_symbol(vsym, sizeof(vsym), db, &mod->vars[vs->var]);
+                uint32_t add = mod->vars[vs->var].sites[0].addend;   /* the site's own, below */
+                for (uint32_t s = 0; s < mod->vars[vs->var].site_count; s++)
+                    if (mod->vars[vs->var].sites[s].addr == in->addr) add = mod->vars[vs->var].sites[s].addend;
+                if (add) fprintf(f, "    %s = (%s + 0x%Xu) & 0x0000FFFFu;  /* imported variable */\n", reg_name(in->rd), vsym, add);
+                else     fprintf(f, "    %s = %s & 0x0000FFFFu;  /* imported variable */\n", reg_name(in->rd), vsym);
+                st->var_refs++;
+                break;
+            }
             operand2(o2, sizeof(o2), in);
             fprintf(f, "    %s = %s;\n", reg_name(in->rd), o2);
             if (in->sets_flags) fprintf(f, "    vita_flags_nz(%s);\n", reg_name(in->rd));
             break;
+        }
 
-        case OP_MOVT:
+        case OP_MOVT: {
+            const vsite *vs = vsite_find(in->addr);
+            if (vs && vs->code == 0x30) {
+                char vsym[96];
+                var_symbol(vsym, sizeof(vsym), db, &mod->vars[vs->var]);
+                uint32_t add = 0;
+                for (uint32_t s = 0; s < mod->vars[vs->var].site_count; s++)
+                    if (mod->vars[vs->var].sites[s].addr == in->addr) add = mod->vars[vs->var].sites[s].addend;
+                if (add) fprintf(f, "    %s = (%s & 0x0000FFFFu) | ((%s + 0x%Xu) & 0xFFFF0000u);  /* imported variable */\n",
+                                 reg_name(in->rd), reg_name(in->rd), vsym, add);
+                else     fprintf(f, "    %s = (%s & 0x0000FFFFu) | (%s & 0xFFFF0000u);  /* imported variable */\n",
+                                 reg_name(in->rd), reg_name(in->rd), vsym);
+                st->var_refs++;
+                break;
+            }
             /* Top half written, bottom half preserved. One line, and the
              * difference between a program that builds correct pointers and one
              * whose every constructed address is missing its high 16 bits. */
             fprintf(f, "    %s = (%s & 0x0000FFFFu) | 0x%08Xu;\n",
                     reg_name(in->rd), reg_name(in->rd), in->imm << 16);
             break;
+        }
 
         case OP_MVN:
             operand2(o2, sizeof(o2), in);
@@ -751,6 +858,47 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             }
             /* Rm = 13: advance by the bytes moved; another register: by it. */
             if (in->rm == 13)      fprintf(f, "    %s += %u;\n", rn, in->imm * 8);
+            else if (in->rm != 15) fprintf(f, "    %s += %s;\n", rn, reg_name(in->rm));
+            break;
+        }
+
+        case OP_NEON_LD_ALL: case OP_NEON_LD_LANE: case OP_NEON_ST_LANE: {
+            if (in->rn == 15) { ok = 0; trap(f, in, "vld/vst lane pc base"); break; }
+            const char *rn = reg_name(in->rn);
+            const char *rd = in->neon_size == 8 ? "vita_read8" : in->neon_size == 16 ? "vita_read16" : "vita_read32";
+            const char *wr = in->neon_size == 8 ? "vita_write8" : in->neon_size == 16 ? "vita_write16" : "vita_write32";
+            uint32_t bytes = in->neon_size / 8;
+            if (in->op == OP_NEON_LD_ALL) {
+                /* n elements, one per register; VLD1 with T loads one element
+                 * into two registers. */
+                for (uint32_t k = 0; k < in->bf_width; k++) {
+                    uint32_t e = in->imm == 1 ? 0 : k;
+                    fprintf(f, "    vita_d_set(%d, vita_neon_dup(%s(%s + %u), %u));\n",
+                            in->vd + (int)(k * in->bf_lsb), rd, rn, e * bytes, in->neon_size);
+                }
+            } else {
+                for (uint32_t k = 0; k < in->imm; k++) {
+                    int d = in->vd + (int)(k * in->bf_lsb);
+                    if (in->op == OP_NEON_LD_LANE)
+                        fprintf(f, "    vita_d_set(%d, vita_neon_set_lane(vita_d_get(%d), %u, %s(%s + %u), %u));\n",
+                                d, d, (unsigned)in->imm64, rd, rn, k * bytes, in->neon_size);
+                    else
+                        fprintf(f, "    %s(%s + %u, (uint%u_t)vita_neon_lane(vita_d_get(%d), %u, %u));\n",
+                                wr, rn, k * bytes, in->neon_size, d, (unsigned)in->imm64, in->neon_size);
+                }
+            }
+            if (in->rm == 13)      fprintf(f, "    %s += %u;\n", rn, in->imm * bytes);
+            else if (in->rm != 15) fprintf(f, "    %s += %s;\n", rn, reg_name(in->rm));
+            break;
+        }
+
+        case OP_NEON_LDN: case OP_NEON_STN: {
+            if (in->rn == 15) { ok = 0; trap(f, in, "vldn/vstn pc base"); break; }
+            const char *rn = reg_name(in->rn);
+            fprintf(f, "    %s(%u, %d, %u, %u, %s, %u);\n",
+                    in->op == OP_NEON_LDN ? "vita_neon_ldn" : "vita_neon_stn",
+                    in->imm, in->vd, in->bf_lsb, in->bf_width, rn, in->neon_size);
+            if (in->rm == 13)      fprintf(f, "    %s += %u;\n", rn, in->imm * in->bf_width * 8);
             else if (in->rm != 15) fprintf(f, "    %s += %s;\n", rn, reg_name(in->rm));
             break;
         }
@@ -992,6 +1140,16 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
              * code later. */
             if (in->rn == 15) {
                 uint32_t pc = (in->addr + 4) & ~3u;
+                /* A literal word the loader fills with an imported variable's
+                 * address holds a placeholder in the image. */
+                const vsite *vs = in->op == OP_LDR ? vsite_find(pc + in->imm) : NULL;
+                if (vs && vs->code == 2) {
+                    char vsym[96];
+                    var_symbol(vsym, sizeof(vsym), db, &mod->vars[vs->var]);
+                    fprintf(f, "    %s = %s;  /* imported variable */\n", reg_name(in->rt), vsym);
+                    st->var_refs++;
+                    break;
+                }
                 const uint8_t *p = vm_va(img, pc + in->imm, 4);
                 if (p) {
                     uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
@@ -1117,11 +1275,23 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
-        case OP_SXTB: case OP_SXTH: case OP_UXTB: case OP_UXTH: {
+        case OP_SXTB: case OP_SXTH: case OP_UXTB: case OP_UXTH: case OP_SXTB16: case OP_UXTB16: {
             const char *fn3 = in->op == OP_SXTB ? "vita_sxtb"
                             : in->op == OP_SXTH ? "vita_sxth"
-                            : in->op == OP_UXTB ? "vita_uxtb" : "vita_uxth";
-            fprintf(f, "    %s = %s(%s);\n", reg_name(in->rd), fn3, src_name(in, in->rm));
+                            : in->op == OP_UXTB ? "vita_uxtb"
+                            : in->op == OP_UXTH ? "vita_uxth"
+                            : in->op == OP_SXTB16 ? "vita_sxtb16" : "vita_uxtb16";
+            /* The source is rotated first, which is how a loop takes the
+             * second, third and fourth bytes of a word. */
+            char src[64];
+            if (in->shift_amt) snprintf(src, sizeof(src), "vita_ror(%s, %u)", src_name(in, in->rm), in->shift_amt);
+            else               snprintf(src, sizeof(src), "%s", src_name(in, in->rm));
+            if (in->rn == ARM_NO_REG)
+                fprintf(f, "    %s = %s(%s);\n", reg_name(in->rd), fn3, src);
+            else if (in->op == OP_SXTB16 || in->op == OP_UXTB16)
+                fprintf(f, "    %s = vita_add16(%s, %s(%s));\n", reg_name(in->rd), src_name(in, in->rn), fn3, src);
+            else
+                fprintf(f, "    %s = %s + %s(%s);\n", reg_name(in->rd), src_name(in, in->rn), fn3, src);
             break;
         }
 
@@ -1621,6 +1791,15 @@ static int write_header(const char *outpath, const vm_module *mod, const nid_db 
         }
         fprintf(h, "\n");
     }
+    if (mod->var_count) {
+        fprintf(h, "/* imported variables: the guest address of each, bound by the loader */\n");
+        for (uint32_t i = 0; i < mod->var_count; i++) {
+            char sym[96];
+            var_symbol(sym, sizeof(sym), db, &mod->vars[i]);
+            fprintf(h, "extern uint32_t %s;\n", sym);
+        }
+        fprintf(h, "\n");
+    }
     fprintf(h, "/* functions: the call graph has cycles, so every one is declared before any body */\n");
     for (uint32_t i = 0; i < nlist; i++)
         fprintf(h, "void vita_func_%08X(void);\n", disc->funcs[list[i]].addr);
@@ -1651,6 +1830,8 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
             const vf_result *disc, FILE *f, const char *outpath, const char *impdir,
             uint32_t limit, emit_stats *st) {
     memset(st, 0, sizeof(*st));
+    vsites_build(mod);
+    st->var_imports = mod->var_count;
 
     /* Functions per part. One translation unit per module was fine at a
      * homebrew's size and is not at a retail title's: a compiler works on
@@ -1899,6 +2080,51 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
     fprintf(f, "        (uint32_t)(sizeof(vita_functions) / sizeof(vita_functions[0])));\n");
     fprintf(f, "}\n");
 
+    /* The imported variables: the global the generated code reads for each,
+     * and the table the loader binds them through. The words in the image
+     * that hold a placeholder are listed so the loader can write the bound
+     * address over them; the MOVW/MOVT sites need nothing, the code at them
+     * reads the global. Always written, so a host links without asking
+     * whether the module imports any. */
+    fprintf(f, "\n/* imported variables */\n");
+    for (uint32_t i = 0; i < mod->var_count; i++) {
+        char sym[96];
+        var_symbol(sym, sizeof(sym), db, &mod->vars[i]);
+        fprintf(f, "uint32_t %s;\n", sym);
+        uint32_t nabs = 0;
+        for (uint32_t s = 0; s < mod->vars[i].site_count; s++)
+            if (mod->vars[i].sites[s].code == 2) nabs++;
+        if (!nabs) continue;
+        fprintf(f, "static const vita_var_site %s_words[] = {", sym);
+        uint32_t k = 0;
+        for (uint32_t s = 0; s < mod->vars[i].site_count; s++) {
+            if (mod->vars[i].sites[s].code != 2) continue;
+            fprintf(f, "%s{ 0x%08Xu, %uu },", (k % 4) ? " " : "\n    ",
+                    mod->vars[i].sites[s].addr, mod->vars[i].sites[s].addend);
+            k++;
+        }
+        fprintf(f, "\n};\n");
+    }
+    fprintf(f, "const vita_var_import vita_var_imports[] = {\n");
+    for (uint32_t i = 0; i < mod->var_count; i++) {
+        char sym[96];
+        var_symbol(sym, sizeof(sym), db, &mod->vars[i]);
+        const char *lib = nid_lib_name(db, mod->vars[i].lib_nid);
+        const char *vn  = nid_var_name(db, mod->vars[i].lib_nid, mod->vars[i].var_nid);
+        uint32_t nabs = 0;
+        for (uint32_t s = 0; s < mod->vars[i].site_count; s++)
+            if (mod->vars[i].sites[s].code == 2) nabs++;
+        fprintf(f, "    { 0x%08Xu, 0x%08Xu, ", mod->vars[i].lib_nid, mod->vars[i].var_nid);
+        if (vn) fprintf(f, "\"%s::%s\", ", lib ? lib : "?", vn);
+        else    fprintf(f, "0, ");
+        fprintf(f, "&%s, ", sym);
+        if (nabs) fprintf(f, "%s_words, %uu },\n", sym, nabs);
+        else      fprintf(f, "0, 0u },\n");
+    }
+    if (!mod->var_count) fprintf(f, "    { 0u, 0u, 0, 0, 0, 0u }\n");
+    fprintf(f, "};\n");
+    fprintf(f, "const uint32_t vita_var_import_count = %uu;\n", mod->var_count);
+
     /* The entry, by name. A host should not have to read .sce_module_info to
      * learn where the program starts; the module said, and discovery seeded
      * it, so the function exists. The Thumb bit is an instruction-set marker
@@ -1935,6 +2161,9 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
     free(fs.v);
     free(list);
     free(keep);
+    free(g_vsites);
+    g_vsites = NULL;
+    g_nvsites = 0;
     return 0;
 }
 

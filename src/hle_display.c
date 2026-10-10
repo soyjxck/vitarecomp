@@ -69,6 +69,7 @@ void vita_hle_sceDisplayWaitVblankStart(void) {
 void vita_hle_sceDisplayWaitVblankStartCB(void)    { vita_hle_sceDisplayWaitVblankStart(); }
 void vita_hle_sceDisplayWaitSetFrameBuf(void)      { vita_hle_sceDisplayWaitVblankStart(); }
 void vita_hle_sceDisplayWaitVblankStartMulti(void) { vita_hle_sceDisplayWaitVblankStart(); }
+void vita_hle_sceDisplayWaitSetFrameBufMulti(void) { vita_hle_sceDisplayWaitVblankStart(); }
 
 int vita_display_current(vita_framebuf *out) {
     if (!g_set) return 0;

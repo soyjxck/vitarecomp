@@ -11,6 +11,7 @@
  * See hle.h for the calling convention and the link-order requirement.
  */
 
+#include "vitarecomp/dispatch.h"
 #include "vitarecomp/hle.h"
 #include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
@@ -18,6 +19,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <time.h>
 
 /* --- the guest/host boundary ------------------------------------------------ */
@@ -309,6 +311,11 @@ static void print_console(uint32_t fmt, vita_vargs *v) {
     size_t n = vita_guest_vformat(out, sizeof(out), fmt, v);
     fputs(out, stdout);
     fflush(stdout);
+    /* Echoed to the trace too, so the program's own words line up with the
+     * calls around them. */
+    size_t len = strlen(out);
+    while (len && (out[len - 1] == '\n' || out[len - 1] == '\r')) out[--len] = '\0';
+    if (len) vita_hle_trace("printf at 0x%08X: %s", vita_last_pc, out);
     r0 = (uint32_t)n;
 }
 
@@ -321,6 +328,7 @@ static void print_guest(uint32_t dst, uint32_t cap, uint32_t fmt, vita_vargs *v)
         void *d = gp(dst, take + 1, "sprintf dst");
         if (d) { memcpy(d, out, take); ((char *)d)[take] = '\0'; }
     }
+    vita_hle_trace("snprintf -> 0x%08X: %s", dst, out);
     r0 = (uint32_t)n;
 }
 
@@ -423,6 +431,107 @@ void vita_hle_time(void) {
     r0 = now;
 }
 
+/* --- searching and sorting through the program's own comparator -------------------
+ * The comparator is guest code. It is called through the dispatch table with
+ * guest pointers and reads the elements where they lie, so the elements stay
+ * in guest memory and the HLE keeps only indices. */
+static int guest_compare(uint32_t fn, uint32_t a, uint32_t b) {
+    uint32_t s2 = r2, s3 = r3, s12 = r12;
+    r0 = a; r1 = b;
+    vita_dispatch(0, fn);
+    int res = (int)(int32_t)r0;
+    r2 = s2; r3 = s3; r12 = s12;
+    return res;
+}
+
+/* void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
+ *               int (*compar)(const void *, const void *)): a retail title's
+ * archive index is looked up with it, so an unimplemented bsearch finds no file. */
+void vita_hle_bsearch(void) {
+    uint32_t key = r0, base = r1, n = r2, size = r3, compar = vita_read32(sp);
+    uint32_t lo = 0, hi = n, found = 0;
+    while (lo < hi && size) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        uint32_t elem = base + mid * size;
+        int c = guest_compare(compar, key, elem);
+        if (c == 0) { found = elem; break; }
+        if (c < 0) hi = mid; else lo = mid + 1;
+    }
+    vita_hle_trace("bsearch(key %08X at 0x%08X, base 0x%08X, %u x %u, compar 0x%08X) -> 0x%08X",
+                   vita_mem_ptr(key, 4) ? vita_read32(key) : 0, key, base, n, size, compar, found);
+    r0 = found;
+}
+
+/* void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *))
+ * A merge sort of indices, comparing the elements where they lie, then one
+ * permutation of the bytes. Stable, and the comparator sees the array as it
+ * was given rather than half sorted. */
+void vita_hle_qsort(void) {
+    uint32_t base = r0, n = r1, size = r2, compar = r3;
+    if (n < 2 || !size) return;
+    uint8_t *mem = vita_mem_ptr(base, n * size);
+    if (!mem) { vita_trap_unimpl(base, n * size, "qsort: array outside guest memory"); return; }
+    uint32_t *idx = malloc(n * sizeof *idx), *tmp = malloc(n * sizeof *tmp);
+    uint8_t *copy = malloc((size_t)n * size);
+    if (!idx || !tmp || !copy) { free(idx); free(tmp); free(copy); return; }
+    for (uint32_t i = 0; i < n; i++) idx[i] = i;
+    for (uint32_t w = 1; w < n; w *= 2) {
+        for (uint32_t lo = 0; lo < n; lo += 2 * w) {
+            uint32_t mid = lo + w < n ? lo + w : n;
+            uint32_t hi  = lo + 2 * w < n ? lo + 2 * w : n;
+            uint32_t i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) {
+                if (guest_compare(compar, base + idx[j] * size, base + idx[i] * size) < 0)
+                    tmp[k++] = idx[j++];
+                else
+                    tmp[k++] = idx[i++];
+            }
+            while (i < mid) tmp[k++] = idx[i++];
+            while (j < hi)  tmp[k++] = idx[j++];
+        }
+        memcpy(idx, tmp, n * sizeof *idx);
+    }
+    memcpy(copy, mem, (size_t)n * size);
+    for (uint32_t i = 0; i < n; i++)
+        memcpy(mem + (size_t)i * size, copy + (size_t)idx[i] * size, size);
+    free(idx); free(tmp); free(copy);
+}
+
+/* ldiv_t ldiv(long numer, long denom): an eight-byte result, so the caller
+ * passes where to put it in r0 and the operands follow in r1 and r2. */
+static void div_into(uint32_t out, int32_t num, int32_t den) {
+    int32_t q = 0, rem = 0;
+    if (den == 0)                              { q = 0; rem = num; }
+    else if (num == INT32_MIN && den == -1)    { q = INT32_MIN; rem = 0; }
+    else                                       { q = num / den; rem = num % den; }
+    if (vita_mem_ptr(out, 8)) {
+        vita_write32(out, (uint32_t)q);
+        vita_write32(out + 4, (uint32_t)rem);
+    }
+}
+void vita_hle_ldiv(void) { div_into(r0, (int32_t)r1, (int32_t)r2); }
+void vita_hle_div(void)  { div_into(r0, (int32_t)r1, (int32_t)r2); }
+
+/* char *strtok(char *s, const char *delim): the library's one saved position,
+ * writing the terminators into the program's string as the library does. */
+static uint32_t g_strtok_next;
+void vita_hle_strtok(void) {
+    uint32_t s = r0 ? r0 : g_strtok_next;
+    uint32_t davail = vita_mem_avail(r1), savail = s ? vita_mem_avail(s) : 0;
+    const char *d = davail ? (const char *)vita_mem_ptr(r1, 1) : NULL;
+    char *p = savail ? (char *)vita_mem_ptr(s, 1) : NULL;
+    if (!d || !p) { g_strtok_next = 0; r0 = 0; return; }
+    size_t dlen = strnlen(d, davail);
+    uint32_t i = 0;
+    while (i < savail && p[i] && memchr(d, p[i], dlen)) i++;
+    if (i >= savail || !p[i]) { g_strtok_next = 0; r0 = 0; return; }
+    uint32_t start = i;
+    while (i < savail && p[i] && !memchr(d, p[i], dlen)) i++;
+    if (i < savail && p[i]) { p[i] = '\0'; g_strtok_next = s + i + 1; }
+    else g_strtok_next = 0;
+    r0 = s + start;
+}
+
 /* --- the C++ runtime's type_info and exceptions ---------------------------------
  *
  * type_info is { vtable, const char *name } on this ABI, so name() is the
@@ -469,3 +578,45 @@ void vita_hle___cxa_throw(void) {
 void vita_hle__ZNSt10bad_typeidC1Ev(void) { }
 void vita_hle__ZNSt9bad_allocC1Ev(void)   { }
 void vita_hle__ZNSt8bad_castC1Ev(void)    { }
+
+/* double _Stod(const char *s, char **endptr, long pten): the library's strtod
+ * kernel, scaled by ten to the pten. The result goes in d0. */
+static size_t number_text(uint32_t addr, const char *accept, char *buf, size_t cap) {
+    uint32_t avail = vita_mem_avail(addr);
+    const char *s = avail ? (const char *)vita_mem_ptr(addr, 1) : NULL;
+    size_t n = 0;
+    while (s && n < cap - 1 && n < avail && s[n] &&
+           (strchr(accept, s[n]) || (n == 0 && (s[n] == ' ' || s[n] == '\t')))) {
+        buf[n] = s[n];
+        n++;
+    }
+    buf[n] = '\0';
+    return n;
+}
+
+void vita_hle__Stod(void) {
+    char buf[64];
+    size_t n = number_text(r0, "+-.0123456789eE", buf, sizeof(buf));
+    char *end = buf;
+    double d = n ? strtod(buf, &end) : 0.0;
+    if (r1 && vita_mem_ptr(r1, 4)) vita_write32(r1, r0 + (uint32_t)(end - buf));
+    int pten = (int)r2;
+    while (pten > 0) { d *= 10.0; pten--; }
+    while (pten < 0) { d /= 10.0; pten++; }
+    vfp_setd(0, d);
+}
+
+void vita_hle__Stof(void) {
+    vita_hle__Stod();
+    vfp_setf(0, (float)vfp_getd(0));
+}
+
+/* unsigned long _Stoul(const char *s, char **endptr, int base): the strtoul kernel */
+void vita_hle__Stoul(void) {
+    char buf[64];
+    size_t n = number_text(r0, "+-xX0123456789abcdefABCDEF", buf, sizeof(buf));
+    char *end = buf;
+    unsigned long v = n ? strtoul(buf, &end, (int)r2) : 0;
+    if (r1 && vita_mem_ptr(r1, 4)) vita_write32(r1, r0 + (uint32_t)(end - buf));
+    r0 = (uint32_t)v;
+}

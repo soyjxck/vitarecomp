@@ -771,16 +771,83 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         int D = (h1 >> 6) & 1, L = (h1 >> 5) & 1;
         int type = (h2 >> 8) & 0xF;
         int regs = type == 0x7 ? 1 : type == 0xA ? 2 : type == 0x6 ? 3 : type == 0x2 ? 4 : 0;
-        if (!regs) return 0;                      /* VLD2-4, or the lane forms */
-        o->op        = L ? OP_NEON_LD1 : OP_NEON_ST1;
         o->vd        = (int8_t)(((h2 >> 12) & 0xF) | (D << 4));
         o->rn        = h1 & 0xF;
         o->rm        = h2 & 0xF;
-        o->imm       = (uint32_t)regs;
         o->has_imm   = 1;
         o->neon_size = (uint8_t)(8 << ((h2 >> 6) & 3));
         o->writeback = o->rm != 15;
-        set(o, L ? A_LOAD : A_STORE, L ? "vld1" : "vst1");
+        if (regs) {
+            o->op  = L ? OP_NEON_LD1 : OP_NEON_ST1;
+            o->imm = (uint32_t)regs;
+            set(o, L ? A_LOAD : A_STORE, L ? "vld1" : "vst1");
+            return 1;
+        }
+        /* VLD2-4 / VST2-4, multiple structures: n elements interleaved in
+         * memory, one register per element. type 8/9: two, 3: two twice
+         * over; 4/5: three; 0/1: four; the odd types space the registers
+         * two apart. Anything else in the space is claimed as SIMD, never
+         * handed on: the core load/store decoder shares the top bits and
+         * would turn it into a halfword store. */
+        int n = 0, spacing = 1, groups = 1;
+        switch (type) {
+        case 0x8: n = 2; break;
+        case 0x9: n = 2; spacing = 2; break;
+        case 0x3: n = 2; groups = 2; break;
+        case 0x4: n = 3; break;
+        case 0x5: n = 3; spacing = 2; break;
+        case 0x0: n = 4; break;
+        case 0x1: n = 4; spacing = 2; break;
+        default: set(o, A_SIMD, "simd"); return 1;
+        }
+        if (o->neon_size == 64) { set(o, A_SIMD, "simd"); return 1; }
+        o->op       = L ? OP_NEON_LDN : OP_NEON_STN;
+        o->imm      = (uint32_t)n;
+        o->bf_lsb   = (uint8_t)spacing;
+        o->bf_width = (uint8_t)groups;
+        set(o, L ? A_LOAD : A_STORE, L ? "vldn" : "vstn");
+        return 1;
+    }
+
+    /* Element or structure load/store, single structure:
+     * 1111 1001 1 D L 0 Rn | Vd B index_align Rm. B in bits 11:8: 11nn is
+     * "to all lanes" of n+1 registers (size in 7:6, T in 5), otherwise
+     * size in 11:10 and n in 9:8 for one lane of each of n+1 registers,
+     * the lane and the register spacing packed into index_align. The
+     * retail title keeps a loop's two loads in `vld1.32 {d8[]}, [sl]`; as
+     * a halfword store it wrote the loop counter over the record. */
+    if ((h1 & 0xFF90) == 0xF980) {
+        int D = (h1 >> 6) & 1, L = (h1 >> 5) & 1;
+        int B = (h2 >> 8) & 0xF;
+        o->vd        = (int8_t)(((h2 >> 12) & 0xF) | (D << 4));
+        o->rn        = h1 & 0xF;
+        o->rm        = h2 & 0xF;
+        o->has_imm   = 1;
+        o->writeback = o->rm != 15;
+        if ((B >> 2) == 3) {
+            int n = (B & 3) + 1, sz = (h2 >> 6) & 3, T = (h2 >> 5) & 1;
+            if (!L || sz == 3) { set(o, A_SIMD, "simd"); return 1; }
+            o->op        = OP_NEON_LD_ALL;
+            o->imm       = (uint32_t)n;
+            o->neon_size = (uint8_t)(8 << sz);
+            o->bf_lsb    = (uint8_t)(n == 1 ? 1 : T + 1);     /* spacing */
+            o->bf_width  = (uint8_t)(n == 1 ? T + 1 : n);     /* registers */
+            set(o, A_LOAD, "vld-all");
+            return 1;
+        }
+        int sz = B >> 2, n = (B & 3) + 1, ia = (h2 >> 4) & 0xF;
+        int index = 0, spacing = 1;
+        if (sz == 0)      index = ia >> 1;
+        else if (sz == 1) { index = ia >> 2; spacing = (ia & 2) ? 2 : 1; }
+        else if (sz == 2) { index = ia >> 3; spacing = (ia & 4) ? 2 : 1; }
+        else { set(o, A_SIMD, "simd"); return 1; }
+        o->op        = L ? OP_NEON_LD_LANE : OP_NEON_ST_LANE;
+        o->imm       = (uint32_t)n;
+        o->imm64     = (uint64_t)index;
+        o->neon_size = (uint8_t)(8 << sz);
+        o->bf_lsb    = (uint8_t)spacing;
+        o->bf_width  = 1;
+        set(o, L ? A_LOAD : A_STORE, L ? "vld-lane" : "vst-lane");
         return 1;
     }
 
@@ -1549,15 +1616,28 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         return;
     }
 
-    /* The wide sign/zero extends: rn == 15 distinguishes them from the
-     * extend-and-add forms that share the encoding. */
-    if ((h1 & 0xFF80) == 0xFA00 && (h1 & 0x000F) == 0x000F &&
-        (h2 & 0xF080) == 0xF080) {
-        static const arm_op ex[4] = { OP_SXTH, OP_UXTH, OP_SXTB, OP_UXTB };
-        o->op = ex[(h1 >> 4) & 3];
+    /* The wide sign/zero extends, with their rotate, and the extend-and-add
+     * forms that share the encoding (rn is 15 for the plain ones):
+     * 1111 1010 0 op Rn | 1111 Rd 1 0 rotate Rm, op 000 SXTH, 001 UXTH, 010
+     * SXTB16, 011 UXTB16, 100 SXTB, 101 UXTB. The op field is three bits. An
+     * earlier revision took two of them and dropped the rotate, so every
+     * `sxtb.w` was a halfword extend and every `uxtb.w r0, r1, ror #8` kept
+     * sixteen bits of the wrong byte. No sample caught it: GCC reaches for
+     * the 16-bit forms, and the rotated byte extracts are what SNC emits for
+     * a hash loop. The retail title's resource names hashed wrong, and
+     * nothing it asked for could be found. */
+    if ((h1 & 0xFF80) == 0xFA00 && (h2 & 0xF0C0) == 0xF080) {
+        static const arm_op   ex[6]  = { OP_SXTH, OP_UXTH, OP_SXTB16, OP_UXTB16, OP_SXTB, OP_UXTB };
+        static const char    *exn[6] = { "sxth.w", "uxth.w", "sxtb16", "uxtb16", "sxtb.w", "uxtb.w" };
+        uint32_t op = (h1 >> 4) & 7;
+        if (op >= 6) { set(o, A_ALU, "alu.w"); return; }
+        o->op = ex[op];
         o->rd = (h2 >> 8) & 0xF;
         o->rm = h2 & 0xF;
-        set(o, A_ALU, "extend.w");
+        o->rn = (h1 & 0xF) == 0xF ? ARM_NO_REG : (int8_t)(h1 & 0xF);
+        o->shift_type = SH_ROR;
+        o->shift_amt  = (uint8_t)(((h2 >> 4) & 3) * 8);
+        set(o, A_ALU, exn[op]);
         return;
     }
 
@@ -1781,15 +1861,181 @@ static void decode_a32(uint32_t w, arm_insn *o) {
  * computed transfer it looks like, and traps.
  */
 
-uint32_t arm_table_count(const arm_insn *prev, uint32_t nprev, const arm_insn *tb) {
-    if (tb->rn != 15 || tb->rm == ARM_NO_REG) return 0;
-    for (uint32_t i = nprev; i-- > 0;) {
-        const arm_insn *p = &prev[i];
-        if (p->op == OP_CMP && p->has_imm &&
-            (p->rn == tb->rm || p->rd == tb->rm))
-            return p->imm + 1;
+static int bound_arriving(uint32_t cond, uint32_t imm, uint32_t *max) {
+    switch (cond) {
+    case ARM_COND_LS: case ARM_COND_LE: *max = imm; return 1;
+    case ARM_COND_CC: case ARM_COND_LT: if (!imm) return 0; *max = imm - 1; return 1;
+    default: return 0;
+    }
+}
+
+/* The register an instruction writes, or ARM_NO_REG: the destination of
+ * the data-processing forms (the compares have none), the target of a load. */
+static int8_t writes_reg(const arm_insn *p, int which) {
+    if (which == 0) {
+        if (p->op == OP_CMP || p->op == OP_CMN || p->op == OP_TST) return ARM_NO_REG;
+        if (p->cls == A_STORE || p->cls == A_STOREM || p->cls == A_BRANCH ||
+            p->cls == A_CALL || p->cls == A_RETURN) return ARM_NO_REG;
+        return p->rd;
+    }
+    if (p->cls != A_LOAD) return ARM_NO_REG;
+    return which == 1 ? p->rt : p->rt2;
+}
+
+/* The immediate a compare tests against: its own, or the MOVW constant in
+ * the register it compares with, when that register was last written by the
+ * MOVW within the window. */
+static int cmp_imm_of(const arm_insn *prev, uint32_t i, uint32_t *imm) {
+    const arm_insn *c = &prev[i];
+    if (c->has_imm) { *imm = c->imm; return 1; }
+    if (c->rm == ARM_NO_REG || c->shift_amt) return 0;
+    for (uint32_t k = i; k-- > 0;) {
+        const arm_insn *p = &prev[k];
+        if (writes_reg(p, 0) == c->rm || writes_reg(p, 1) == c->rm || writes_reg(p, 2) == c->rm) {
+            if (p->op == OP_MOV && p->has_imm && p->rd == c->rm) { *imm = p->imm; return 1; }
+            return 0;
+        }
+        if (p->cls == A_CALL && c->rm <= 3) return 0;
     }
     return 0;
+}
+
+/* Whether the compare at i bounds its register from above, from the branch
+ * that reads its flags. A branch that leaves on "greater" lets the flow
+ * continue toward the table, bounded above; the nearest compare of a dense
+ * range `cmp r0, #58; bgt out; cmp r0, #39; ble out` is the lower bound,
+ * and the one before it the upper. A compare with no branch in view, the
+ * seeded guard included, is an upper bound; one whose flags are overwritten
+ * before any branch is nothing this walk can read. */
+static int cmp_upper(const arm_insn *prev, uint32_t nprev, uint32_t i, uint32_t imm, uint32_t *max) {
+    for (uint32_t j = i + 1; j < nprev; j++) {
+        const arm_insn *q = &prev[j];
+        if (q->cls == A_BRANCH && q->conditional) {
+            switch (q->cond) {
+            case ARM_COND_HI: case ARM_COND_GT: *max = imm; return 1;
+            case ARM_COND_CS: case ARM_COND_GE: if (!imm) return 0; *max = imm - 1; return 1;
+            default: return 0;
+            }
+        }
+        if (q->sets_flags) return 0;
+    }
+    *max = imm;
+    return 1;
+}
+
+/* The index is some register plus an offset, and the compiler moves it
+ * between registers on the way: `adds r0, r7, #1; tbh [pc, r0]` is guarded
+ * by a compare of r7, `subs r0, #40` by one of r0's earlier value, and
+ * `adds r5, r1, #0` lets r1 be compared after the move. The walk back keeps
+ * the pairs (register, offset) the index equals, and on learning a new one
+ * looks forward again for a compare of it. */
+typedef struct { int8_t reg; int32_t off; } tb_pair;
+
+static int pair_find(const tb_pair *al, uint32_t nal, int8_t reg, uint32_t *at) {
+    for (uint32_t i = 0; i < nal; i++) if (al[i].reg == reg) { *at = i; return 1; }
+    return 0;
+}
+
+/* A compare at i of a register the index equals: the count, or 0. */
+static uint32_t count_from(const arm_insn *prev, uint32_t nprev, uint32_t i, int32_t off) {
+    uint32_t imm, max;
+    if (!cmp_imm_of(prev, i, &imm) || !cmp_upper(prev, nprev, i, imm, &max)) return 0;
+    int64_t n = (int64_t)max + off + 1;
+    return n > 0 && n <= 0x10000 ? (uint32_t)n : 0;
+}
+
+uint32_t arm_table_count(const arm_insn *prev, uint32_t nprev, const arm_insn *tb) {
+    if (tb->rn != 15 || tb->rm == ARM_NO_REG) return 0;
+    tb_pair al[4];
+    uint32_t nal = 1;
+    al[0].reg = tb->rm; al[0].off = 0;
+    for (uint32_t i = nprev; i-- > 0;) {
+        const arm_insn *p = &prev[i];
+        uint32_t at;
+        if (p->op == OP_CMP) {
+            int8_t creg = p->rn != ARM_NO_REG ? p->rn : p->rd;
+            if (pair_find(al, nal, creg, &at)) {
+                uint32_t n = count_from(prev, nprev, i, al[at].off);
+                if (n) return n;
+            }
+            continue;
+        }
+        /* A call hands the argument registers back holding something else. */
+        if (p->cls == A_CALL) {
+            for (uint32_t k = 0; k < nal;) {
+                if (al[k].reg <= 3) al[k] = al[--nal]; else k++;
+            }
+            if (!nal) return 0;
+            continue;
+        }
+        for (int which = 0; which < 3; which++) {
+            int8_t w = writes_reg(p, which);
+            if (w == ARM_NO_REG || !pair_find(al, nal, w, &at)) continue;
+            int8_t  src = ARM_NO_REG;
+            int32_t off = al[at].off;
+            if ((p->op == OP_ADD || p->op == OP_SUB) && p->has_imm && which == 0) {
+                src = p->rn != ARM_NO_REG ? p->rn : p->rd;
+                off += p->op == OP_ADD ? (int32_t)p->imm : -(int32_t)p->imm;
+            } else if (p->op == OP_MOV && !p->has_imm && p->rm != ARM_NO_REG && !p->shift_amt && which == 0) {
+                src = p->rm;
+            }
+            if (src == ARM_NO_REG) {
+                al[at] = al[--nal];
+                if (!nal) return 0;
+                continue;
+            }
+            al[at].reg = src; al[at].off = off;
+            if (src == w) continue;
+            /* The index came from another register here: a compare of that
+             * register between this instruction and the table, with no
+             * write to it in between, is the guard. */
+            for (uint32_t j = i + 1; j < nprev; j++) {
+                const arm_insn *q = &prev[j];
+                if (q->op == OP_CMP && (q->rn == src || q->rd == src)) {
+                    uint32_t n = count_from(prev, nprev, j, off);
+                    if (n) return n;
+                    continue;
+                }
+                if (writes_reg(q, 0) == src || writes_reg(q, 1) == src || writes_reg(q, 2) == src) break;
+                if (q->cls == A_CALL && src <= 3) break;
+            }
+        }
+    }
+    return 0;
+}
+
+int arm_table_guard(const arm_insn *prev, uint32_t nprev, const arm_insn *br,
+                    int8_t *reg, uint32_t *max) {
+    if (br->cls != A_BRANCH || !br->conditional || !br->has_target) return 0;
+    uint32_t seen = 0;
+    for (uint32_t i = nprev; i-- > 0 && seen < 6; seen++) {
+        const arm_insn *p = &prev[i];
+        if (p->op == OP_CMP && p->has_imm && p->rn != ARM_NO_REG) {
+            /* Nothing between the compare and the branch may have moved
+             * the register the target will index with. */
+            for (uint32_t j = i + 1; j < nprev; j++)
+                if (prev[j].rd == p->rn || (prev[j].cls == A_LOAD && prev[j].rt == p->rn)) return 0;
+            if (!bound_arriving(br->cond, p->imm, max)) return 0;
+            *reg = p->rn;
+            return 1;
+        }
+        if (p->sets_flags || p->cls == A_BRANCH || p->cls == A_CALL) return 0;
+    }
+    return 0;
+}
+
+void arm_table_seed(arm_insn *out, int8_t reg, uint32_t max) {
+    memset(out, 0, sizeof(*out));
+    out->op = OP_CMP;
+    out->cls = A_ALU;
+    out->mnemonic = "cmp (guard)";
+    out->rd = out->rn = reg;
+    out->rm = out->rt = out->rt2 = ARM_NO_REG;
+    out->vd = out->vn = out->vm = ARM_NO_REG;
+    out->cond = ARM_COND_AL;
+    out->has_imm = 1;
+    out->imm = max;
+    out->sets_flags = 1;
 }
 
 uint32_t arm_table_targets(const uint8_t *code, uint32_t code_addr, uint32_t code_len,

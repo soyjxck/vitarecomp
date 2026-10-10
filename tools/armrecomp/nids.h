@@ -31,6 +31,7 @@ void    nid_db_free(nid_db *db);
 /* Both return NULL when unknown, never a placeholder — an unresolved NID must
  * look unresolved. */
 const char *nid_func_name(const nid_db *db, uint32_t lib_nid, uint32_t func_nid);
+const char *nid_var_name (const nid_db *db, uint32_t lib_nid, uint32_t var_nid);
 const char *nid_lib_name (const nid_db *db, uint32_t lib_nid);
 
 #endif /* ARMRECOMP_NIDS_H */

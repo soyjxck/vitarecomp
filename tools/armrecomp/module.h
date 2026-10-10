@@ -76,6 +76,8 @@ typedef struct {
     uint16_t num_vars;
     uint32_t func_nid_table;    /* segment-relative */
     uint32_t func_entry_table;
+    uint32_t var_nid_table;     /* absolute, like the function tables */
+    uint32_t var_entry_table;
 } vm_import;
 
 /* One imported function, at the address the module actually calls.
@@ -92,6 +94,29 @@ typedef struct {
     uint32_t func_nid;
 } vm_stub;
 
+/* One place in the image that an imported variable's address goes into:
+ * a word (ABS32, code 2) or a MOVW/MOVT pair (codes 0x2F and 0x30). */
+typedef struct {
+    uint32_t addr;
+    uint32_t addend;    /* added to the variable's address: 8 for a vtable pointer */
+    uint8_t  code;
+} vm_var_site;
+
+/* One imported variable. A function import is a call the loader redirects;
+ * a variable import is an address the loader writes into the image, and the
+ * entry table names a block that lists where: a header word holding the
+ * block's size in bits 4..27, then two-word entries, the first holding the
+ * ARM relocation code in bits 8..15 and the addend in bits 16..27, the
+ * second the offset into the executable segment. Unbound, every site holds
+ * a placeholder that points back at the block. */
+typedef struct {
+    uint32_t     lib_nid;
+    uint32_t     var_nid;
+    uint32_t     stub;          /* the placeholder block */
+    vm_var_site *sites;
+    uint32_t     site_count;
+} vm_var;
+
 #define VM_MAX_IMPORTS 256
 
 typedef struct {
@@ -104,6 +129,10 @@ typedef struct {
 
     vm_stub       *stubs;              /* sorted by addr; free with vm_free() */
     uint32_t       stub_count;
+
+    vm_var        *vars;               /* imported variables; free with vm_free() */
+    uint32_t       var_count;
+    uint32_t       total_var_imports;
 } vm_module;
 
 void vm_free(vm_module *m);

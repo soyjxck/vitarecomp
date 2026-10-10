@@ -35,6 +35,8 @@ typedef struct {
     uint32_t literals;     /* literal-pool loads folded to constants */
     uint32_t import_calls; /* call sites bound to a firmware import  */
     uint32_t imports_used; /* distinct imports actually reached      */
+    uint32_t var_imports;  /* variables the module imports           */
+    uint32_t var_refs;     /* sites in the code that read one        */
 
     /* Addresses discovery registered as functions that are really import
      * stubs. The stub wins in the dispatch table; this counts how often

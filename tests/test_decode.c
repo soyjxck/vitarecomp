@@ -294,6 +294,30 @@ static void test_t32_operands(void) {
     in = dec(ARM_T32, BASE);
     assert(in.op == OP_STM && in.rn == 0 && in.reglist == 0x06 && in.writeback);
 
+    /* The wide extends: a three-bit op, a rotate, and the add forms.
+     * uxtb.w r8, r10, ror #8 / sxtb.w r0, r1 / uxth.w r0, r1 / uxtab r0, r1, r2 /
+     * sxtb16 r0, r1 / sxtah r3, r4, r5, ror #16 */
+    put16(0, 0xFA5F); put16(2, 0xF89A);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UXTB && in.rd == 8 && in.rm == 10 && in.rn == ARM_NO_REG && in.shift_amt == 8 && in.shift_type == SH_ROR);
+    put16(0, 0xFA4F); put16(2, 0xF081);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SXTB && in.rd == 0 && in.rm == 1 && in.shift_amt == 0);
+    put16(0, 0xFA1F); put16(2, 0xF081);
+    assert(dec(ARM_T32, BASE).op == OP_UXTH);
+    put16(0, 0xFA0F); put16(2, 0xF081);
+    assert(dec(ARM_T32, BASE).op == OP_SXTH);
+    put16(0, 0xFA51); put16(2, 0xF082);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UXTB && in.rn == 1 && in.rm == 2 && in.rd == 0);
+    put16(0, 0xFA2F); put16(2, 0xF081);
+    assert(dec(ARM_T32, BASE).op == OP_SXTB16);
+    put16(0, 0xFA3F); put16(2, 0xF081);
+    assert(dec(ARM_T32, BASE).op == OP_UXTB16);
+    put16(0, 0xFA04); put16(2, 0xF3A5);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SXTH && in.rn == 4 && in.rd == 3 && in.rm == 5 && in.shift_amt == 16);
+
     /* rev r1, r0 / rev16 r1, r0 / revsh r1, r0: op bits 7:6 of 0xBAxx. */
     put16(0, 0xBA01);
     in = dec(ARM_T32, BASE);
@@ -978,6 +1002,98 @@ static void test_exclusive(void) {
     put16(0, 0xE8DF); put16(2, 0xF000);
     assert(dec(ARM_T32, BASE).op == OP_TBB);
 
+    /* The guarding compare may sit several loads and stores before the table
+     * branch; a flag-setting instruction or a write to the index between them
+     * means the compare is not this table's. cmp r3, #6 / ldr r5, [r1, #12] /
+     * str r5, [r4, #4] / str.w r12, [r1, #12] / bhi / tbh [pc, r3, lsl #1] */
+    {
+        arm_insn prev[6], tb;
+        put16(0, 0x2B06); prev[0] = dec(ARM_T32, BASE);
+        put16(0, 0x68CD); prev[1] = dec(ARM_T32, BASE);
+        put16(0, 0x6065); prev[2] = dec(ARM_T32, BASE);
+        put16(0, 0xF8C1); put16(2, 0xC00C); prev[3] = dec(ARM_T32, BASE);
+        put16(0, 0xD814); prev[4] = dec(ARM_T32, BASE);
+        put16(0, 0xE8DF); put16(2, 0xF013); tb = dec(ARM_T32, BASE);
+        assert(tb.op == OP_TBH && tb.rm == 3);
+        assert(arm_table_count(prev, 5, &tb) == 7);
+        put16(0, 0x9300); prev[3] = dec(ARM_T32, BASE);     /* str r3, [sp]: reads the index, keeps it */
+        assert(arm_table_count(prev, 5, &tb) == 7);
+        put16(0, 0x3301); prev[5] = dec(ARM_T32, BASE);     /* adds r3, #1 */
+        prev[4] = prev[5]; assert(arm_table_count(prev, 5, &tb) == 0);
+        put16(0, 0x4613); prev[4] = dec(ARM_T32, BASE);     /* mov r3, r2 */
+        assert(arm_table_count(prev, 5, &tb) == 0);
+    }
+
+    /* A switch on 40..58: cmp r0, #58 / bgt out / cmp r0, #39 / ble.w out /
+     * subs r0, #40 / tbh [pc, r0, lsl #1]. The nearest compare is the lower
+     * bound; the count comes from the upper one, less the subtract: 19. */
+    {
+        arm_insn prev[5], tb;
+        put16(0, 0x283A); prev[0] = dec(ARM_T32, BASE);
+        put16(0, 0xDC2A); prev[1] = dec(ARM_T32, BASE);
+        put16(0, 0x2827); prev[2] = dec(ARM_T32, BASE);
+        put16(0, 0xF340); put16(2, 0x8105); prev[3] = dec(ARM_T32, BASE);
+        put16(0, 0x3828); prev[4] = dec(ARM_T32, BASE);
+        put16(0, 0xE8DF); put16(2, 0xF010); tb = dec(ARM_T32, BASE);
+        assert(prev[1].cls == A_BRANCH && prev[1].conditional && prev[1].cond == ARM_COND_GT);
+        assert(prev[3].cond == ARM_COND_LE && prev[4].op == OP_SUB && prev[4].rd == 0 && prev[4].imm == 40);
+        assert(arm_table_count(prev, 5, &tb) == 19);
+        assert(arm_table_count(prev + 2, 3, &tb) == 0);     /* only the lower bound in view */
+    }
+
+    /* A guard that branches to its table: cmp r0, #37 / bls table ... table:
+     * str r1, [sp, #44] / tbh [pc, r0, lsl #1]. The walk from `table` is
+     * seeded with the compare and counts 38; bne is not a guard, blo is one
+     * less. */
+    {
+        arm_insn prev[2], br, tb;
+        int8_t reg = -1; uint32_t max = 0;
+        put16(0, 0x2825); prev[0] = dec(ARM_T32, BASE);
+        put16(0, 0xD90A); br = dec(ARM_T32, BASE);
+        assert(arm_table_guard(prev, 1, &br, &reg, &max) && reg == 0 && max == 37);
+        put16(0, 0xD10A); br = dec(ARM_T32, BASE);
+        assert(!arm_table_guard(prev, 1, &br, &reg, &max));
+        put16(0, 0xD30A); br = dec(ARM_T32, BASE);
+        assert(arm_table_guard(prev, 1, &br, &reg, &max) && max == 36);
+        arm_table_seed(&prev[0], 0, 37);
+        put16(0, 0x910B); prev[1] = dec(ARM_T32, BASE);
+        put16(0, 0xE8DF); put16(2, 0xF010); tb = dec(ARM_T32, BASE);
+        assert(arm_table_count(prev, 2, &tb) == 38);
+    }
+
+    /* The index moved between registers and offset on the way.
+     * cmp r7, #13 / bgt / adds r0, r7, #1 / tbh [pc, r0]: 15.
+     * adds r5, r1, #0 / cmp r1, #4 / bhi / tbh [pc, r5]: the compare comes
+     * after the move: 5.
+     * movw r1, #283 / cmp r0, r1 / bgt / subs r0, #1 / subs.w r0, r0, #256 /
+     * tbh [pc, r0]: 27. */
+    {
+        arm_insn prev[5], tb;
+        put16(0, 0x2F0D); prev[0] = dec(ARM_T32, BASE);
+        put16(0, 0xDCD8); prev[1] = dec(ARM_T32, BASE);
+        put16(0, 0x1C78); prev[2] = dec(ARM_T32, BASE);
+        put16(0, 0xE8DF); put16(2, 0xF010); tb = dec(ARM_T32, BASE);
+        assert(prev[2].op == OP_ADD && prev[2].rd == 0 && prev[2].rn == 7 && prev[2].imm == 1);
+        assert(arm_table_count(prev, 3, &tb) == 15);
+
+        put16(0, 0x1C0D); prev[0] = dec(ARM_T32, BASE);
+        put16(0, 0x2904); prev[1] = dec(ARM_T32, BASE);
+        put16(0, 0xD80A); prev[2] = dec(ARM_T32, BASE);
+        put16(0, 0xE8DF); put16(2, 0xF015); tb = dec(ARM_T32, BASE);
+        assert(arm_table_count(prev, 3, &tb) == 5);
+
+        put16(0, 0xF240); put16(2, 0x111B); prev[0] = dec(ARM_T32, BASE);
+        put16(0, 0x4288); prev[1] = dec(ARM_T32, BASE);
+        put16(0, 0xDC21); prev[2] = dec(ARM_T32, BASE);
+        put16(0, 0x3801); prev[3] = dec(ARM_T32, BASE);
+        put16(0, 0xF5B0); put16(2, 0x7080); prev[4] = dec(ARM_T32, BASE);
+        put16(0, 0xE8DF); put16(2, 0xF010); tb = dec(ARM_T32, BASE);
+        assert(prev[0].op == OP_MOV && prev[0].has_imm && prev[0].imm == 283 && prev[0].rd == 1);
+        assert(prev[1].op == OP_CMP && !prev[1].has_imm && prev[1].rn == 0 && prev[1].rm == 1);
+        assert(prev[4].op == OP_SUB && prev[4].imm == 256);
+        assert(arm_table_count(prev, 5, &tb) == 27);
+    }
+
     /* dmb sy, dsb sy, isb sy, clrex: nothing to do on one host thread. */
     put16(0, 0xF3BF); put16(2, 0x8F5F);
     assert(dec(ARM_T32, BASE).op == OP_NOP);
@@ -989,6 +1105,59 @@ static void test_exclusive(void) {
     assert(dec(ARM_T32, BASE).op == OP_NOP);
 
     printf("  ldrex/strex, barriers          ok\n");
+}
+
+/* The structure loads and stores. These share their top bits with the core
+ * load/store encodings, so an unclaimed one is not a trap but a halfword
+ * store of a core register: `vld1.32 {d8[]}, [sl]` in a retail title's
+ * record loop became `strh r8, [sl, #0xC8F]` and wrote the loop counter
+ * over the records. */
+static void test_neon_structure_loads(void) {
+    memset(code, 0, sizeof(code));
+    arm_insn in;
+
+    /* vld1.32 {d8[]}, [sl]: one word to every lane of one register */
+    put16(0, 0xF9AA); put16(2, 0x8C8F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_LD_ALL && in.vd == 8 && in.rn == 10 && in.rm == 15 &&
+           in.neon_size == 32 && in.imm == 1 && in.bf_width == 1 && in.bf_lsb == 1 && !in.writeback);
+
+    /* vld1.8 {d1[3]}, [r2] */
+    put16(0, 0xF9A2); put16(2, 0x106F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_LD_LANE && in.vd == 1 && in.rn == 2 && in.neon_size == 8 && in.imm64 == 3 && in.imm == 1);
+
+    /* vst1.32 {d0[1]}, [r0]! */
+    put16(0, 0xF980); put16(2, 0x088D);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ST_LANE && in.vd == 0 && in.rn == 0 && in.rm == 13 && in.neon_size == 32 && in.imm64 == 1 && in.writeback);
+
+    /* vld2.16 {d0[2], d1[2]}, [r3] */
+    put16(0, 0xF9A3); put16(2, 0x058F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_LD_LANE && in.imm == 2 && in.neon_size == 16 && in.imm64 == 2 && in.bf_lsb == 1);
+
+    /* vld2.8 {d0, d1}, [r0]: two interleaved structures, one group */
+    put16(0, 0xF920); put16(2, 0x080F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_LDN && in.imm == 2 && in.bf_lsb == 1 && in.bf_width == 1 && in.neon_size == 8);
+
+    /* vst4.32 {d0, d2, d4, d6}, [r1]: four, spaced two apart */
+    put16(0, 0xF901); put16(2, 0x018F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_STN && in.imm == 4 && in.bf_lsb == 2 && in.bf_width == 1 && in.neon_size == 32);
+
+    /* vld2.32 {d0, d1, d2, d3}, [r0]: two structures twice over */
+    put16(0, 0xF920); put16(2, 0x038F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_LDN && in.imm == 2 && in.bf_width == 2 && in.neon_size == 32);
+
+    /* The space is claimed whole: a 64-bit lane form is SIMD, not a store. */
+    put16(0, 0xF9A2); put16(2, 0x0C0F | 0x00C0);   /* vld1 all lanes, size 11 */
+    in = dec(ARM_T32, BASE);
+    assert(in.cls == A_SIMD && in.op == OP_NONE);
+
+    printf("  neon structure loads           ok\n");
 }
 
 static void test_simd_identified(void) {
@@ -1064,6 +1233,7 @@ int main(void) {
     test_mode_switches();
     test_arm_cond_f();
     test_simd_identified();
+    test_neon_structure_loads();
     test_vfp();
     test_neon_operands();
     test_exclusive();

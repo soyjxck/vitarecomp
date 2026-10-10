@@ -23,6 +23,7 @@
 #define VITARECOMP_NEON_H
 
 #include "vfp.h"
+#include "mem.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -102,6 +103,46 @@ static inline uint64_t vita_neon_bsl(uint64_t d, uint64_t n, uint64_t m) {
 }
 
 /* Insert a 32-bit lane. */
+/* One lane of any width replaced. */
+static inline uint64_t vita_neon_set_lane(uint64_t d, int lane, uint64_t v, int size) {
+    uint64_t m = vita_lane_mask(size) << (lane * size);
+    return (d & ~m) | ((v << (lane * size)) & m);
+}
+
+/* VLDn / VSTn, multiple structures: memory holds `groups` runs of
+ * (64 / size) structures of n elements each, interleaved; register
+ * d0 + g*n*spacing + k*spacing takes element k of every structure in run g.
+ * VLD2.8 {d0, d1} is n 2, one group: d0 gets the even bytes, d1 the odd. */
+static inline void vita_neon_ldn(int n, int d0, int spacing, int groups, uint32_t addr, int size) {
+    int lanes = 64 / size, bytes = size / 8;
+    for (int g = 0; g < groups; g++) {
+        for (int k = 0; k < n; k++) {
+            uint64_t v = 0;
+            for (int l = 0; l < lanes; l++) {
+                uint32_t a = addr + (uint32_t)(((g * lanes + l) * n + k) * bytes);
+                uint64_t e = size == 8 ? vita_read8(a) : size == 16 ? vita_read16(a) : vita_read32(a);
+                v |= e << (l * size);
+            }
+            vita_d_set(d0 + g * n * spacing + k * spacing, v);
+        }
+    }
+}
+static inline void vita_neon_stn(int n, int d0, int spacing, int groups, uint32_t addr, int size) {
+    int lanes = 64 / size, bytes = size / 8;
+    for (int g = 0; g < groups; g++) {
+        for (int k = 0; k < n; k++) {
+            uint64_t v = vita_d_get(d0 + g * n * spacing + k * spacing);
+            for (int l = 0; l < lanes; l++) {
+                uint32_t a = addr + (uint32_t)(((g * lanes + l) * n + k) * bytes);
+                uint64_t e = (v >> (l * size)) & vita_lane_mask(size);
+                if (size == 8)       vita_write8(a, (uint8_t)e);
+                else if (size == 16) vita_write16(a, (uint16_t)e);
+                else                 vita_write32(a, (uint32_t)e);
+            }
+        }
+    }
+}
+
 static inline uint64_t vita_neon_set32(uint64_t d, int lane, uint32_t v) {
     if (lane) return (d & 0x00000000FFFFFFFFull) | ((uint64_t)v << 32);
     return (d & 0xFFFFFFFF00000000ull) | v;

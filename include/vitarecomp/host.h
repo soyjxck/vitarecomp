@@ -51,6 +51,12 @@ void vita_main_stack_init(uint32_t base, uint32_t size);
  * TPIDRURO points at. Zeros for a module without one. */
 void vita_tls_init(uint32_t image, uint32_t filesz, uint32_t memsz);
 
+/* The variables the module imports (vita_var_imports, from the generated C):
+ * each is built in guest memory, or given a zeroed page when the runtime has
+ * no implementation, and its address written where the image expects it.
+ * After the module is loaded and the memory-block arena exists. */
+void vita_vars_bind(void);
+
 typedef struct {
     uint32_t base;         /* guest address of the pixels                 */
     uint32_t pitch;        /* in pixels                                    */

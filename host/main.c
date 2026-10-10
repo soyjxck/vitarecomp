@@ -234,6 +234,7 @@ int main(int argc, char **argv) {
     vita_heap_init(HEAP_BASE, HEAP_SIZE);
     vita_kernel_init(KERNEL_BASE, KERNEL_SIZE);
     vita_tls_init(vita_module_tls_addr, vita_module_tls_filesz, vita_module_tls_memsz);
+    vita_vars_bind();
     vita_main_stack_init(STACK_TOP - STACK_SIZE, STACK_SIZE);
     vita_register_functions();
 

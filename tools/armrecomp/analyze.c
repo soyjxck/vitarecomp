@@ -149,6 +149,11 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
     seedq local = {0};
     sq_push(&local, start, mode, 0);
 
+    /* Guards that branch to their table: what the walk from each such
+     * target should know about the register it is about to index with. */
+    struct { uint32_t addr; int8_t reg; uint32_t max; } guard[256];
+    uint32_t nguard = 0;
+
     while (local.n) {
         seed s = local.v[--local.n];
         uint32_t a = s.addr;
@@ -161,8 +166,10 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
 
         /* The last few instructions in flow, for the compare that bounds a
          * jump table. */
-        arm_insn prev[4];
+        arm_insn prev[16];
         uint32_t nprev = 0;
+        for (uint32_t g = 0; g < nguard; g++)
+            if (guard[g].addr == a) { arm_table_seed(&prev[0], guard[g].reg, guard[g].max); nprev = 1; break; }
 
         /* MOVW halves waiting for their MOVT, per register. */
         uint32_t movw_val[16];
@@ -302,8 +309,17 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                 continue;
             }
 
-            if (nprev < 4) prev[nprev++] = in;
-            else { prev[0] = prev[1]; prev[1] = prev[2]; prev[2] = prev[3]; prev[3] = in; }
+            if (in.cls == A_BRANCH && in.has_target && in.conditional && nguard < 256) {
+                int8_t greg; uint32_t gmax;
+                if (arm_table_guard(prev, nprev, &in, &greg, &gmax)) {
+                    guard[nguard].addr = in.target;
+                    guard[nguard].reg  = greg;
+                    guard[nguard].max  = gmax;
+                    nguard++;
+                }
+            }
+            if (nprev < 16) prev[nprev++] = in;
+            else { for (uint32_t i = 1; i < 16; i++) prev[i - 1] = prev[i]; prev[15] = in; }
 
             if (in.cls == A_BRANCH && in.has_target) {
                 sq_push(&local, in.target, s.mode, 0);

@@ -119,6 +119,33 @@ static inline uint32_t vita_sxth(uint32_t v) { return (uint32_t)(int32_t)(int16_
 static inline uint32_t vita_uxtb(uint32_t v) { return v & 0xFF; }
 static inline uint32_t vita_uxth(uint32_t v) { return v & 0xFFFF; }
 
+/* Both bytes of a halfword pair, each extended into its halfword. */
+static inline uint32_t vita_sxtb16(uint32_t v) {
+    return (uint32_t)(uint16_t)(int16_t)(int8_t)(v & 0xFF)
+         | ((uint32_t)(uint16_t)(int16_t)(int8_t)((v >> 16) & 0xFF) << 16);
+}
+static inline uint32_t vita_uxtb16(uint32_t v) { return v & 0x00FF00FFu; }
+
+/* Two halfword adds with no carry between them, for the extend-and-add pair forms. */
+static inline uint32_t vita_add16(uint32_t a, uint32_t b) {
+    return ((a + b) & 0x0000FFFFu) | (((a & 0xFFFF0000u) + (b & 0xFFFF0000u)) & 0xFFFF0000u);
+}
+
+/* A variable the module imports from a firmware library. The generated code
+ * reads its guest address through `value`; the loader writes that address
+ * into the image at every word that held a placeholder (`abs_sites`), and
+ * binds the value to what the runtime provides under `name`. */
+typedef struct { uint32_t addr, addend; } vita_var_site;
+typedef struct {
+    uint32_t             lib_nid, var_nid;
+    const char          *name;        /* "SceLibc::_Tolotab"; NULL when the database had no name */
+    uint32_t            *value;
+    const vita_var_site *abs_sites;   /* each gets the address plus its addend */
+    uint32_t             abs_count;
+} vita_var_import;
+extern const vita_var_import vita_var_imports[];
+extern const uint32_t        vita_var_import_count;
+
 static inline uint32_t vita_rev(uint32_t v) {
     return ((v & 0xFF) << 24) | ((v & 0xFF00) << 8)
          | ((v >> 8) & 0xFF00) | ((v >> 24) & 0xFF);

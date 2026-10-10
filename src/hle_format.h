@@ -26,4 +26,12 @@ typedef struct {
  * result would have had, as snprintf does. */
 size_t vita_guest_vformat(char *out, size_t cap, uint32_t fmt_addr, vita_vargs *v);
 
+/* The next 32-bit argument, from wherever the call left it. */
+uint32_t vita_varg32(vita_vargs *v);
+
+/* Scans the guest string at str_addr by the format at fmt_addr, writing
+ * through the pointer arguments; returns the count assigned, or -1 when the
+ * input ended before the first conversion. */
+int vita_guest_vscanf(uint32_t str_addr, uint32_t fmt_addr, vita_vargs *v);
+
 #endif /* VITARECOMP_HLE_FORMAT_H */

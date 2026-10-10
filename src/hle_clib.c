@@ -7,6 +7,7 @@
  * backed before a host routine is allowed near it.
  */
 
+#include "vitarecomp/hle.h"
 #include "vitarecomp/recomp_rt.h"
 #include "hle_format.h"
 
@@ -59,7 +60,7 @@ void vita_hle_sceClibMemcmp(void) {
  * is a guest address.
  */
 
-static uint32_t varg32(vita_vargs *v) {
+uint32_t vita_varg32(vita_vargs *v) {
     if (v->mem) { uint32_t x = vita_read32(v->mem); v->mem += 4; return x; }
     if (v->next_reg <= 3) {
         uint32_t x = v->next_reg == 1 ? r1 : v->next_reg == 2 ? r2 : r3;
@@ -109,11 +110,11 @@ size_t vita_guest_vformat(char *out, size_t cap, uint32_t fmt_addr, vita_vargs *
             spec[s++] = '%';
             i++;
             while (i < avail && fmt[i] && strchr("-+ #0", fmt[i]) && s < 8) spec[s++] = fmt[i++];
-            if (i < avail && fmt[i] == '*') { snprintf(spec + s, sizeof(spec) - s, "%d", (int)varg32(v)); s = strlen(spec); i++; }
+            if (i < avail && fmt[i] == '*') { snprintf(spec + s, sizeof(spec) - s, "%d", (int)vita_varg32(v)); s = strlen(spec); i++; }
             while (i < avail && fmt[i] >= '0' && fmt[i] <= '9' && s < 14) spec[s++] = fmt[i++];
             if (i < avail && fmt[i] == '.') {
                 spec[s++] = fmt[i++];
-                if (i < avail && fmt[i] == '*') { snprintf(spec + s, sizeof(spec) - s, "%d", (int)varg32(v)); s = strlen(spec); i++; }
+                if (i < avail && fmt[i] == '*') { snprintf(spec + s, sizeof(spec) - s, "%d", (int)vita_varg32(v)); s = strlen(spec); i++; }
                 while (i < avail && fmt[i] >= '0' && fmt[i] <= '9' && s < 20) spec[s++] = fmt[i++];
             }
             int is64 = 0;
@@ -130,13 +131,13 @@ size_t vita_guest_vformat(char *out, size_t cap, uint32_t fmt_addr, vita_vargs *
                 if (is64) { spec[s++] = 'l'; spec[s++] = 'l'; spec[s++] = 'd'; spec[s] = 0;
                             snprintf(piece, sizeof(piece), spec, (long long)varg64(v)); }
                 else      { spec[s++] = 'd'; spec[s] = 0;
-                            snprintf(piece, sizeof(piece), spec, (int)varg32(v)); }
+                            snprintf(piece, sizeof(piece), spec, (int)vita_varg32(v)); }
                 break;
             case 'u': case 'x': case 'X': case 'o':
                 if (is64) { spec[s++] = 'l'; spec[s++] = 'l'; spec[s++] = conv; spec[s] = 0;
                             snprintf(piece, sizeof(piece), spec, (unsigned long long)varg64(v)); }
                 else      { spec[s++] = conv; spec[s] = 0;
-                            snprintf(piece, sizeof(piece), spec, (unsigned)varg32(v)); }
+                            snprintf(piece, sizeof(piece), spec, (unsigned)vita_varg32(v)); }
                 break;
             case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
                 uint64_t bits = varg64(v);
@@ -147,13 +148,13 @@ size_t vita_guest_vformat(char *out, size_t cap, uint32_t fmt_addr, vita_vargs *
                 break;
             }
             case 'p':
-                snprintf(piece, sizeof(piece), "0x%08X", varg32(v));
+                snprintf(piece, sizeof(piece), "0x%08X", vita_varg32(v));
                 break;
             case 'c':
-                piece[0] = (char)varg32(v); piece[1] = '\0';
+                piece[0] = (char)vita_varg32(v); piece[1] = '\0';
                 break;
             case 's': {
-                uint32_t a = varg32(v);
+                uint32_t a = vita_varg32(v);
                 uint32_t n = vita_mem_avail(a);
                 const char *gs = n ? (const char *)vita_mem_ptr(a, 1) : NULL;
                 if (!gs) { snprintf(piece, sizeof(piece), a ? "(bad string 0x%08X)" : "(null)", a); break; }
@@ -167,7 +168,7 @@ size_t vita_guest_vformat(char *out, size_t cap, uint32_t fmt_addr, vita_vargs *
                 piece[0] = '%'; piece[1] = '\0';
                 break;
             case 'n':
-                (void)varg32(v);
+                (void)vita_varg32(v);
                 break;
             default:
                 snprintf(piece, sizeof(piece), "%%%c", conv);
@@ -189,6 +190,11 @@ static void format_to_console(uint32_t fmt, vita_vargs *v) {
     size_t n = vita_guest_vformat(out, sizeof(out), fmt, v);
     fputs(out, stdout);
     fflush(stdout);
+    /* Echoed to the trace too, so the program's own words line up with the
+     * calls around them. */
+    size_t len = strlen(out);
+    while (len && (out[len - 1] == 10 || out[len - 1] == 13)) out[--len] = 0;
+    if (len) vita_hle_trace("printf at 0x%08X: %s", vita_last_pc, out);
     r0 = (uint32_t)n;
 }
 
