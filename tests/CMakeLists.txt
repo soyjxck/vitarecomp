@@ -44,6 +44,19 @@ target_compile_options(test_decode PRIVATE -UNDEBUG)
 
 add_test(NAME decode COMMAND test_decode)
 
+add_executable(test_reloc
+    test_reloc.c
+    ${CMAKE_SOURCE_DIR}/tools/armrecomp/reloc.c
+)
+
+target_include_directories(test_reloc PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/armrecomp
+)
+
+target_compile_options(test_reloc PRIVATE -UNDEBUG)
+
+add_test(NAME reloc COMMAND test_reloc)
+
 add_executable(test_runtime test_runtime.c)
 target_link_libraries(test_runtime PRIVATE vitarecomp)
 target_compile_options(test_runtime PRIVATE -UNDEBUG)

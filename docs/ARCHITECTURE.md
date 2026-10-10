@@ -156,6 +156,60 @@ Three things this does not claim:
   relocations, so shape is all there is — which is the cost of the launch-window
   catalogue being where the exclusives are.
 
+### Relocatable modules: the stream names the pointers
+
+On an `ET_SCE_RELEXEC` module the `PT_SCE_RELA` segment lists every word the
+linker filled with an address. `reloc.c` decodes it: ten entry formats
+selected by the low four bits of the first word, of which format 0 is the
+plain three-word form (the only one vita-toolchain writes) and 1 to 9 are
+Sony's compact forms that carry a running offset and reuse the previous
+entry's type pair. The layouts are the loader's own, cross-checked against
+the toolchain's writer.
+
+The stream is applied at the **identity base** — every segment at its own
+`p_vaddr`, the address space the decoder and the literal folder already use —
+and the number of bytes that changes is reported. On a module linked at those
+addresses it is zero, and that is the check that the bytes discovery reads
+are the bytes the program runs with. Loading elsewhere is the loader's
+business at run time, not translation's.
+
+For discovery the question is only what each relocated word points at. Into
+`.text` with the Thumb bit set there are two candidates: a Thumb function,
+or an odd byte of the read-only data that shares the segment — a string,
+mostly, since half of all byte-packed strings start on an odd address. So a
+target without a prologue whose first two bytes are both printable is
+refused as text, except inside a run of four or more adjacent relocated
+Thumb-tagged words, which is a pointer table and settles the matter the way
+the data-segment scan does.
+
+```
+$ armrecomp relocs vitashell.elf
+entries:  63334  ->  63334 relocations
+  format 0     63334  100.0%
+   10  R_ARM_THM_CALL            27050   42.7%
+    2  R_ARM_ABS32               13301   21.0%
+   47  R_ARM_THM_MOVW_ABS_NC     11315   17.9%
+   48  R_ARM_THM_MOVT_ABS        11338   17.9%
+  into .text, Thumb bit       6735
+  into .text, even           14532  (ARM code or data)
+
+$ armrecomp discover vitashell.elf
+  relocations         6646  (of 6735 Thumb-tagged pointers into .text; 89 refused as text)
+    in pointer tables 4566
+functions:            9195
+  from seeds          4523
+  from relocations    2975  (enumerated)
+  from shape          1697  (heuristic)
+bytes covered:        1830444 / 2561820  (71.5%)
+```
+
+Before the stream was read the same module gave 8,074 functions, 3,551 of
+them from shape, and 65.3% coverage. Relocation seeds are queued after the
+call harvest, so "from relocations" counts what the stream *added*: a
+function reachable by `BL` is credited to the call. The 14,532 even-aligned
+pointers are not seeded — nothing in an entry says whether an even `.text`
+address is ARM code or a literal — and are reported so the gap is visible.
+
 
 ## Stage 5 — emit
 

@@ -1004,7 +1004,8 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
         fprintf(f, "/* ---------------------------------------------------------------\n");
         fprintf(f, " * vita_func_%08X  --  %u instructions, %u bytes%s\n",
                 fn->addr, b.n, fn->end - fn->addr,
-                fn->from_heuristic ? ", discovered by shape (heuristic)" : "");
+                fn->from_heuristic == VF_SHAPE ? ", discovered by shape (heuristic)"
+              : fn->from_heuristic == VF_RELOC ? ", discovered by relocation" : "");
         fprintf(f, " * ------------------------------------------------------------- */\n");
         fprintf(f, "void vita_func_%08X(void) {\n", fn->addr);
 

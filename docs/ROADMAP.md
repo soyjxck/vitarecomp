@@ -62,8 +62,15 @@ obstacle on this platform.
 - [x] Pointer-shape recovery, prologue-filtered, counted separately as the
       heuristic it is
 - [x] `armrecomp discover`
-- [ ] `SCE_RELA` relocation seeding — not applicable to `ET_SCE_EXEC` modules,
-      which is the whole launch-window catalogue, but needed for 2015+ titles
+- [x] **`SCE_RELA` relocation seeding** — not applicable to `ET_SCE_EXEC`
+      modules, which is the whole launch-window catalogue, but needed for
+      2015+ titles and every homebrew module. All ten entry formats decoded
+      (`reloc.c`), applied at the link addresses as a check (zero bytes
+      changed on the fixture), and every relocated word holding a
+      Thumb-tagged `.text` address seeded, with a text filter that pointer
+      tables bypass. On VitaShell: 63,334 entries, 6,735 such pointers,
+      functions 8,074 → 9,195, coverage 65.3% → 71.5%, shape's share of the
+      functions 44% → 18%. `armrecomp relocs` reports the stream
 - [x] **Scan the DATA segment for function pointers**, and read pointer tables
       as tables. The C++ `.init_array` lives in the rw segment, so all 551
       static constructors were invisible; a run of 4+ Thumb-tagged in-range

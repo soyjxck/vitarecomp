@@ -307,9 +307,109 @@ static void shape_scan(const vm_image *img, vf_result *r, seedq *q) {
     }
 }
 
+/* --- relocation-backed pointers --------------------------------------------- */
+/*
+ * On a relocatable module the stream names every word the linker filled with
+ * an address. Whether such a word IS a pointer is settled; what remains is
+ * what it points at. Into the executable segment, with the Thumb bit set,
+ * there are two candidates: a Thumb function, or an odd byte of the read-only
+ * data that shares the segment — a string, most often, since strings are
+ * byte-packed and half of them start on an odd address.
+ *
+ * So the filter is narrower than shape's. A target that begins with a
+ * prologue is taken. One that does not, and whose first two bytes are both
+ * printable ASCII, is refused as text: a function whose first halfword is two
+ * printable bytes exists (`bx lr` is "pG") but a string that starts with two
+ * printable bytes is the common case. Both counts are reported.
+ *
+ * Inside a TABLE the text filter is not applied, for the reason shape_scan
+ * gives: a run of adjacent relocated words that all hold Thumb-tagged .text
+ * addresses is a table of function pointers, and its neighbours have already
+ * settled what each word is. A string table would hold even and odd pointers
+ * alike. Relocations arrive in address order, so a run is consecutive entries
+ * whose patch addresses step by one word.
+ */
+
+#define RELOC_RUN_MIN 4
+
+static int looks_like_text(uint16_t h) {
+    uint8_t a = (uint8_t)h, b = (uint8_t)(h >> 8);
+    return a >= 0x20 && a < 0x7F && b >= 0x20 && b < 0x7F;
+}
+
+/* A relocated word holding a Thumb-tagged address into .text. */
+static int table_word(const vm_image *img, const vr_entry *e) {
+    if (e->code != VR_ABS32 && e->code != VR_TARGET1) return 0;
+    if (!(e->value & 1)) return 0;
+    uint32_t t = e->value & ~1u;
+    return t >= img->seg_vaddr && t < img->seg_vaddr + img->seg_len;
+}
+
+static void reloc_seeds(const vm_image *img, const vr_table *relocs,
+                        vf_result *r, seedq *q) {
+    const uint8_t *text = img->data + img->seg_file;
+    const uint32_t base = img->seg_vaddr;
+    const uint32_t len  = img->seg_len;
+
+    uint8_t *in_table = (uint8_t *)calloc(relocs->n, 1);
+    if (in_table) {
+        uint32_t i = 0;
+        while (i < relocs->n) {
+            if (!table_word(img, &relocs->v[i])) { i++; continue; }
+            uint32_t j = i + 1;
+            while (j < relocs->n && table_word(img, &relocs->v[j]) &&
+                   relocs->v[j].patch == relocs->v[j - 1].patch + 4)
+                j++;
+            if (j - i >= RELOC_RUN_MIN) memset(in_table + i, 1, j - i);
+            i = j;
+        }
+    }
+
+    for (uint32_t i = 0; i < relocs->n; i++) {
+        const vr_entry *e = &relocs->v[i];
+
+        /* A word holding an address, or the MOVW half of a pair that builds
+         * one in a register. The MOVT half carries the same value and would
+         * count the same pointer twice. */
+        if (e->code != VR_ABS32 && e->code != VR_TARGET1 &&
+            e->code != VR_MOVW_ABS_NC && e->code != VR_THM_MOVW_ABS_NC)
+            continue;
+
+        uint32_t v = e->value;
+        uint32_t t = v & ~1u;
+        if (t < base || t >= base + len) continue;
+
+        if (!(v & 1)) { r->reloc_ptrs_even++; continue; }
+        r->reloc_ptrs_code++;
+
+        if (t + 2 > base + len) { r->rejected_reloc++; continue; }
+
+        arm_insn in;
+        if (arm_decode(text, base, len, t, ARM_T32, &in) == 0 ||
+            in.cls == A_UNKNOWN || in.cls == A_UNDEF) {
+            r->rejected_reloc++;
+            continue;
+        }
+
+        uint16_t h = (uint16_t)(text[t - base] | ((uint16_t)text[t - base + 1] << 8));
+        int prologue = ((h & 0xFE00) == 0xB400)          /* push            */
+                    || (h == 0xE92D)                     /* push.w / stmdb  */
+                    || ((h & 0xFF80) == 0xB080);         /* sub sp, #imm    */
+        int tabled = in_table && in_table[i];
+        if (!prologue && !tabled && looks_like_text(h)) { r->rejected_reloc++; continue; }
+
+        sq_push(q, t, ARM_T32, VF_RELOC);
+        r->seeds_reloc++;
+        if (tabled) r->seeds_reloc_table++;
+    }
+
+    free(in_table);
+}
+
 /* --- entry point ------------------------------------------------------------ */
 
-int vf_discover(const vm_image *img, const vm_module *mod, vf_result *out) {
+int vf_discover(const vm_image *img, const vm_module *mod,
+                const vr_table *relocs, vf_result *out) {
     memset(out, 0, sizeof(*out));
 
     out->seen_bytes = (img->seg_len / 2 + 7) / 8 + 1;
@@ -402,9 +502,27 @@ int vf_discover(const vm_image *img, const vm_module *mod, vf_result *out) {
         walk(img, mod, out, &q, s.addr, s.mode, &out->funcs[out->count - 1]);
     }
 
-    /* 4. Shape recovery, after everything principled has been exhausted, so it
-     *    only ever adds what the reliable seeds could not reach. */
+    /* 4. Relocation-backed pointers, after the calls have been followed, so
+     *    the count says what the stream ADDED: a function reachable by BL is
+     *    credited to the call that reaches it, and one found only because a
+     *    relocated word names it is credited here. Enumeration where the
+     *    module is relocatable; nothing where it is not. */
     uint32_t before = q.n;
+    if (relocs && relocs->n) reloc_seeds(img, relocs, out, &q);
+    head = before;
+    while (head < q.n) {
+        seed s = q.v[head++];
+        if (s.addr < base || s.addr >= base + img->seg_len) continue;
+        if (FN_TEST(s.addr)) continue;
+
+        FN_MARK(s.addr);
+        add_func(out, s.addr, s.mode, s.heur);
+        walk(img, mod, out, &q, s.addr, s.mode, &out->funcs[out->count - 1]);
+    }
+
+    /* 5. Shape recovery, after everything principled has been exhausted, so it
+     *    only ever adds what the reliable seeds could not reach. */
+    before = q.n;
     shape_scan(img, out, &q);
     head = before;
     while (head < q.n) {

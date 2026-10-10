@@ -11,12 +11,15 @@ The cheapest end-to-end proof that needs no game, no keys, and no GPU. The
 vitasdk sample programs that draw through `sceDisplaySetFrameBuf` and read
 `sceCtrlPeekBufferPositive` use about a dozen firmware functions, all shallow.
 
-1. **Relocations.** Homebrew and every 2015+ title are `ET_SCE_RELEXEC`.
-   Decode `PT_SCE_RELA` (formats 0 to 9, documented in
-   [VITA3K-REFERENCE.md](VITA3K-REFERENCE.md)) in `tools/armrecomp`, apply
-   them at a chosen load address when extracting, and use every
-   `R_ARM_ABS32`-class target that lands in `.text` as a discovery seed.
-   Upstream's phase 4 item; it also replaces shape heuristics for this era.
+1. **Relocations. Done 2026-10-10.** Homebrew and every 2015+ title are
+   `ET_SCE_RELEXEC`. `tools/armrecomp/reloc.c` decodes `PT_SCE_RELA`
+   (formats 0 to 9, per [VITA3K-REFERENCE.md](VITA3K-REFERENCE.md)), applies
+   it at the link addresses as a check, and seeds discovery from every
+   relocated word holding a Thumb-tagged `.text` address. On VitaShell:
+   functions 8,074 → 9,195, coverage 65.3 % → 71.5 %, the shape heuristic's
+   share 44 % → 18 %. Details in [ARCHITECTURE.md](ARCHITECTURE.md), stage 4.
+   Left open: the 14,532 even-aligned relocated pointers into `.text`, which
+   are ARM code or literals and nothing in the entry says which.
 2. **Fixture corpus.** `tools/fetch-deps.sh` already pulls VitaShell. Add a
    vitasdk framebuffer sample built from source (or its release VPK) so the
    milestone has a module small enough to reach 100 % translation.

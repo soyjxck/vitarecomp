@@ -9,6 +9,7 @@
 #include "inflate.h"
 #include "decode.h"
 #include "module.h"
+#include "reloc.h"
 #include "analyze.h"
 #include "emit.h"
 #include "nids.h"
@@ -35,6 +36,9 @@ static const char *USAGE =
     "  armrecomp extract <file> <out>    SELF -> plain ELF32\n"
     "  armrecomp cover   <file.elf>      decode-coverage report\n"
     "  armrecomp funcs   <file.elf> [niddb]  module info and the HLE work list\n"
+    "  armrecomp relocs  <file.elf>      the relocation stream, decoded and classified\n"
+    "  armrecomp discover <file.elf>     function discovery\n"
+    "  armrecomp emit    <file.elf> <out.c> [n] [niddb]  translate to C\n"
     "\n"
     "Accepts a SELF (eboot.bin, *.suprx) or a plain ELF/velf. A PFS-encrypted\n"
     "NoNpDrm dump is reported as such rather than parsed as garbage.\n";
@@ -560,8 +564,17 @@ static int exec_image(const uint8_t *buf, size_t size, const vc_module *m,
     return found;
 }
 
+/* Load a plain ELF, locate its segments, parse the module info, and decode
+ * and apply its relocation stream.
+ *
+ * Applying is done at the identity base — every segment at its own p_vaddr —
+ * which is the address space everything downstream already uses. On a module
+ * the linker laid out at those addresses it changes nothing, and that is
+ * checked rather than assumed: a non-zero change count means the bytes on
+ * disk were not the bytes the program runs with, and it is said so. */
 static int load_module(const char *path, uint8_t **buf, size_t *size,
-                       vc_module *vc, vm_image *img, vm_module *vm) {
+                       vc_module *vc, vm_image *img, vm_module *vm,
+                       vr_table *rt) {
     *buf = slurp(path, size);
     if (!*buf) { fprintf(stderr, "armrecomp: cannot read %s\n", path); return 0; }
 
@@ -582,13 +595,104 @@ static int load_module(const char *path, uint8_t **buf, size_t *size,
         fprintf(stderr, "armrecomp: module info: %s\n", err);
         free(*buf); return 0;
     }
+
+    if (vr_parse(*buf, *size, vc, rt, err, sizeof(err)))
+        fprintf(stderr, "armrecomp: relocations: %s (keeping %u decoded)\n", err, rt->n);
+
+    if (rt->n) {
+        uint32_t changed, unsupported, outside;
+        vr_apply(*buf, *size, vc, rt, &changed, &unsupported, &outside);
+        if (changed)
+            fprintf(stderr, "armrecomp: NOTE: applying %u relocations at the link addresses "
+                            "changed %u of them — the file was not linked at its p_vaddr\n",
+                    rt->n, changed);
+        if (unsupported)
+            fprintf(stderr, "armrecomp: NOTE: %u relocations of a code this tool does not apply\n",
+                    unsupported);
+    }
     return 1;
+}
+
+/* --- relocs: the stream, decoded and classified ------------------------------ */
+
+static int cmd_relocs(const char *path) {
+    uint8_t *buf; size_t size;
+    vc_module vc; vm_image img; vm_module vm; vr_table rt;
+    if (!load_module(path, &buf, &size, &vc, &img, &vm, &rt)) return 1;
+
+    printf("module:   %s   (%s)\n", vm.info.name, vc_elf_type_name(vc.elf.type));
+    printf("streams:  %u  (%u bytes)\n", rt.streams, rt.stream_bytes);
+
+    if (!rt.n) {
+        printf("\nno relocations: a static module keeps its pointers in the bytes,\n"
+               "and discovery has only their shape to go on.\n");
+        vr_free(&rt);
+        free(buf);
+        return 0;
+    }
+
+    uint32_t entries = 0;
+    for (int f = 0; f < 10; f++) entries += rt.by_format[f];
+    printf("entries:  %u  ->  %u relocations\n", entries, rt.n);
+
+    printf("\nby entry format:\n");
+    for (int f = 0; f < 10; f++) {
+        if (!rt.by_format[f]) continue;
+        printf("  format %d  %8u  %5.1f%%\n", f, rt.by_format[f],
+               100.0 * rt.by_format[f] / entries);
+    }
+
+    printf("\nby relocation code:\n");
+    for (int c = 0; c < 256; c++) {
+        if (!rt.by_code[c]) continue;
+        printf("  %3d  %-22s %8u  %5.1f%%\n", c, vr_code_name((uint8_t)c), rt.by_code[c],
+               100.0 * rt.by_code[c] / rt.n);
+    }
+
+    /* Where the pointers go. The question discovery asks of the stream. */
+    uint32_t into_text_odd = 0, into_text_even = 0, into_data = 0, elsewhere = 0;
+    uint32_t patched_text = 0, patched_data = 0;
+    for (uint32_t i = 0; i < rt.n; i++) {
+        const vr_entry *e = &rt.v[i];
+        int abs = e->code == VR_ABS32 || e->code == VR_TARGET1 ||
+                  e->code == VR_MOVW_ABS_NC || e->code == VR_THM_MOVW_ABS_NC;
+        if (abs) {
+            uint32_t t = e->value & ~1u;
+            if (t >= img.seg_vaddr && t < img.seg_vaddr + img.seg_len) {
+                if (e->value & 1) into_text_odd++; else into_text_even++;
+            } else {
+                int d = 0;
+                for (uint32_t k = 0; k < img.data_seg_count; k++)
+                    if (t >= img.data_segs[k].vaddr && t < img.data_segs[k].vaddr + img.data_segs[k].len) d = 1;
+                if (d) into_data++; else elsewhere++;
+            }
+        }
+        if (e->patch >= img.seg_vaddr && e->patch < img.seg_vaddr + img.seg_len) patched_text++;
+        else patched_data++;
+    }
+
+    printf("\nabsolute pointers (ABS32, TARGET1, MOVW halves):\n");
+    printf("  into .text, Thumb bit   %8u  (function pointers, or odd bytes of rodata)\n", into_text_odd);
+    printf("  into .text, even        %8u  (ARM code or data)\n", into_text_even);
+    printf("  into data segments      %8u\n", into_data);
+    printf("  elsewhere / absolute    %8u\n", elsewhere);
+    printf("\npatch sites:\n");
+    printf("  in .text                %8u\n", patched_text);
+    printf("  in data segments        %8u\n", patched_data);
+
+    if (rt.bad_segment)      printf("\n  NOTE: %u entries named a segment that is not PT_LOAD\n", rt.bad_segment);
+    if (rt.rebase_unmatched) printf("  NOTE: %u rebase entries hold a word in no segment\n", rt.rebase_unmatched);
+    if (rt.trailing)         printf("  NOTE: %u trailing bytes did not form an entry\n", rt.trailing);
+
+    vr_free(&rt);
+    free(buf);
+    return 0;
 }
 
 static int cmd_funcs(const char *path, const char *dbdir) {
     uint8_t *buf; size_t size;
-    vc_module vc; vm_image img; vm_module vm;
-    if (!load_module(path, &buf, &size, &vc, &img, &vm)) return 1;
+    vc_module vc; vm_image img; vm_module vm; vr_table rt;
+    if (!load_module(path, &buf, &size, &vc, &img, &vm, &rt)) return 1;
 
     /* The NID database is optional. Without it the report still gives library
      * NIDs and counts, which is enough to size the work; with it the report
@@ -655,6 +759,7 @@ static int cmd_funcs(const char *path, const char *dbdir) {
     if (vm.import_truncated)
         printf("\n  NOTE: import list truncated at %d entries\n", VM_MAX_IMPORTS);
 
+    vr_free(&rt);
     free(buf);
     return 0;
 }
@@ -663,20 +768,23 @@ static int cmd_funcs(const char *path, const char *dbdir) {
 
 static int cmd_discover(const char *path) {
     uint8_t *buf; size_t size;
-    vc_module vc; vm_image img; vm_module vm;
-    if (!load_module(path, &buf, &size, &vc, &img, &vm)) return 1;
+    vc_module vc; vm_image img; vm_module vm; vr_table rt;
+    if (!load_module(path, &buf, &size, &vc, &img, &vm, &rt)) return 1;
 
     vf_result r;
-    if (vf_discover(&img, &vm, &r)) {
+    if (vf_discover(&img, &vm, &rt, &r)) {
         fprintf(stderr, "armrecomp: discovery failed (out of memory)\n");
         free(buf);
         return 1;
     }
 
-    uint32_t principled = 0, heuristic = 0;
+    uint32_t principled = 0, heuristic = 0, relocated = 0;
     for (uint32_t i = 0; i < r.count; i++) {
-        if (r.funcs[i].from_heuristic) heuristic++;
-        else                           principled++;
+        switch (r.funcs[i].from_heuristic) {
+        case VF_SHAPE: heuristic++; break;
+        case VF_RELOC: relocated++; break;
+        default:       principled++; break;
+        }
     }
 
     printf("module:   %s   (%s)\n", vm.info.name,
@@ -687,6 +795,12 @@ static int cmd_discover(const char *path) {
     printf("seeds:\n");
     printf("  module_start        %u\n", r.seeds_entry);
     printf("  exports             %u\n", r.seeds_export);
+    if (rt.n) {
+        printf("  relocations         %u  (of %u Thumb-tagged pointers into .text; %u refused as text)\n",
+               r.seeds_reloc, r.reloc_ptrs_code, r.rejected_reloc);
+        printf("    in pointer tables %u\n", r.seeds_reloc_table);
+        printf("    even-aligned      %u  (ARM code or data: not seeded)\n", r.reloc_ptrs_even);
+    }
     printf("  call targets        %u\n", r.seeds_call);
     printf("  pointer shape       %u  (heuristic; %u candidates rejected)\n",
            r.seeds_shape, r.rejected_shape);
@@ -700,6 +814,8 @@ static int cmd_discover(const char *path) {
 
     printf("\nfunctions:            %u\n", r.count);
     printf("  from seeds          %u\n", principled);
+    if (rt.n)
+        printf("  from relocations    %u  (enumerated)\n", relocated);
     printf("  from shape          %u  (heuristic)\n", heuristic);
 
     double cov = img.seg_len ? 100.0 * r.bytes_covered / img.seg_len : 0.0;
@@ -721,6 +837,7 @@ static int cmd_discover(const char *path) {
     printf("holds literal pools and read-only data. 100%% is not the target.\n");
 
     vf_free(&r);
+    vr_free(&rt);
     free(buf);
     return 0;
 }
@@ -730,8 +847,8 @@ static int cmd_discover(const char *path) {
 static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
                     const char *dbdir) {
     uint8_t *buf; size_t size;
-    vc_module vc; vm_image img; vm_module vm;
-    if (!load_module(path, &buf, &size, &vc, &img, &vm)) return 1;
+    vc_module vc; vm_image img; vm_module vm; vr_table rt;
+    if (!load_module(path, &buf, &size, &vc, &img, &vm, &rt)) return 1;
 
     nid_db *db = NULL;
     if (dbdir) {
@@ -742,7 +859,7 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
     }
 
     vf_result r;
-    if (vf_discover(&img, &vm, &r)) {
+    if (vf_discover(&img, &vm, &rt, &r)) {
         fprintf(stderr, "armrecomp: discovery failed\n");
         free(buf); return 1;
     }
@@ -824,6 +941,7 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
     nid_db_free(db);
     vm_free(&vm);
     vf_free(&r);
+    vr_free(&rt);
     free(buf);
     return 0;
 }
@@ -839,6 +957,9 @@ int main(int argc, char **argv) {
 
     if (strcmp(argv[1], "discover") == 0 && argc >= 3)
         return cmd_discover(argv[2]);
+
+    if (strcmp(argv[1], "relocs") == 0 && argc >= 3)
+        return cmd_relocs(argv[2]);
 
     if (strcmp(argv[1], "emit") == 0 && argc >= 4)
         return cmd_emit(argv[2], argv[3],

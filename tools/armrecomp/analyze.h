@@ -10,13 +10,16 @@
  *   1. module_start, from .sce_module_info
  *   2. the export entry table
  *   3. a linear harvest of BL/BLX targets
- *   4. pointer-shape recovery for stored function pointers
+ *   4. stored pointers named by the relocation stream (relocatable modules)
+ *   5. pointer-shape recovery for stored function pointers
  *
- * Step 4 is a HEURISTIC and is reported separately for that reason. On
- * ET_SCE_RELEXEC modules the relocations enumerate stored pointers exactly; on
- * ET_SCE_EXEC modules — which is every Vita launch-window title, and therefore
- * every exclusive worth recompiling — there are no relocations and shape is all
- * there is.
+ * Step 5 is a HEURISTIC and is reported separately for that reason. Step 4 is
+ * the enumeration that replaces it on ET_SCE_RELEXEC modules: a relocation
+ * names a word that holds an address, so there is no question of whether the
+ * word is a pointer, only of whether the odd-aligned thing it points at is a
+ * function or a string. On ET_SCE_EXEC modules — which is every Vita
+ * launch-window title, and therefore every exclusive worth recompiling — there
+ * are no relocations and shape is all there is.
  */
 
 #ifndef ARMRECOMP_ANALYZE_H
@@ -24,13 +27,22 @@
 
 #include "decode.h"
 #include "module.h"
+#include "reloc.h"
+
+/* How a function was found. Kept on the function so a report can say which
+ * tier is doing the work. */
+enum {
+    VF_PRINCIPLED = 0,   /* entry point, export, or a call target */
+    VF_SHAPE      = 1,   /* pointer-shape heuristic               */
+    VF_RELOC      = 2,   /* a relocated word with the Thumb bit   */
+};
 
 typedef struct {
     uint32_t addr;          /* virtual address                      */
     arm_mode mode;
     uint32_t end;           /* highest address reached from here    */
     uint32_t insns;
-    uint8_t  from_heuristic;
+    uint8_t  from_heuristic;  /* one of VF_PRINCIPLED, VF_SHAPE, VF_RELOC */
 } vf_func;
 
 typedef struct {
@@ -60,11 +72,28 @@ typedef struct {
     uint32_t seeds_arm_refused;
     uint32_t simd_insns;
     uint32_t indirect_sites;
+
+    /* Relocation-backed pointers into the executable segment.
+     *
+     *   reloc_ptrs_code   odd (Thumb-tagged): a function pointer, or a pointer
+     *                     to an odd byte of read-only data in the same segment
+     *   reloc_ptrs_even   even: ARM code or data, and nothing in the entry
+     *                     says which, so these are counted and not seeded
+     *   seeds_reloc       of the odd ones, those seeded
+     *   rejected_reloc    of the odd ones, those refused because the bytes
+     *                     there read as text rather than as a prologue */
+    uint32_t reloc_ptrs_code;
+    uint32_t reloc_ptrs_even;
+    uint32_t seeds_reloc;
+    uint32_t seeds_reloc_table;   /* of seeds_reloc, those inside a pointer table */
+    uint32_t rejected_reloc;
 } vf_result;
 
-/* Discover functions in the image's executable segment. Returns 0 on success.
- * The caller frees with vf_free(). */
-int vf_discover(const vm_image *img, const vm_module *mod, vf_result *out);
+/* Discover functions in the image's executable segment. `relocs` may be NULL
+ * (a static module, or a caller that does not want relocation seeds). Returns
+ * 0 on success. The caller frees with vf_free(). */
+int vf_discover(const vm_image *img, const vm_module *mod,
+                const vr_table *relocs, vf_result *out);
 
 void vf_free(vf_result *r);
 

@@ -18,7 +18,8 @@ QA build to retail titles.
 | Build (MSVC 14.50, CMake 4.3, Ninja) | `armrecomp.exe` + `vitarecomp.lib` build clean |
 | `ctest` | 4 / 4 suites pass (container, inflate, decode, runtime) |
 | `armrecomp info / extract / cover` on VitaShell 2.02 `eboot.bin` (homebrew, no keys) | 3 segments inflated, Adler-32 ok, ELF 4,882,182 bytes as declared; Thumb-2 dominant, 0.22 % unknown, 2.01 % SIMD |
-| `armrecomp discover` on the same module (`ET_SCE_RELEXEC`, 2.56 MB `.text`) | 8,074 functions (4,523 from seeds, 3,551 from shape), 65.3 % of the segment covered, 1,915 unresolved indirect sites; no relocation seeding yet |
+| `armrecomp relocs` on the same module (`ET_SCE_RELEXEC`) | 63,334 entries decoded, all format 0; 6,735 relocated words hold Thumb-tagged `.text` addresses; applying the stream at the link addresses changes 0 bytes |
+| `armrecomp discover` with relocation seeding | 9,195 functions (4,523 from seeds, 2,975 only the relocations named, 1,697 from shape), 71.5 % of the segment covered; was 8,074 and 65.3 % before the stream was read |
 | `armrecomp funcs` against vita-headers `db/360` (156 files, 9,596 names) | 294 imports across 40 libraries, 287 resolved (97.6 %); `SceGxm` alone is 57 of them |
 
 Upstream's last measurement on *Uncharted: Fight for Fortune* (a QA build):
@@ -79,6 +80,7 @@ armrecomp info     <file>                       identify a module, report its st
 armrecomp extract  <self> <out.elf>             SELF in, plain ELF32 out
 armrecomp cover    <elf>                        coverage, class histogram, instruction set
 armrecomp funcs    <elf> [nid-db]               the HLE work list, from the import table
+armrecomp relocs   <elf>                        the relocation stream, decoded and classified
 armrecomp discover <elf>                        function discovery
 armrecomp emit     <elf> <out.c> <n> [nid-db]   translate to C
 ```

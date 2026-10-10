@@ -1,4 +1,4 @@
-﻿# armrecomp â€” the toolkit CLI. No external dependencies.
+# armrecomp — the toolkit CLI. No external dependencies.
 
 add_executable(armrecomp
     main.c
@@ -6,6 +6,7 @@ add_executable(armrecomp
     inflate.c
     decode.c
     module.c
+    reloc.c
     analyze.c
     emit.c
     nids.c
