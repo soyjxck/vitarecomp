@@ -1,4 +1,4 @@
-﻿/* armrecomp — the Vita static-recompilation toolkit CLI.
+/* armrecomp — the Vita static-recompilation toolkit CLI.
  *
  * Phase 1: identify any layer of the container stack and report exactly what
  * stands between here and decodable ARM code. No key material is needed for
@@ -894,10 +894,14 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
         fprintf(stderr, "armrecomp: cannot create %s\n", imppath);
 
     emit_stats st;
-    em_emit(&img, &vm, db, &r, f, imppath, limit, &st);
+    em_emit(&img, &vm, db, &r, f, outpath, imppath, limit, &st);
     fclose(f);
 
-    printf("wrote %s\n", outpath);
+    if (st.parts)
+        printf("wrote %s, its header, and %u part%s of up to %u functions\n",
+               outpath, st.parts, st.parts == 1 ? "" : "s", st.part_funcs);
+    else
+        printf("wrote %s\n", outpath);
     printf("  functions     %u\n", st.funcs);
     if (st.funcs_dropped)
         printf("  not emitted   %u  of %u discovered: reachable from no entry point, export or stored pointer\n",
@@ -948,10 +952,10 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
      * indexes at most 65,535 of them — so this is a COUNT limit, not a size
      * limit, and it arrives without warning at a few tens of thousands of
      * functions. */
-    if (st.funcs > 8000)
+    if (st.part_funcs > 8000)
         printf("\n%u functions is more COMDAT sections than a COFF object can index.\n"
                "  MSVC needs /bigobj on this file; other toolchains do not care.\n",
-               st.funcs);
+               st.part_funcs);
 
     printf("\nUntranslated instructions are named run-time traps, never silence.\n");
 

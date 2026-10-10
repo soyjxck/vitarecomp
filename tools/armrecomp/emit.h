@@ -26,6 +26,8 @@ typedef struct {
     uint32_t funcs_discovered;  /* registered by discovery                */
     uint32_t funcs_dropped;     /* of those, reachable from no root       */
     uint32_t funcs_promoted;    /* weak pointer targets made roots by a clean body */
+    uint32_t parts;             /* translation units the functions went into */
+    uint32_t part_funcs;        /* functions in the largest of them           */
     uint32_t insns;
     uint32_t translated;   /* emitted as real C            */
     uint32_t trapped;      /* emitted as a named trap      */
@@ -55,8 +57,12 @@ typedef struct {
  * implementation simply wins. Put all 524 in a single translation unit and the
  * ~500 unimplemented ones drag the whole object in, taking the implemented
  * definitions with them and colliding with every real one. */
+/* `outpath` names the main file `out` was opened on; the parts and the
+ * header that declares everything are written beside it, as
+ * <base>_NNN.c and <base>.h. VITARECOMP_EMIT_SPLIT in the environment sets
+ * the functions per part (default 2000; 0 keeps everything in `out`). */
 int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
-            const vf_result *disc, FILE *out, const char *impdir,
+            const vf_result *disc, FILE *out, const char *outpath, const char *impdir,
             uint32_t limit, emit_stats *st);
 
 #endif /* ARMRECOMP_EMIT_H */

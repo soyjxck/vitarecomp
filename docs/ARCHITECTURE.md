@@ -363,16 +363,27 @@ targets promoted.
 
 ### Building the output at full scale
 
+**The functions arrive in parts.** `armrecomp emit` writes the bodies into
+`recomp_funcs_000.c`, `_001.c`, ... of 2,000 functions each
+(`VITARECOMP_EMIT_SPLIT` in the environment changes the size; 0 keeps one
+file), every part including a generated `recomp_funcs.h` that declares every
+import and every function, and the main `recomp_funcs.c` keeps the dispatch
+table and the module constants. `host/CMakeLists.txt` globs the parts. One
+translation unit per module was fine at a homebrew's size and is not at a
+retail title's: a compiler works on one file for as long as it takes, and
+*Golden Abyss* in one file is SINGLE_MIN of one core where PARTS parts are
+SPLIT_MIN of all of them, most of that the link and the import defaults.
+
 Two things about compiling a whole recompiled module are worth knowing before
 meeting them as errors.
 
 **It is a section-count limit, not a size limit.** Each function becomes its own
 COMDAT section, and a COFF object file can index 65,535 of them. At 20,989
-functions this module goes straight past that and MSVC reports `C1128: number of
-sections exceeded object file format limit`, which names a symptom nobody would
-connect to the cause. `/bigobj` fixes it; other toolchains do not have the
-limit. `armrecomp emit` says so in its own output rather than leaving it to be
-discovered.
+functions in one file this module went straight past that and MSVC reported
+`C1128: number of sections exceeded object file format limit`, which names a
+symptom nobody would connect to the cause. `/bigobj` fixes it; other toolchains
+do not have the limit; the parts keep well under it, and `armrecomp emit` says
+so in its own output when a part does not.
 
 **The import defaults must be a static library, listed after the runtime.** One
 file per import, one archive member per function. See the note in `emit.h`: a

@@ -14,9 +14,15 @@ endif()
 
 file(GLOB VITARECOMP_IMPORT_DEFAULTS "${VITARECOMP_RECOMP_DIR}/recomp_funcs_imports/*.c")
 
+# The functions arrive in parts (recomp_funcs_000.c, _001.c, ...) beside the
+# main file, each including the generated recomp_funcs.h, so they compile in
+# parallel. A module small enough for one part has just the one.
+file(GLOB VITARECOMP_RECOMP_PARTS "${VITARECOMP_RECOMP_DIR}/recomp_funcs_[0-9][0-9][0-9].c")
+
 add_executable(vita_host
     main.c
     "${VITARECOMP_RECOMP_DIR}/recomp_funcs.c"
+    ${VITARECOMP_RECOMP_PARTS}
 )
 target_link_libraries(vita_host PRIVATE vitarecomp)
 
