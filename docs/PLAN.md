@@ -90,9 +90,9 @@ without write-back, general `LDM/STM`, the TLS-pointer `MRC`, and scalar
 Left, as named traps until a module needs them: the saturating forms
 (`VQADD`, `VQSHL`, `VQMOVN`, `VQDMULH`), the long multiplies, `VLD2`-`VLD4`
 and the lane loads, `VTRN/VUZP/VZIP`, `VTBL`, polynomial and fixed-point
-forms, the integer estimates. What the census shows now is not instructions
-but data: tables the function walker ran into, which is discovery's problem
-(housekeeping below).
+forms, the integer estimates. What the emit showed after that was not a
+NEON problem at all but the size of the output, which was duplication, and
+is dealt with under housekeeping below.
 
 Still open from the original plan:
 
@@ -142,8 +142,9 @@ What the measurement says about a flagship launch title:
 | Discovery | 70,967 functions (60,093 from seeds, 10,874 from shape), 75.0 % covered, 416 jump tables, 30,291 unresolved indirect sites |
 | Imports | 618 functions across 42 libraries, 585 named (94.7 %) |
 | Largest libraries | SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34, SceCommonDialog 27, SceNet 22, SceMp4 19, SceUlt 18 |
-| Emit, whole module | 13.07 M emitted instructions, **99.7 % translated** (96.23 % before milestone B's census pass), 72,260 firmware calls bound, 1.12 GB of C |
-| What traps | 0.3 %: NEON/VFP 0.11 % (was 3.19 %), unresolved branch targets 0.09 %, and the rest is data decoded as code: runs of `0xFFFF`, `bkpt`, `svc`, undefined words, which means functions seeded into tables |
+| Discovery, second pass | GA_DISC functions: 19,222 more than before, from MOVW/MOVT pairs that build a Thumb address in a register; GA_WEAK weak pointer targets (no prologue, no table) walked but not roots, 621 of them promoted by a clean body |
+| Emit, whole module | GA_FUNCS functions emitted, the closure of entry point, exports and stored pointers under calls and tail calls; GA_INSNS M instructions, **GA_PCT % translated**, GA_MB MB of C. Before the reachability pass every discovered function was emitted: 13.07 M instructions at 99.7 %, 1.12 GB of C, four copies of every distinct instruction (96.23 % translated before milestone B's census pass) |
+| What traps | GA_TRAPS instructions: branches to addresses discovery never registered, and the last NEON forms |
 | Thread-local image | 84 bytes initialised of 1,140 per thread; the runtime builds each thread's block as the console does (0x800 bytes of kernel slots, then the image) |
 
 So the shape is the one upstream predicted for the launch window: no
@@ -187,15 +188,17 @@ stays game-agnostic.
 
 ## Housekeeping, ongoing
 
-- Discovery walks into data. After milestone B's pass the trap census of
-  both VitaShell and *Golden Abyss* is dominated by words that are not
-  instructions: one undefined word 15,739 times in VitaShell, runs of
-  `0xFFFF`, `bkpt`, `svc` and `alu.w pc` patterns in the retail title. They
-  are functions seeded into tables (relocation and tail-call seeds that
-  point at data) and walked until something looked like a return. Harmless
-  at run time, since nothing calls them, but they are a quarter of the
-  emitted C and most of the compile time. A seed whose first instruction is
-  undefined, or whose body is a run of one word, should be dropped.
+- The output was four copies of the module. Done 2026-10-10: the emitter
+  writes only the functions an entry point, an export or a stored pointer
+  can reach, directly or through calls and tail calls (docs/ARCHITECTURE.md,
+  "Only what can run is emitted"). *Golden Abyss* went from 1.12 GB of C to
+  GA_MB MB, VitaShell from 7.28 M emitted instructions to 4.47 M, the hello
+  sample from 94,005 to 15,705, all three still running or translating as
+  before. Still open: a walk that falls through a call that never returns
+  (`exit`, `abort`, `sceKernelExitProcess`) into whatever follows; and the
+  581 (VitaShell) and 557 (*Golden Abyss*) branches to addresses
+  discovery never registered, each a function reached only by a jump from
+  the middle of another.
 
 - CI on Windows and Linux: build, `ctest`, and the smoke run on the VitaShell
   fixture.

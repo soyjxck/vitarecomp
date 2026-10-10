@@ -816,6 +816,12 @@ static int cmd_discover(const char *path) {
                r.seeds_tail, r.seeds_interwork);
     if (r.jump_tables)
         printf("  jump tables         %u  (tbb/tbh followed through their tables)\n", r.jump_tables);
+    if (r.seeds_pointer)
+        printf("  movw/movt pointers  %u  (Thumb-tagged .text addresses built in a register)\n",
+               r.seeds_pointer);
+    if (r.seeds_weak)
+        printf("  weak pointers       %u  (no prologue, no table: walked, emitted only if code reaches them)\n",
+               r.seeds_weak);
 
     printf("\nfunctions:            %u\n", r.count);
     printf("  from seeds          %u\n", principled);
@@ -893,6 +899,12 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
 
     printf("wrote %s\n", outpath);
     printf("  functions     %u\n", st.funcs);
+    if (st.funcs_dropped)
+        printf("  not emitted   %u  of %u discovered: reachable from no entry point, export or stored pointer\n",
+               st.funcs_dropped, st.funcs_discovered);
+    if (st.funcs_promoted)
+        printf("  weak roots    %u  pointer targets without a prologue, kept because their bodies translate cleanly\n",
+               st.funcs_promoted);
     printf("  instructions  %u\n", st.insns);
     printf("  translated    %u  (%.2f%%)\n", st.translated,
            st.insns ? 100.0 * st.translated / st.insns : 0.0);

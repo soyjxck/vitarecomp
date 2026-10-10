@@ -1448,28 +1448,166 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
 
 /* --- the whole module -------------------------------------------------------- */
 
+/* --- which functions can run ------------------------------------------------
+ *
+ * Discovery registers every address anything branches to, which is what keeps
+ * a `b` that leaves its function from trapping. But most such targets are
+ * blocks their own function already carries, and each one registered is a
+ * second copy of everything after it. The copies cost nothing at run time and
+ * everything at compile time: on the first retail title, 13 M instructions
+ * were emitted for 3.3 M distinct ones, 1.1 GB of C.
+ *
+ * So the emitter keeps only what can be entered: the functions an entry point,
+ * an export or a stored pointer names (discovery's roots), and everything they
+ * reach by a call or by a branch that leaves its caller's body. A function
+ * reached only by a branch its caller inlines, or only from data the linear
+ * sweep read as a call, is left out; nothing can arrive at it. The dispatch
+ * table lists what is emitted, so a computed transfer to anything else
+ * announces itself as a miss rather than running a copy.
+ */
+
+typedef struct { uint32_t addr, idx; } addr_idx;
+
+static int ai_cmp(const void *a, const void *b) {
+    uint32_t x = ((const addr_idx *)a)->addr, y = ((const addr_idx *)b)->addr;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static int ai_find(const addr_idx *v, uint32_t n, uint32_t addr) {
+    uint32_t lo = 0, hi = n;
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) / 2;
+        if (v[mid].addr == addr) return (int)v[mid].idx;
+        if (v[mid].addr <  addr) lo = mid + 1; else hi = mid;
+    }
+    return -1;
+}
+
+/* The functions `fn`'s body transfers to as functions: its calls, and the
+ * branches that are not labels of its own. Import stubs are firmware, not
+ * functions of the module. Returns how many it wrote.
+ *
+ * `clean` is set when the whole body would translate without a trap: every
+ * instruction claimed, every branch a label, a function or an import, nothing
+ * off the segment. Data read as code never manages that for long. */
+static uint32_t body_refs(const vm_image *img, const vm_module *mod, const vf_func *fn,
+                          const addr_idx *ai, uint32_t nai, uint32_t **out, uint32_t *cap, uint32_t at,
+                          int *clean) {
+    fbody b;
+    memset(&b, 0, sizeof(b));
+    collect(img, fn, &b);
+    uint32_t n = 0;
+    int ok = b.n > 0;
+    for (uint32_t k = 0; k < b.n; k++) {
+        const arm_insn *in = &b.v[k];
+        if (in->cls == A_UNKNOWN || in->cls == A_UNDEF) ok = 0;
+        else if (in->op == OP_NONE && in->cls != A_CALL && in->cls != A_BRANCH &&
+                 in->cls != A_RETURN && in->cls != A_INDIRECT && in->cls != A_NOP) ok = 0;
+        else if (in->rd == 15) ok = 0;
+        if (!in->has_target) continue;
+        if (in->cls != A_CALL && in->cls != A_BRANCH) continue;
+        if (in->cls == A_BRANCH && fb_has_label(&b, in->target)) continue;
+        if (vm_find_stub(mod, in->target)) continue;
+        int idx = ai_find(ai, nai, in->target);
+        if (idx < 0) { ok = 0; continue; }
+        if (at + n == *cap) {
+            *cap = *cap ? *cap * 2 : 65536;
+            *out = (uint32_t *)realloc(*out, *cap * sizeof(uint32_t));
+        }
+        (*out)[at + n++] = (uint32_t)idx;
+    }
+    free(b.v);
+    free(b.labels);
+    *clean = ok;
+    return n;
+}
+
+/* Marks keep[i] for every function reachable from a root. A weak pointer
+ * target (discovery's VF_R_WEAK_PTR: a stored pointer with no prologue at
+ * its target and no table around it) is a root only if its body is clean.
+ * That keeps a prologue-less leaf that only a pointer names, and leaves out
+ * the record table whose odd offsets a relocation happened to name. */
+static uint32_t reachable(const vm_image *img, const vm_module *mod, const vf_result *disc,
+                          uint8_t *keep, uint32_t *promoted) {
+    uint32_t n = disc->count;
+    addr_idx *ai = (addr_idx *)malloc((n ? n : 1) * sizeof(addr_idx));
+    uint32_t *ref_start = (uint32_t *)malloc((n + 1) * sizeof(uint32_t));
+    uint8_t *clean = (uint8_t *)calloc(n ? n : 1, 1);
+    uint32_t *refs = NULL, cap = 0, total = 0;
+    *promoted = 0;
+    if (!ai || !ref_start || !clean) { free(ai); free(ref_start); free(clean); return 0; }
+    for (uint32_t i = 0; i < n; i++) { ai[i].addr = disc->funcs[i].addr; ai[i].idx = i; }
+    qsort(ai, n, sizeof(addr_idx), ai_cmp);
+
+    for (uint32_t i = 0; i < n; i++) {
+        int c = 0;
+        ref_start[i] = total;
+        total += body_refs(img, mod, &disc->funcs[i], ai, n, &refs, &cap, total, &c);
+        clean[i] = (uint8_t)c;
+    }
+    ref_start[n] = total;
+
+    uint32_t *queue = (uint32_t *)malloc((n ? n : 1) * sizeof(uint32_t));
+    uint32_t head = 0, tail = 0, kept = 0;
+    if (queue) {
+        for (uint32_t i = 0; i < n; i++) {
+            int root = (disc->funcs[i].reasons & VF_R_ROOTS) != 0;
+            if (!root && (disc->funcs[i].reasons & VF_R_WEAK_PTR) && clean[i]) { root = 1; (*promoted)++; }
+            if (root) { keep[i] = 1; queue[tail++] = i; }
+        }
+        while (head < tail) {
+            uint32_t i = queue[head++];
+            kept++;
+            for (uint32_t r = ref_start[i]; r < ref_start[i + 1]; r++) {
+                uint32_t j = refs[r];
+                if (!keep[j]) { keep[j] = 1; queue[tail++] = j; }
+            }
+        }
+    }
+    free(queue);
+    free(refs);
+    free(ref_start);
+    free(clean);
+    free(ai);
+    return kept;
+}
+
 int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
             const vf_result *disc, FILE *f, const char *impdir,
             uint32_t limit, emit_stats *st) {
     memset(st, 0, sizeof(*st));
 
-    uint32_t n_funcs = disc->count;
+    /* The functions to emit, in discovery order. */
+    uint8_t *keep = (uint8_t *)calloc(disc->count ? disc->count : 1, 1);
+    uint32_t *list = (uint32_t *)malloc((disc->count ? disc->count : 1) * sizeof(uint32_t));
+    if (!keep || !list) { free(keep); free(list); return 1; }
+    uint32_t promoted = 0;
+    uint32_t kept = reachable(img, mod, disc, keep, &promoted);
+    uint32_t nlist = 0;
+    for (uint32_t i = 0; i < disc->count; i++) if (keep[i]) list[nlist++] = i;
+    (void)kept;
+    st->funcs_discovered = disc->count;
+    st->funcs_dropped    = disc->count - nlist;
+    st->funcs_promoted   = promoted;
+
+    uint32_t n_funcs = nlist;
     if (limit && limit < n_funcs) n_funcs = limit;
 
     /* Every address that is a defined symbol in this output, sorted for lookup.
      * Under --limit the un-emitted ones still get trapping stubs, so they are
      * genuinely defined and belong in the set. */
     funcset fs;
-    fs.n = disc->count;
+    fs.n = nlist;
     fs.v = (uint32_t *)malloc((fs.n ? fs.n : 1) * sizeof(uint32_t));
-    if (!fs.v) return 1;
-    for (uint32_t i = 0; i < disc->count; i++) fs.v[i] = disc->funcs[i].addr;
+    if (!fs.v) { free(keep); free(list); return 1; }
+    for (uint32_t i = 0; i < nlist; i++) fs.v[i] = disc->funcs[list[i]].addr;
     qsort(fs.v, fs.n, sizeof(uint32_t), fs_cmp);
 
     fprintf(f, "/* Generated by armrecomp. Do not edit.\n");
     fprintf(f, " *\n");
     fprintf(f, " * module: %s\n", mod->info.name);
-    fprintf(f, " * %u functions\n", disc->count);
+    fprintf(f, " * %u functions emitted of %u discovered; the rest are reachable\n", nlist, disc->count);
+    fprintf(f, " * from no entry point, export or stored pointer\n");
     fprintf(f, " */\n\n");
     fprintf(f, "#include \"vitarecomp/recomp_rt.h\"\n");
     fprintf(f, "#include \"vitarecomp/dispatch.h\"\n\n");
@@ -1490,23 +1628,23 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
 
     /* Forward declarations: the call graph has cycles, so every function must
      * be visible before any body is emitted. */
-    for (uint32_t i = 0; i < disc->count; i++)
-        fprintf(f, "void vita_func_%08X(void);\n", disc->funcs[i].addr);
+    for (uint32_t i = 0; i < nlist; i++)
+        fprintf(f, "void vita_func_%08X(void);\n", disc->funcs[list[i]].addr);
     fprintf(f, "\n");
 
     /* A limited emit still references functions it did not emit, so those get
      * a stub that traps. Without this the output would not link, and a silently
      * missing function is exactly the failure this project refuses. */
-    if (n_funcs < disc->count) {
+    if (n_funcs < nlist) {
         fprintf(f, "/* Not emitted under --limit; present so the output links. */\n");
-        for (uint32_t i = n_funcs; i < disc->count; i++)
+        for (uint32_t i = n_funcs; i < nlist; i++)
             fprintf(f, "void vita_func_%08X(void) { vita_trap_unimpl(0x%08X, 0, \"not emitted\"); }\n",
-                    disc->funcs[i].addr, disc->funcs[i].addr);
+                    disc->funcs[list[i]].addr, disc->funcs[list[i]].addr);
         fprintf(f, "\n");
     }
 
-    for (uint32_t i = 0; i < n_funcs; i++) {
-        const vf_func *fn = &disc->funcs[i];
+    for (uint32_t li = 0; li < n_funcs; li++) {
+        const vf_func *fn = &disc->funcs[list[li]];
         fbody b;
         memset(&b, 0, sizeof(b));
         collect(img, fn, &b);
@@ -1698,6 +1836,8 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
     }
 
     free(fs.v);
+    free(list);
+    free(keep);
     return 0;
 }
 

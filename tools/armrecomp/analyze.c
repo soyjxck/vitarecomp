@@ -26,11 +26,11 @@ static void seen_set(vf_result *r, uint32_t off) {
 
 /* --- a queue of (address, mode) seeds -------------------------------------- */
 
-typedef struct { uint32_t addr; arm_mode mode; uint8_t heur; } seed;
+typedef struct { uint32_t addr; arm_mode mode; uint16_t heur; } seed;
 
 typedef struct { seed *v; uint32_t n, cap; } seedq;
 
-static void sq_push(seedq *q, uint32_t addr, arm_mode mode, uint8_t heur) {
+static void sq_push(seedq *q, uint32_t addr, arm_mode mode, uint16_t heur) {
     if (q->n == q->cap) {
         q->cap = q->cap ? q->cap * 2 : 1024;
         q->v = (seed *)realloc(q->v, q->cap * sizeof(seed));
@@ -41,7 +41,62 @@ static void sq_push(seedq *q, uint32_t addr, arm_mode mode, uint8_t heur) {
     q->n++;
 }
 
-static void add_func(vf_result *r, uint32_t addr, arm_mode mode, uint8_t heur) {
+static int looks_like_text(uint16_t h);
+
+/* Does code start here?
+ *
+ * The pointer tiers (relocation, shape, MOVW/MOVT) name addresses that may be
+ * data as easily as functions: a string, a record, an entry of a table at an
+ * odd offset. The first instruction is a weak test, because the Thumb decoder
+ * reads nearly every halfword as something. A short linear decode is a strong
+ * one: real code is claimed instruction after claimed instruction, and data
+ * is not. Twelve instructions, stopping at the first return or unconditional
+ * branch; an undefined one first, or two the emitter could not name, and it
+ * is not code.
+ *
+ * What this costs: a function reached only through a stored pointer whose
+ * first dozen instructions include two the emitter does not translate yet is
+ * refused, and a call through that pointer is a dispatch miss that names the
+ * address. That is the announced failure this toolkit prefers to the silent
+ * one, which was ~250 roots walking a record table as Thumb and emitting
+ * 20,000 traps of one undefined word. */
+static int starts_like_code(const vm_image *img, uint32_t addr) {
+    const uint8_t *text = img->data + img->seg_file;
+    const uint32_t base = img->seg_vaddr, len = img->seg_len;
+    uint32_t a = addr;
+    int unclaimed = 0;
+    for (int k = 0; k < 12; k++) {
+        if (a < base || a + 2 > base + len) break;
+        arm_insn in;
+        int n = arm_decode(text, base, len, a, ARM_T32, &in);
+        if (n == 0) break;
+        if (in.cls == A_UNKNOWN || in.cls == A_UNDEF) {
+            if (k == 0) return 0;
+            unclaimed++;
+        } else if (in.op == OP_NONE && in.cls != A_CALL && in.cls != A_BRANCH &&
+                   in.cls != A_RETURN && in.cls != A_INDIRECT && in.cls != A_NOP) {
+            unclaimed++;
+        }
+        if (unclaimed >= 2) return 0;
+        if (in.cls == A_RETURN || in.cls == A_INDIRECT) break;
+        if (in.cls == A_BRANCH && !in.conditional) break;
+        a += (uint32_t)n;
+    }
+    return 1;
+}
+
+/* `reason` is the VF_R_* bit that named the address; the reporting tier
+ * follows from it. */
+/* The prologue a compiled function overwhelmingly begins with: a push, or a
+ * stack adjustment. Its absence is what makes a stored pointer's target weak
+ * evidence of a function. */
+static int has_prologue(uint16_t h) {
+    return ((h & 0xFE00) == 0xB400)          /* push            */
+        || (h == 0xE92D)                     /* push.w / stmdb  */
+        || ((h & 0xFF80) == 0xB080);         /* sub sp, #imm    */
+}
+
+static void add_func(vf_result *r, uint32_t addr, arm_mode mode, uint16_t reason) {
     if (r->count == r->cap) {
         r->cap = r->cap ? r->cap * 2 : 4096;
         r->funcs = (vf_func *)realloc(r->funcs, r->cap * sizeof(vf_func));
@@ -50,7 +105,9 @@ static void add_func(vf_result *r, uint32_t addr, arm_mode mode, uint8_t heur) {
     memset(f, 0, sizeof(*f));
     f->addr = addr;
     f->mode = mode;
-    f->from_heuristic = heur;
+    f->reasons = reason;
+    f->from_heuristic = (reason & (VF_R_SHAPE | VF_R_WEAK_PTR)) ? VF_SHAPE
+                      : (reason & VF_R_RELOC) ? VF_RELOC : VF_PRINCIPLED;
 }
 
 /* Should a mode-switching call be followed into ARM?
@@ -107,6 +164,10 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
         arm_insn prev[4];
         uint32_t nprev = 0;
 
+        /* MOVW halves waiting for their MOVT, per register. */
+        uint32_t movw_val[16];
+        uint16_t movw_ok = 0;
+
         for (;;) {
             if (a < base || a >= base + len) break;
             uint32_t off = a - base;
@@ -152,6 +213,34 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
             if (a + (uint32_t)n > fn->end) fn->end = a + (uint32_t)n;
             if (in.cls == A_SIMD) r->simd_insns++;
 
+            /* A MOVW/MOVT pair builds a 32-bit constant in a register. When
+             * the constant is a Thumb-tagged address into .text it is a
+             * function pointer about to be stored or called through, and
+             * this is the only place to see it: no literal pool holds it,
+             * and on a static module no relocation names it. The text
+             * filter is the relocation seeds': an odd address can also be
+             * the second byte of a string. */
+            if (in.op == OP_MOVT && in.rd >= 0 && in.rd < 16 && ((movw_ok >> in.rd) & 1)) {
+                uint32_t v = (movw_val[in.rd] & 0xFFFFu) | (in.imm << 16);
+                movw_ok &= (uint16_t)~(1u << in.rd);
+                if ((v & 1) && (v & ~1u) >= base && (v & ~1u) + 2 <= base + len) {
+                    uint32_t t = v & ~1u;
+                    uint16_t h = (uint16_t)(text[t - base] | ((uint16_t)text[t - base + 1] << 8));
+                    if (!looks_like_text(h) && starts_like_code(img, t)) {
+                        int strong = has_prologue(h);
+                        sq_push(q, t, ARM_T32, strong ? VF_R_POINTER : VF_R_WEAK_PTR);
+                        r->seeds_pointer++;
+                        if (!strong) r->seeds_weak++;
+                    }
+                }
+            } else if (in.op == OP_MOV && in.has_imm && in.width == 4 && !in.sets_flags &&
+                       in.rd >= 0 && in.rd < 16) {
+                movw_val[in.rd] = in.imm;
+                movw_ok |= (uint16_t)(1u << in.rd);
+            } else if (in.rd >= 0 && in.rd < 16) {
+                movw_ok &= (uint16_t)~(1u << in.rd);
+            }
+
             /* Calls seed new functions. An interworking call flips the mode of
              * the callee, which is the whole reason mode travels with a seed. */
             if (in.cls == A_CALL) {
@@ -181,7 +270,7 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                         !arm_seed_ok(mod, in.target)) {
                         r->seeds_arm_refused++;
                     } else {
-                        sq_push(q, in.target, cm, 0);
+                        sq_push(q, in.target, cm, VF_R_CALL);
                         r->seeds_call++;
                     }
                 } else {
@@ -206,7 +295,7 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
              * the stub check, because it was decoded in flow from a real
              * instruction, not manufactured by a linear sweep over data. */
             if (in.cls == A_BRANCH && in.has_target && in.switches_mode) {
-                sq_push(q, in.target, s.mode == ARM_T32 ? ARM_A32 : ARM_T32, 0);
+                sq_push(q, in.target, s.mode == ARM_T32 ? ARM_A32 : ARM_T32, VF_R_INTERWORK);
                 r->seeds_interwork++;
                 if (!in.conditional) break;
                 a += (uint32_t)n;
@@ -223,7 +312,7 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                  * conditional tail call. libgcc's division helpers branch
                  * back into their neighbours this way. */
                 if (in.conditional && in.target < start) {
-                    sq_push(q, in.target, s.mode, 0);
+                    sq_push(q, in.target, s.mode, VF_R_TAIL);
                     r->seeds_tail++;
                 }
                 if (!in.conditional) {
@@ -235,7 +324,7 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                      * alternative, leaving it out, costs a trap on every
                      * `b <callee>` that leaves the caller's extent — which is
                      * how newlib reaches most of its veneers. */
-                    sq_push(q, in.target, s.mode, 0);
+                    sq_push(q, in.target, s.mode, VF_R_TAIL);
                     r->seeds_tail++;
                     break;                        /* unconditional: flow ends */
                 }
@@ -354,8 +443,9 @@ static uint32_t shape_scan_region(const vm_image *img, vf_result *r, seedq *q,
                     || ((h & 0xFF80) == 0xB080);         /* sub sp, #imm    */
 
         if (!prologue && !in_table) { r->rejected_shape++; continue; }
+        if (!starts_like_code(img, t)) { r->rejected_shape++; continue; }
 
-        sq_push(q, t, ARM_T32, 1);
+        sq_push(q, t, ARM_T32, VF_R_SHAPE);
         r->seeds_shape++;
         found++;
     }
@@ -473,10 +563,15 @@ static void reloc_seeds(const vm_image *img, const vr_table *relocs,
                     || ((h & 0xFF80) == 0xB080);         /* sub sp, #imm    */
         int tabled = in_table && in_table[i];
         if (!prologue && !tabled && looks_like_text(h)) { r->rejected_reloc++; continue; }
+        if (!starts_like_code(img, t)) { r->rejected_reloc++; continue; }
 
-        sq_push(q, t, ARM_T32, VF_RELOC);
+        /* Neither a prologue nor a table around it: as likely a record at an
+         * odd offset as a leaf function. Walked, not a root. */
+        int strong = prologue || tabled;
+        sq_push(q, t, ARM_T32, strong ? VF_R_RELOC : VF_R_WEAK_PTR);
         r->seeds_reloc++;
-        if (tabled) r->seeds_reloc_table++;
+        if (tabled)  r->seeds_reloc_table++;
+        if (!strong) r->seeds_weak++;
     }
 
     free(in_table);
@@ -506,7 +601,7 @@ int vf_discover(const vm_image *img, const vm_module *mod,
      *    still seeded as Thumb. */
     if (mod->have_info && mod->info.module_start != 0xFFFFFFFF) {
         uint32_t ms = mod->info.module_start & 0x3FFFFFFF;
-        sq_push(&q, base + (ms & ~1u), ARM_T32, 0);
+        sq_push(&q, base + (ms & ~1u), ARM_T32, VF_R_ENTRY);
         out->seeds_entry++;
     }
 
@@ -527,7 +622,7 @@ int vf_discover(const vm_image *img, const vm_module *mod,
                 uint32_t v = (uint32_t)t[i*4] | ((uint32_t)t[i*4+1] << 8)
                            | ((uint32_t)t[i*4+2] << 16) | ((uint32_t)t[i*4+3] << 24);
                 if (v < base || v >= base + img->seg_len) continue;
-                sq_push(&q, v & ~1u, (v & 1) ? ARM_T32 : ARM_A32, 0);
+                sq_push(&q, v & ~1u, (v & 1) ? ARM_T32 : ARM_A32, VF_R_EXPORT);
                 out->seeds_export++;
             }
             p += size;
@@ -551,7 +646,7 @@ int vf_discover(const vm_image *img, const vm_module *mod,
                     out->seeds_arm_refused++;
                     continue;
                 }
-                sq_push(&q, in.target, in.switches_mode ? ARM_A32 : ARM_T32, 0);
+                sq_push(&q, in.target, in.switches_mode ? ARM_A32 : ARM_T32, VF_R_CALL);
             }
         }
     }
@@ -571,6 +666,10 @@ int vf_discover(const vm_image *img, const vm_module *mod,
      * and then failed to link, naming symbols that were never defined. */
     uint8_t *fseen = (uint8_t *)calloc(out->seen_bytes, 1);
     if (!fseen) { free(q.v); return 1; }
+    /* Function index + 1 per halfword of .text, so a seed that names an
+     * address already registered can add its reason to the record. */
+    uint32_t *fidx = (uint32_t *)calloc(img->seg_len / 2 + 1, sizeof(uint32_t));
+    if (!fidx) { free(fseen); free(q.v); return 1; }
 
     #define FN_MARK(a) (fseen[(((a) - base) >> 1) >> 3] |= (uint8_t)(1u << ((((a) - base) >> 1) & 7)))
     #define FN_TEST(a) ((fseen[(((a) - base) >> 1) >> 3] >> ((((a) - base) >> 1) & 7)) & 1)
@@ -579,10 +678,14 @@ int vf_discover(const vm_image *img, const vm_module *mod,
     while (head < q.n) {
         seed s = q.v[head++];
         if (s.addr < base || s.addr >= base + img->seg_len) continue;
-        if (FN_TEST(s.addr)) continue;
+        if (FN_TEST(s.addr)) {
+            out->funcs[fidx[(s.addr - base) >> 1] - 1].reasons |= s.heur;
+            continue;
+        }
 
         FN_MARK(s.addr);
         add_func(out, s.addr, s.mode, s.heur);
+        fidx[(s.addr - base) >> 1] = out->count;
         walk(img, mod, out, &q, s.addr, s.mode, &out->funcs[out->count - 1]);
     }
 
@@ -597,10 +700,14 @@ int vf_discover(const vm_image *img, const vm_module *mod,
     while (head < q.n) {
         seed s = q.v[head++];
         if (s.addr < base || s.addr >= base + img->seg_len) continue;
-        if (FN_TEST(s.addr)) continue;
+        if (FN_TEST(s.addr)) {
+            out->funcs[fidx[(s.addr - base) >> 1] - 1].reasons |= s.heur;
+            continue;
+        }
 
         FN_MARK(s.addr);
         add_func(out, s.addr, s.mode, s.heur);
+        fidx[(s.addr - base) >> 1] = out->count;
         walk(img, mod, out, &q, s.addr, s.mode, &out->funcs[out->count - 1]);
     }
 
@@ -612,16 +719,21 @@ int vf_discover(const vm_image *img, const vm_module *mod,
     while (head < q.n) {
         seed s = q.v[head++];
         if (s.addr < base || s.addr >= base + img->seg_len) continue;
-        if (FN_TEST(s.addr)) continue;
+        if (FN_TEST(s.addr)) {
+            out->funcs[fidx[(s.addr - base) >> 1] - 1].reasons |= s.heur;
+            continue;
+        }
 
         FN_MARK(s.addr);
         add_func(out, s.addr, s.mode, s.heur);
+        fidx[(s.addr - base) >> 1] = out->count;
         walk(img, mod, out, &q, s.addr, s.mode, &out->funcs[out->count - 1]);
     }
 
     #undef FN_MARK
     #undef FN_TEST
 
+    free(fidx);
     free(fseen);
     free(q.v);
     return 0;

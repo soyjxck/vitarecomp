@@ -342,6 +342,52 @@ rarely or never on the paths that had been compiled, and each was a
 percentage went from 95.53% to 95.53%. The frame went from wrong to right.
 Which is why `tools/e2e.sh` hashes a frame rather than counting traps.
 
+## The size was duplication, and the guess was data (2026-10-10)
+
+After the NEON pass the retail emit was 1.12 GB of C for a 9.43 MB code
+segment, and the plan said why: the function walker runs into data tables
+and emits them as code. That was a guess written down as a finding. The
+measurement that would have tested it took one `awk` over the output: lines
+and trap lines per function. Not one of the 70,967 functions was more than
+half traps; three were a quarter. The data was a sprinkling. What the file
+actually held was 13.07 M emitted instructions for 3.33 M distinct ones,
+four copies of the module, because discovery registers every branch target
+as a function (so a `b` out of its function has somewhere to land) and each
+one registered is a second copy of everything after it.
+
+The fix is not to register fewer: an unregistered target is a trap. It is to
+emit only what can run. The emitter now keeps the closure of discovery's
+roots (the entry point, the exports, every stored pointer) under the calls
+and non-local branches of their bodies, and writes nothing else. A function
+reached only by a branch its caller inlines is a copy; one reached only from
+data the linear sweep read as a `bl` is nothing at all. The hello sample
+dropped from 94,005 emitted instructions to 15,705 and runs the same; the
+retail title from 1.12 GB to GA_MB MB.
+
+Two things went wrong on the way, both found by running rather than reading.
+
+The first version made every stored pointer a root, and VitaShell's trap
+list was then led by one undefined word, 15,739 times. The relocation stream
+named ~250 odd addresses in a table of `{pointer, length}` records, each
+pointer at an OID string (`2A 86 48 86 F7 0D` is 1.2.840.113549), each
+walked as Thumb for 4 KB. Those pointers are real; the targets are not code.
+So a pointer target with no prologue and no table of pointers around it
+became *weak*: walked, so its callees are known, but not a root.
+
+The second version dropped `register_fini` from the hello sample, and the
+first function-pointer call of the program missed. It is exactly the thing
+the weak rule describes: a leaf with no push, named only by one word in
+`.init_array`, a table too short to count as one. The rule that holds is in
+the emitter, where the body is known: a weak target is promoted to a root
+when its whole body translates cleanly, every instruction claimed and every
+branch resolved. Data read as code never manages that for long; a leaf
+always does. Thirteen promotions in the hello sample, 337 in VitaShell.
+
+What a miss costs now is stated: a computed transfer to a function that was
+discovered but not emitted is a dispatch miss that names the address, which
+is the announced failure, where a copy that runs would have been the silent
+one.
+
 ## Let the title order the work (2026-10-10)
 
 Milestone B was planned as "classify the SIMD spaces, then translate integer

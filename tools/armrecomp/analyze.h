@@ -37,12 +37,36 @@ enum {
     VF_RELOC      = 2,   /* a relocated word with the Thumb bit   */
 };
 
+/* Why an address was seeded, as a set: a function can be named by several
+ * of these, and the emitter cares which. The first five are ROOTS, places
+ * control can arrive from outside the module's own direct calls: the entry
+ * point, an exported symbol, or a pointer the program stores or builds. The
+ * other three are reached from code already being followed, so they matter
+ * only if what reaches them is itself kept. */
+enum {
+    VF_R_ENTRY     = 1,     /* module_start                                 */
+    VF_R_EXPORT    = 2,     /* the export table                              */
+    VF_R_RELOC     = 4,     /* a relocated word with the Thumb bit           */
+    VF_R_SHAPE     = 8,     /* a stored word with the shape of a pointer     */
+    VF_R_POINTER   = 16,    /* a MOVW/MOVT pair building a Thumb address     */
+    VF_R_CALL      = 32,    /* a BL target, followed or swept                */
+    VF_R_TAIL      = 64,    /* a branch target registered as a function      */
+    VF_R_INTERWORK = 128,   /* a `bx pc` veneer's destination                */
+    /* A stored or built pointer with no prologue at its target and no table
+     * of pointers around it. Data as often as code (an OID string, a record
+     * at an odd offset), so it is walked but it is not a root: it runs only
+     * if code the roots reach transfers to it. */
+    VF_R_WEAK_PTR  = 256,
+};
+#define VF_R_ROOTS (VF_R_ENTRY | VF_R_EXPORT | VF_R_RELOC | VF_R_SHAPE | VF_R_POINTER)
+
 typedef struct {
     uint32_t addr;          /* virtual address                      */
     arm_mode mode;
     uint32_t end;           /* highest address reached from here    */
     uint32_t insns;
     uint8_t  from_heuristic;  /* one of VF_PRINCIPLED, VF_SHAPE, VF_RELOC */
+    uint16_t reasons;         /* the VF_R_* bits that named this address */
 } vf_func;
 
 typedef struct {
@@ -77,6 +101,12 @@ typedef struct {
     uint32_t seeds_tail;
     /* TBB/TBH tables whose length the guarding compare gave, followed. */
     uint32_t jump_tables;
+    /* MOVW/MOVT pairs in walked code that build a Thumb-tagged address into
+     * .text: a function pointer no literal pool holds and, on a static
+     * module, no relocation names. */
+    uint32_t seeds_pointer;
+    /* Of the relocation and MOVW/MOVT pointers, those seeded weakly. */
+    uint32_t seeds_weak;
     uint32_t simd_insns;
     uint32_t indirect_sites;
 

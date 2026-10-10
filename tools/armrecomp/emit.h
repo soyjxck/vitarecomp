@@ -22,7 +22,10 @@ typedef struct {
 } em_trap_kind;
 
 typedef struct {
-    uint32_t funcs;
+    uint32_t funcs;             /* emitted                                */
+    uint32_t funcs_discovered;  /* registered by discovery                */
+    uint32_t funcs_dropped;     /* of those, reachable from no root       */
+    uint32_t funcs_promoted;    /* weak pointer targets made roots by a clean body */
     uint32_t insns;
     uint32_t translated;   /* emitted as real C            */
     uint32_t trapped;      /* emitted as a named trap      */

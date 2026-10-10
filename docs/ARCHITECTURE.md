@@ -333,6 +333,34 @@ which function the game wanted — rather than failing to link, or silently
 returning zero. Implementing one means removing its stub and providing a real
 body in the link.
 
+### Only what can run is emitted
+
+Discovery registers every address anything branches to, which is what keeps a
+`b` that leaves its function from trapping; but most such targets are blocks
+their own function already carries, and each one registered is a second copy
+of everything after it. On the first retail title that was four copies of the
+module: 13.07 M emitted instructions for 3.33 M distinct ones, 1.12 GB of C.
+
+So the emitter keeps only what can be entered. Discovery records why each
+address was seeded (`vf_func.reasons`); the *roots* are the entry point, the
+exports, and the stored pointers, whether a relocation named them, a word in
+`.text` or a data segment has their shape, or a MOVW/MOVT pair in walked code
+builds them. The emitter collects every function's body once, takes the
+functions it calls or tail-calls (a branch that is not a label of its own,
+and not an import), and emits the closure of the roots under those edges. The
+dispatch table lists what is emitted, so a computed transfer to anything else
+is a miss that names the address.
+
+A stored pointer whose target has no prologue and no table of pointers around
+it is as likely a record at an odd offset as a function, and it is *weak*:
+walked, so its callees are known, but a root only if its whole body
+translates cleanly, every instruction claimed and every branch resolved. Data
+read as code never manages that for long; a prologue-less leaf that only a
+pointer names always does, and `.init_array` is full of those.
+
+`armrecomp emit` reports the three counts: discovered, not emitted, and weak
+targets promoted.
+
 ### Building the output at full scale
 
 Two things about compiling a whole recompiled module are worth knowing before
