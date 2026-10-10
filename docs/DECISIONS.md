@@ -20,19 +20,16 @@ Recommendation: **C**, with the GPL component as a sibling repo
 (`psvitarecomp-gxm`) so the licence boundary is a repository boundary. Decide
 before milestone D step 3 in [PLAN.md](PLAN.md).
 
-## 2. Retail inputs (open)
+## 2. Retail inputs (decided 2026-10-10)
 
 Upstream limited itself to QA builds (plaintext SELF) and refused retail
-dumps outright. The Vita3K input format, a FAGDec-decrypted plain SCE ELF
-produced on the user's own console from a game they own, contains no key
-material and needs none here.
-
-Recommendation: accept Vita3K-format decrypted modules as a first-class input
-(milestone C). Keep the refusal of PFS/NoNpDrm dumps and keep all key
-handling out of the repo, exactly as upstream wrote in DECRYPT.md. For a
-PFS-encrypted NoNpDrm dump the user owns, the decryption step is Vita3K
-itself (its `sce_utils.cpp` carries the NPDRM metadata keys and takes the
-klicensee from the dump's `work.bin`); this repo only consumes what it writes.
+dumps outright. Decided: retail modules enter through Vita3K's own
+decryption, driven by the licence the dump carries, and this repository
+consumes what Vita3K writes. The refusal of PFS/NoNpDrm dumps stays, and
+all key handling stays out of the repo, exactly as upstream wrote in
+DECRYPT.md. The procedure (`tools/vita3k-decrypt.ps1`,
+`tools/import-vita3k.sh`) is in PLAN.md under milestone C, and the first
+title through it is *Uncharted: Golden Abyss*.
 
 ## 3. Host graphics API (open)
 

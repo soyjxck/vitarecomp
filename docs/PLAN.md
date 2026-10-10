@@ -99,19 +99,41 @@ oracle.
    for that title. Pick the first retail target from that list, not from
    preference: smallest list, 2D, low NEON density.
 
-**Reference title: *Uncharted: Golden Abyss* (PCSA00029, USA, v1.03).** A
-NoNpDrm dump of it (app + patch) is PFS-encrypted from byte zero: `eboot.bin`
-is a 12 KB loader, the game is `uncharted.self` (4.6 MB) plus
-`sce_module/libc.suprx`, `libfios2.suprx`, `libult.suprx`, all ciphertext,
-with `sce_pfs/{files.db,unicv.db,pflist}` present. `armrecomp info` refuses it
-by name, which is the "true negative" upstream's corpus lacked. The route to
-a readable module is Vita3K's own decryption, driven by the dump's own
-licence (`sce_sys/package/work.bin` carries the klicensee): install the dump
-in Vita3K; its `decrypt_selfs` writes re-wrapped SELFs with plaintext
-segments under its cache directory `decrypted_selfs/`, and those are ordinary
-`armrecomp` inputs. A 2012 launch title, so expect `ET_SCE_EXEC` with no
-relocations, heavy NEON and the full `sceGxm` surface: a measurement input
-for `cover` and `funcs` long before it is a bring-up target.
+**Reference title: *Uncharted: Golden Abyss* (PCSA00029, USA, v1.03) — in
+the toolkit since 2026-10-10.** A NoNpDrm dump of it is PFS-encrypted from
+byte zero, and `armrecomp info` refuses it by name (the "true negative"
+upstream's corpus lacked). The route that works, all with the dump's own
+licence and no key material in this repository:
+
+1. `Vita3K.exe <dump>\app\PCSA00029` installs the title: the PFS layer is
+   removed on the way into Vita3K's `ux0/app`. No firmware needed; the run
+   that follows fails, harmlessly.
+2. `tools/vita3k-decrypt.ps1 -TitleId PCSA00029` opens Vita3K's interface
+   and, through Windows UI Automation, right-clicks the title and picks
+   *Other > Decrypt All SELF*, the only place that action exists. The
+   plaintext modules land in `<Vita3K>\cache\decrypted_selfs\PCSA00029\`.
+3. `tools/import-vita3k.sh <that dir> goldenabyss` copies them into
+   `fixtures/goldenabyss/` (gitignored), extracts, and measures.
+
+What the measurement says about a flagship launch title:
+
+| | `uncharted.self` |
+|---|---|
+| Container | `ET_SCE_EXEC`, static, 9.43 MB code segment, no relocations |
+| Decode | 3.33 M Thumb instructions, 0.18 % unknown, **5.34 % SIMD** (6.22 % of reached instructions): the densest NEON in the corpus |
+| Discovery | 70,967 functions (60,093 from seeds, 10,874 from shape), 75.0 % covered, 416 jump tables, 30,291 unresolved indirect sites |
+| Imports | 618 functions across 42 libraries, 585 named (94.7 %) |
+| Largest libraries | SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34, SceCommonDialog 27, SceNet 22, SceMp4 19, SceUlt 18 |
+| Emit, whole module | 13.07 M emitted instructions, **96.23 % translated**, 72,260 firmware calls bound, 1.12 GB of C |
+| What traps | NEON/VFP 3.19 % (417,237 instructions: 85 % of everything left), general LDM/STM 0.20 %, unknown encodings 0.19 %, saturating ops 0.03 % |
+
+So the shape is the one upstream predicted for the launch window: no
+relocation stream, so a seventh of the functions rest on the shape
+heuristic; the full `sceGxm` surface plus audio (SceNgs), video (SceMp4),
+networking and dialogs; and NEON on the hot paths. It is the measurement
+input for milestones B, D and E, not the next bring-up. The bundled
+`sce_module/libc.suprx` (relocatable, 42 imports) is Sony's own SceLibc,
+which a per-title host could load instead of writing that HLE.
 
 ## Milestone D: `sceGxm` without a shader compiler
 

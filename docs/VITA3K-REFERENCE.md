@@ -144,6 +144,31 @@ Shader version constant: 13.
 This is the single largest piece of the project and the one where the licence
 decision bites hardest; see [DECISIONS.md](DECISIONS.md).
 
+## Using the emulator as the decryptor
+
+For a retail dump the emulator is the step that turns ciphertext into
+armrecomp's input, with the dump's own licence:
+
+- Installing (`Vita3K.exe <dump folder>`, or the interface) removes the PFS
+  layer: `interface.cpp` `install_contents` finds `sce_sys/param.sfo`,
+  copies the title into `ux0/app/<TITLEID>`, and for a title with
+  `sce_sys/package/work.bin` runs `decrypt_install_nonpdrm`. The SELFs are
+  still encrypted at this point.
+- Loading decrypts them in memory: `modules/module_parent.cpp` `load_module`
+  calls `decrypt_fself(bytes, emuenv.license.rif[title].key)` on every
+  module before `load_self`. `packages/src/sce_utils.cpp` holds the
+  metadata keys and takes the klicensee from the RIF.
+- Writing them out is a Qt-only action: `gui-qt/src/apps_list_context_menu.cpp`,
+  *Other > Decrypt All SELF*, calls `decrypt_selfs(app path, cache_path,
+  key)`, which writes re-wrapped SELFs with plaintext segments under
+  `<Vita3K>/cache/decrypted_selfs/<TITLEID>/`. There is no command-line
+  form; `tools/vita3k-decrypt.ps1` drives it through UI Automation.
+- `dump_elfs` (`kernel.debugger.dump_elfs`, set only in the settings
+  dialog, never persisted) makes `load_self` write the loaded image, with
+  relocations applied, to `<log_path>/elfdumps/<TITLEID>/`. Not needed for
+  static titles; useful to compare a relocated one against this repo's own
+  relocation.
+
 ## Using the emulator as an oracle
 
 - Run the same module in Vita3K with its logging enabled and compare the

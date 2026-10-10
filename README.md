@@ -28,6 +28,7 @@ bugs that only running could find (docs/LESSONS.md).
 | `tools/e2e.sh`: `samples/fbdemo` SELF to pixels | extract, emit (179 instructions, every one of the program's own translated; the 8 traps left are import stub bodies HLE replaces), build `vita_host`, run 200 frames: 0 traps, 0 bad accesses, frame hash matches |
 | `tools/e2e.sh`: `samples/hello`, a newlib-linked program | 52 KB SELF, 54 imports across 11 libraries, all implemented on its path; 99.7 % translated; runs 60 frames with 0 traps and 0 bad accesses: `sceClibPrintf` reaches the console, `snprintf`/`malloc` output is drawn on screen with its own font, frame hash matches |
 | `armrecomp emit` on VitaShell, whole module | 21,593 functions, 78.6 % of the code segment reached (251 jump tables, 23,263 tail-call targets), 98.79 % of emitted instructions translated; what still traps: NEON/VFP 0.49 %, saturating ops 0.31 %, general LDM/STM 0.20 % |
+| *Uncharted: Golden Abyss* (retail, PCSA00029), decrypted by Vita3K from a NoNpDrm dump with its own licence | `ET_SCE_EXEC`, 9.43 MB of code, 3.33 M Thumb instructions, 5.34 % SIMD; 70,967 functions, 75.0 % covered; 618 imports across 42 libraries, 585 named (SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34); whole module emits at 96.23 % translated, and NEON/VFP is 85 % of what still traps |
 | Build (MSVC 14.50, CMake 4.3, Ninja) | `armrecomp.exe` + `vitarecomp.lib` build clean |
 | `ctest` | 4 / 4 suites pass (container, inflate, decode, runtime) |
 | `armrecomp info / extract / cover` on VitaShell 2.02 `eboot.bin` (homebrew, no keys) | 3 segments inflated, Adler-32 ok, ELF 4,882,182 bytes as declared; Thumb-2 dominant, 0.22 % unknown, 2.01 % SIMD |
@@ -65,7 +66,8 @@ src/                  runtime: CPU state, memory, traps, dispatch, and the HLE
 host/                 vita_host: the generic headless host (scripted input, frames to files)
 samples/fbdemo/       the first fixture: a freestanding homebrew program, source and prebuilt SELF
 tools/armrecomp/      the recompiler: container, inflate, decode, reloc, module, analyze, nids, emit
-tools/*.sh            helpers: MSVC env import, dependency fetch, smoke, end-to-end, vitasdk in WSL
+tools/*.sh, *.ps1     helpers: MSVC env import, dependency fetch, smoke, end-to-end, vitasdk in WSL,
+                      Vita3K-driven decryption and import of a retail title
 tests/                synthetic ctest suites, no game data
 docs/                 upstream's design notes plus this repo's research, plan and decisions
 external/             (gitignored) vita-headers NID database, fetched by tools/fetch-deps.sh
@@ -131,7 +133,7 @@ armrecomp emit     <elf> <out.c> <n> [nid-db]   translate to C
 | Homebrew `.vpk` / `eboot.bin` (vita-make-fself) | SELF, plaintext zlib segments | nothing |
 | QA / prototype builds | SELF, plaintext zlib segments | nothing |
 | Retail, decrypted on a console with FAGDec (the Vita3K input format) | plain SCE ELF | a dump you made from a game you own |
-| Retail NoNpDrm dumps | PFS + SELF | out of scope: refused by name |
+| Retail NoNpDrm dumps | PFS + SELF | refused by name; Vita3K decrypts them with the dump's own licence, and `tools/vita3k-decrypt.ps1` + `tools/import-vita3k.sh` bring the result in (docs/PLAN.md, milestone C) |
 
 No game data, keys, or decryption code are in this repo, now or later.
 

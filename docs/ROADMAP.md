@@ -265,3 +265,15 @@ measured on its own fixtures:
       write watchpoints, bad accesses reported with their PC
 - [ ] A windowed host (SDL2 behind an option)
 - [ ] Threads for real: `sceKernelCreateThread`, and a scheduler model
+
+### Retail input
+
+- [x] **A retail title in the toolkit**: *Uncharted: Golden Abyss* from a
+      PFS-encrypted NoNpDrm dump, through Vita3K's own decryption driven by
+      the dump's licence (`tools/vita3k-decrypt.ps1` drives the Qt-only
+      action; `tools/import-vita3k.sh` imports and measures). 9.43 MB static
+      module, 70,967 functions, 618 imports across 42 libraries, 96.23 %
+      translated with NEON/VFP as 85 % of the remainder: milestone B is the
+      retail blocker, as upstream said it would be
+- [ ] Load a title's bundled `sce_module/*.suprx` alongside its main module,
+      exports before HLE
