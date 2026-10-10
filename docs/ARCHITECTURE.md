@@ -156,6 +156,25 @@ Three things this does not claim:
   relocations, so shape is all there is — which is the cost of the launch-window
   catalogue being where the exclusives are.
 
+### Jump tables are followed, with their guards read as the compiler wrote them
+
+A `switch` compiles to a bounds check and a `tbb`/`tbh` indexed off the PC,
+with the table of offsets in the bytes after the instruction. The walk reads
+the table when it knows its length, and the length comes from the guard: a
+compare of the index against the last valid case. `arm_table_count` walks
+back through the instructions decoded in flow before the table branch and
+reads that compare, with the four things a retail compiler does to it: the
+branch after the compare says whether the compare bounds the index from
+above (`bgt out`) or below (`ble out`, the lower end of a range whose upper
+compare sits further back); the index may be adjusted after the compare
+(`subs r0, #40`) or moved between registers (`adds r5, r1, #0`), so the
+finder follows it through adds, subtracts and moves; the compare may be
+against a register a MOVW just set; and the guard may branch *to* the table
+(`cmp r0, #37; bls table`), which the walk starting at that label would
+never see, so a walk started at a conditional branch's target is seeded
+with the compare that guarded it. Without a count the table is a computed
+transfer like any other, and traps by address.
+
 ### Relocatable modules: the stream names the pointers
 
 On an `ET_SCE_RELEXEC` module the `PT_SCE_RELA` segment lists every word the
@@ -413,12 +432,64 @@ Every helper exists because the obvious C is **wrong**, not merely verbose:
 All of it is pinned by `tests/test_runtime.c`, with the expected values derived
 from the architecture's definition rather than from what the code returns.
 
+### Variables are bound like functions
+
+A module imports variables as well as functions: the C library's case
+tables and standard streams, the C++ runtime's RTTI vtables. Where a
+function import is a stub the loader redirects, a variable import is an
+address the loader writes into the image, and the import table names a
+block per variable listing where: MOVW/MOVT pairs that build the address,
+and words that hold it. The module parser reads those blocks, the emitter
+emits a host global in place of each site's placeholder (a MOVW at one
+becomes `rd = vita_var__Tolotab & 0xFFFF`, a literal load becomes the
+global), and the generated C publishes `vita_var_imports`: the variable's
+name, the global, and the words to patch. At load the runtime builds each
+variable it knows in guest memory (`src/hle_vars.c`), gives the rest a zeroed
+page and a trace line, writes the address into the global and over every
+listed word. An unbound variable is not a missing feature but a wrong
+answer: the placeholder points at the import block, and a table read
+through it returns the block's bytes.
+
+### Threads
+
+The recompiled code keeps its registers in globals and has no idea which
+thread it is on; threads are the runtime's. `src/sched.c` gives each guest
+thread a host thread and lets exactly one of them run guest code at a time:
+at a wait the kernel cannot satisfy (a semaphore short, a mutex held, a
+condition variable, a thread's end, a delay, the vertical blank) the running
+thread saves the register globals into its record, loads the next runnable
+thread's, hands it the baton and sleeps on its own condition variable until
+the baton comes back. Nothing is ever concurrent, so what held for one
+thread still holds: an exclusive pair cannot be interrupted, memory needs no
+ordering. A started thread runs first, up to its first wait, which is what a
+worker needs to set itself up before its maker goes on. When every thread
+is waiting and none on the clock, the program has deadlocked, and the
+runtime says which thread waits on what.
+
+### Calling back into the program
+
+Some of the library runs the program's code: `bsearch` and `qsort` take a
+comparator, the display queue takes a callback. The HLE sets the argument
+registers and calls `vita_dispatch` with the guest address; the generated
+function runs on the same host thread and returns the way every generated
+function does, so the HLE reads r0 and goes on. `qsort` sorts indices on the
+host, comparing the elements where they lie, and moves the bytes once at the
+end: stable, and the comparator sees the array as it was given.
+
 ## Stage 7 — the host
 
 The generated C, the runtime and the HLE are a library. Something has to load
 the module, hand the HLE a window and a gamepad, and call `module_start`.
 That something is small on purpose, and `host/main.c` is the headless version
 of it.
+
+### Mounts
+
+A guest path names a mount and a path under it: `app0:gamedata.bin`. The
+host declares where each mount lives (`--mount app0=DIR`), the file HLEs
+resolve through the table, and a path under no mount is reported missing.
+The same prefix mounted twice is an overlay in the order given, which is how
+a title's patch sits over its data on the console.
 
 ### The contract
 

@@ -106,7 +106,40 @@ Exit criterion: *Uncharted* QA (if available) or any NEON-using homebrew
 proceeds past its first SIMD instruction with lane results matching the
 oracle.
 
-## Milestone C: retail input
+## Milestone C: retail input — bring-up begun 2026-10-10
+
+What a retail title needs before its first frame, learned by running
+*Golden Abyss* and implementing what trapped, in the order it trapped:
+
+- **Threads.** The title creates worker threads before it reads a file.
+  `src/sched.c`: one host thread per guest thread, one running at a time,
+  switching at the kernel's waits, delays, thread ends and the vertical
+  blank; the thread manager, SceUlt and the vblank wait sit on it.
+- **Files.** Mounts the host declares (`--mount app0=DIR`, repeatable as an
+  overlay), real files behind `sceIo*`, and SceFios2 with every operation
+  finished before it is handed back. The dump's data is PFS-encrypted; the
+  copy Vita3K installs is not, and is what gets mounted.
+- **Libraries.** SceLibm over the host's math library in the hard-float
+  convention; `sceClibMspace*` heaps inside the title's own memory blocks;
+  the printf family on one formatter; `bsearch` and `qsort` calling the
+  title's comparator through the dispatch table; `ldiv` with its result in
+  memory; `strtok`; the tick clock; sysmodule, power, AppUtil init;
+  `setjmp` (records, returns 0) and `longjmp` (a named trap); the C++
+  runtime's `type_info` and a named trap for `__cxa_throw`.
+- **Memory.** 416 MiB of guest memory, the console's main memory and CDRAM
+  together: the title's first five blocks are 120 MiB.
+- **A null GPU.** `sceGxm` accepted in full and drawn nowhere: contexts,
+  the shader patcher, render targets, surfaces, textures, the display
+  queue calling the title back at once. Milestone D replaces its insides.
+- **Variable imports.** The C library's case tables, `_Ctype` and the
+  standard streams, bound by the loader at every site that names them; the
+  C++ runtime's vtables get zeroed pages until the runtime has them.
+- **Three decoder faults and one in discovery** that the title's own code
+  found: the 32-bit extends, the structure loads, the table-branch guards
+  (docs/LESSONS.md).
+
+Where it stands: `module_start` through archive index, resources, worker
+threads and `sceGxm` setup to the parsing of its input tables.
 
 1. Accept FAGDec-decrypted `eboot.bin` and `*.suprx` (plain SCE ELF, the
    Vita3K input format) in `armrecomp info/extract`, in addition to fself.

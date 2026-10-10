@@ -342,6 +342,121 @@ rarely or never on the paths that had been compiled, and each was a
 percentage went from 95.53% to 95.53%. The frame went from wrong to right.
 Which is why `tools/e2e.sh` hashes a frame rather than counting traps.
 
+## What the retail title found in its first hours of running (2026-10-10)
+
+The emit was 99.98 % translated and the first run reached the fifth
+firmware call before reading through a null pointer. Ten bugs between
+that and the title's `sceGxm` setup, each found by the same tools: the
+trace of HLE calls with their arguments, the function trace, the register
+trace in a window of instructions around a bad address, and the title's own
+log, which it writes through `printf` and the runtime echoes into the trace.
+
+1. **A function returned from its middle.** Discovery's walk stops at code
+   another walk has seen, so the extent it records can end mid-function;
+   the emitter used that extent as its bound and cut the body there, frame
+   still pushed. The caller then read through registers the callee never
+   restored. Bodies are bounded by the segment now, and a walk that does run
+   out ends in a trap that says so.
+
+2. **`sceFiosFileExistsSync` returns its answer.** Read as the three-argument
+   asynchronous form, it wrote the answer through whatever r2 held: 0x6E,
+   the last byte of the path. The title calls it with two arguments, which
+   the register trace showed at once and the API's own naming had not.
+
+3. **A `stat` that cannot say 3 GB says "no such file".** MSVC's `stat`
+   fails on files past 2 GB, and the title's archive is 2.8 GB; it therefore
+   did not exist, and the title went on without its resources. `_stat64`.
+
+4. **The data was still encrypted.** A NoNpDrm dump keeps its PFS layer; what
+   Vita3K's decryption produced was the executables. The copy Vita3K
+   installs into its own `ux0:` is the decrypted data, and its archive
+   begins with the magic the title checks for. The toolkit's note on retail
+   input now says so.
+
+5. **The decoder took bit 6 for VCVT's signedness.** The integer-to-float
+   form keeps it in bit 7 and always has bit 6 set, so every conversion was
+   signed. The C library's unsigned divide goes through a double for large
+   quotients: 0x81959988 / 3 came out 0, the remainder came out as the
+   dividend, and an object pointer was hashed into 0xA248A038. Found by
+   following the first bad address back through the function trace to a
+   66-instruction helper and reading its last branch.
+
+6. **The 32-bit extends read a three-bit field as two.** `sxtb.w`, `uxtb.w`
+   and the halfword forms share one encoding with the op in bits 6:4; the
+   decoder indexed a four-entry table with bits 5:4, so every `sxtb.w` was
+   a halfword extend, and it dropped the rotate, so `uxtb.w r0, r1, ror #8`
+   kept the wrong byte. The extend-and-add forms (`uxtab`, `sxtah`) and
+   the byte-pair forms were not decoded at all. No sample had caught it:
+   GCC reaches for the 16-bit forms, and the rotated byte extracts are
+   what SNC emits for a hash loop. 1,016 instructions in the title.
+
+7. **An unimplemented import is a wrong answer, not a missing one.** The
+   title's archive index is 38,717 entries of (CRC32, size, offset),
+   sorted, and every resource is found by `bsearch` with the title's own
+   comparator. The import's default trapped by name and returned 0, so
+   nothing was ever found and the first font failed with the title's own
+   error code. The C library's searching and sorting now call the guest
+   comparator through the dispatch table, and `ldiv` writes its two-word
+   result where the caller pointed. The hash, for the record, is CRC32
+   with the standard table, seeded with all ones and never inverted.
+
+8. **A jump table's guard is further away than four instructions, and
+   not always a `cmp` of the index.** The count of a `tbb`/`tbh` table came
+   from a `cmp rm, #n` among the four instructions before it. SNC schedules
+   loads and stores between the two, subtracts the range's base from the
+   index after the compare (`cmp r0, #58; bgt; cmp r0, #39; ble; subs r0,
+   #40; tbh`), moves the index between registers (`adds r5, r1, #0; cmp
+   r1, #4; bhi; tbh [pc, r5]`), compares against a MOVW constant, and
+   guards with a branch *to* the table (`cmp r0, #37; bls table`), which
+   the walk that reaches the table never sees because it starts at the
+   label. The finder now reads the guard's direction from the branch after
+   the compare, follows the index through adds, subtracts and moves, and
+   the walk from a branch target is seeded with the compare that guarded
+   it. The title's tables went from 416 to 483, unresolved computed
+   transfers in the emit from 50 to 7, and the functions reached from 77,455
+   to 78,158.
+
+9. **A module imports variables, not only functions.** `_Tolotab`, the C
+   library's lowercase table, is a `const short *` the library exports; the
+   program builds its address with a MOVW/MOVT pair the loader was to patch,
+   loads the pointer through it and indexes the table with each character.
+   The toolkit read the function imports and never the variable ones, so
+   the pair kept its placeholder, the placeholder pointed back at the
+   import's own stub block, and every lowercased name came out as sixteen-bit
+   garbage: the resource index, 38,717 CRCs of lowercased names, matched
+   nothing, and the resource map the title loads first (the file that turns
+   the hash of a name as written into the hash of the name as stored) was
+   itself not found. The module parser now reads the variable tables and
+   the relocation blocks they name, the emitter reads a host global at every
+   MOVW, MOVT and literal site instead of folding the placeholder, the loader
+   binds each variable to what the runtime builds (the case tables, the
+   `_Ctype` classification table, the standard streams) or to a zeroed page
+   with a trace line, and writes the address over every placeholder word.
+   Eighteen variables in the title: six from the C library, twelve RTTI
+   vtables and type_info objects from the C++ runtime. The `type_info name`
+   trap with `this` of 0x2F01 had been a vtable read through one of those
+   placeholders: 0x2F01 is the first word of a relocation entry.
+
+10. **The single-structure NEON loads were halfword stores.** The decoder
+    claimed VLD1/VST1 with whole registers and handed everything else in
+    the structure load/store space back, and the core load/store decoder,
+    which shares the top bits, took it: `vld1.32 {d8[]}, [sl]`, one word to
+    every lane, became `strh r8, [sl, #0xC8F]`. The title's gesture file
+    reader loads two fields that way per record and the store wrote the
+    loop counter over the records, so the loop never found its end: a
+    vector grew by halves to 28 MB and the title's own allocator asserted
+    out of its 'Global' pool. The one-lane, all-lanes and de-interleaving
+    forms are decoded now, and the whole space is claimed, so a form still
+    missing is a trap that names itself rather than a store that corrupts
+    the program's data. Found by reading the loop whose allocations grew by
+    exactly 1.5 each time, then the disassembly of its head.
+
+Also learned: the title's own crash handler, once reached, walks the stack
+for ever and prints a line per frame; a run captures stdout with a bound.
+And a resource missing from the index is not a toolkit bug: the title asks
+for 248 shaders and textures that the base archive does not hold, which the
+v1.03 patch's own archive presumably does.
+
 ## The size was duplication, and the guess was data (2026-10-10)
 
 After the NEON pass the retail emit was 1.12 GB of C for a 9.43 MB code

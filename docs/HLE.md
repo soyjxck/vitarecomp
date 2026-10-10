@@ -23,6 +23,19 @@ directory at run time anyway, because it is *data*: the toolkit stays free of
 third-party source, a newer database needs no rebuild, and a module targeting a
 different firmware needs a different directory rather than a different binary.
 
+## Variables are imports too
+
+The import table names variables as well as functions, and the database
+names those too (`variables:` under a library). A retail title takes eighteen:
+the C library's `_Tolotab`, `_Touptab` and `_Ctype` tables and its three
+standard streams, and twelve RTTI vtables and type_info objects from the C++
+runtime. They are not optional: the title lowercases every resource name
+through `_Tolotab` before hashing it, and an inlined `dynamic_cast` compares
+a type's type_info against the runtime's `__si_class_type_info` by address.
+`src/hle_vars.c` builds each in guest memory with the shape the library gives
+it, and the loader writes the address at every site the module's relocation
+blocks name (docs/ARCHITECTURE.md, "Variables are bound like functions").
+
 ## SceGxm is 107 functions, and that number is misleading
 
 `SceGxm` is the largest single import — over a fifth of everything. But the
