@@ -6,6 +6,7 @@
 
 #include "vitarecomp/recomp_rt.h"
 
+#include <string.h>
 #include <time.h>
 
 #define SCE_RTC_ERROR_INVALID_POINTER 0x80251001u
@@ -66,5 +67,49 @@ void vita_hle_sceKernelLibcGettimeofday(void) {
         vita_write32(r1 + 0, 0);
         vita_write32(r1 + 4, 0);
     }
+    r0 = 0;
+}
+
+/* --- ticks -----------------------------------------------------------------------
+ * A tick is a microsecond since 0001-01-01: the Unix epoch is 62,135,596,800
+ * seconds in. SceRtcTick is { SceUInt64 tick }. */
+#define RTC_EPOCH_OFFSET_S 62135596800ull
+
+static uint64_t now_tick(void) {
+    struct timespec t;
+    timespec_get(&t, TIME_UTC);
+    return ((uint64_t)t.tv_sec + RTC_EPOCH_OFFSET_S) * 1000000ull + (uint64_t)t.tv_nsec / 1000ull;
+}
+
+/* int sceRtcGetCurrentTick(SceRtcTick *tick) */
+void vita_hle_sceRtcGetCurrentTick(void) {
+    if (!vita_mem_ptr(r0, 8)) { r0 = SCE_RTC_ERROR_INVALID_POINTER; return; }
+    uint64_t t = now_tick();
+    vita_write32(r0, (uint32_t)t);
+    vita_write32(r0 + 4, (uint32_t)(t >> 32));
+    r0 = 0;
+}
+
+/* unsigned int sceRtcGetTickResolution(void): ticks per second */
+void vita_hle_sceRtcGetTickResolution(void) { r0 = 1000000u; }
+
+/* int sceRtcGetTime64_t(const SceDateTime *time, SceUInt64 *out): seconds since 1970 */
+void vita_hle_sceRtcGetTime64_t(void) {
+    if (!vita_mem_ptr(r0, 16) || !vita_mem_ptr(r1, 8)) { r0 = SCE_RTC_ERROR_INVALID_POINTER; return; }
+    struct tm t;
+    memset(&t, 0, sizeof(t));
+    t.tm_year = vita_read16(r0) - 1900;
+    t.tm_mon  = vita_read16(r0 + 2) - 1;
+    t.tm_mday = vita_read16(r0 + 4);
+    t.tm_hour = vita_read16(r0 + 6);
+    t.tm_min  = vita_read16(r0 + 8);
+    t.tm_sec  = vita_read16(r0 + 10);
+#ifdef _WIN32
+    uint64_t secs = (uint64_t)_mkgmtime(&t);
+#else
+    uint64_t secs = (uint64_t)timegm(&t);
+#endif
+    vita_write32(r1, (uint32_t)secs);
+    vita_write32(r1 + 4, (uint32_t)(secs >> 32));
     r0 = 0;
 }

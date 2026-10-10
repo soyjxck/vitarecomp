@@ -8,6 +8,7 @@
 
 #include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
+#include "sched.h"
 
 #define SCE_DISPLAY_ERROR_INVALID_VALUE       0x80290001u
 #define SCE_DISPLAY_ERROR_INVALID_ADDR        0x80290002u
@@ -58,11 +59,16 @@ void vita_hle_sceDisplaySetFrameBuf(void) {
     r0 = 0;
 }
 
-/* int sceDisplayWaitVblankStart(void) */
+/* int sceDisplayWaitVblankStart(void): the frame ends, and the other
+ * threads get their turn before the next one starts. */
 void vita_hle_sceDisplayWaitVblankStart(void) {
     vita_host_vblank();
+    vita_sched_yield();
     r0 = 0;
 }
+void vita_hle_sceDisplayWaitVblankStartCB(void)    { vita_hle_sceDisplayWaitVblankStart(); }
+void vita_hle_sceDisplayWaitSetFrameBuf(void)      { vita_hle_sceDisplayWaitVblankStart(); }
+void vita_hle_sceDisplayWaitVblankStartMulti(void) { vita_hle_sceDisplayWaitVblankStart(); }
 
 int vita_display_current(vita_framebuf *out) {
     if (!g_set) return 0;

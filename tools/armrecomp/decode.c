@@ -643,7 +643,12 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
              * op bit rather than a separate field. */
             if (opc2 == 0x8 && (opc3 & 1)) {
                 o->op = OP_VCVT_I2F;
-                o->vfp_unsigned = (uint8_t)(op == 0);
+                /* The signedness is bit 7 here, not the group's op bit 6,
+                 * which this form always has set. Reading bit 6 made every
+                 * conversion signed, and the C library's unsigned divide,
+                 * which goes through a double for large quotients, turned
+                 * 0x81959988 / 3 into 0. */
+                o->vfp_unsigned = (uint8_t)(((h2 >> 7) & 1) == 0);
                 /* The integer side is always an S register, whatever the
                  * float side is. Numbering it as a D register, as this once
                  * did for the f64 form, read the wrong register silently. */

@@ -42,3 +42,24 @@ void vita_hle_sceKernelGetProcessTimeLow(void) { r0 = (uint32_t)now_us(); }
 
 /* int sceKernelPowerTick(int type): keeps the console awake; nothing to keep. */
 void vita_hle_sceKernelPowerTick(void) { r0 = 0; }
+
+/* --- modules and power -------------------------------------------------------------
+ *
+ * sceSysmoduleLoadModule brings a firmware library into the process; here every
+ * library the HLE answers for is already present, so loading succeeds and
+ * "is it loaded" says yes (SCE_SYSMODULE_LOADED is 0). Power configuration is
+ * a clock-speed request the host has no equivalent of. */
+void vita_hle_sceSysmoduleLoadModule(void)   { vita_hle_trace("sceSysmoduleLoadModule(0x%X)", r0); r0 = 0; }
+void vita_hle_sceSysmoduleUnloadModule(void) { r0 = 0; }
+void vita_hle_sceSysmoduleIsLoaded(void)     { r0 = 0; }
+void vita_hle_scePowerSetConfigurationMode(void) { r0 = 0; }
+void vita_hle_scePowerSetArmClockFrequency(void) { r0 = 0; }
+void vita_hle_scePowerSetGpuClockFrequency(void) { r0 = 0; }
+void vita_hle_scePowerSetBusClockFrequency(void) { r0 = 0; }
+void vita_hle_scePowerSetGpuXbarClockFrequency(void) { r0 = 0; }
+
+/* --- SceAppUtil: the application utility library ------------------------------------
+ * Initialisation succeeds; the save-data and system-parameter calls come as a
+ * title asks for them. */
+void vita_hle_sceAppUtilInit(void)     { vita_hle_trace("sceAppUtilInit(0x%08X, 0x%08X)", r0, r1); r0 = 0; }
+void vita_hle_sceAppUtilShutdown(void) { r0 = 0; }

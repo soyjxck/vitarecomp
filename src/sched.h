@@ -1,0 +1,75 @@
+/* sched.h — guest threads on the host.
+ *
+ * The recompiled code keeps its registers in globals (cpu.h) and has no idea
+ * which thread it is on; that is what makes it fast and what makes threads a
+ * runtime matter. The arrangement here: one host thread per guest thread,
+ * exactly one of them running guest code at any moment, and a switch only
+ * where the console's kernel would block or yield: a wait on a semaphore,
+ * mutex or condition that cannot be satisfied, a delay, a wait for a thread
+ * to end, and the vertical blank.
+ *
+ * At a switch the running thread saves the register globals into its own
+ * record, loads the next thread's, hands it the baton and sleeps on its own
+ * condition variable until someone hands the baton back. Nothing else is
+ * ever concurrent, so the generated code's assumptions hold as they did
+ * with one thread: a LDREX/STREX pair cannot be interrupted, memory needs no
+ * ordering, and the exclusive monitor is never broken.
+ *
+ * The kernel objects (hle_threadmgr.c, hle_ult.c) express their waits as a
+ * kind and an object address; a signal wakes the waiters on that pair, and
+ * the woken thread re-checks the condition it waited for, since another
+ * thread may have taken it first.
+ */
+
+#ifndef VITARECOMP_SCHED_H
+#define VITARECOMP_SCHED_H
+
+#include <stdint.h>
+
+enum {
+    VW_NONE = 0,
+    VW_SEMA,        /* a kernel semaphore, by uid                     */
+    VW_MUTEX,       /* a kernel mutex by uid, or a lightweight one by work address */
+    VW_COND,        /* a condition variable, by uid or work address   */
+    VW_THREAD_END,  /* a thread's end, by its uid                      */
+    VW_DELAY,       /* a delay: nothing wakes it but the clock         */
+    VW_ULT,         /* a SceUlt object, by its address                 */
+};
+
+/* The uid of the running thread; the main thread's before any is made. */
+uint32_t vita_thread_self(void);
+
+/* The kernel's thread lifecycle. Returns 0 or a negative error; create
+ * returns the uid (positive) or 0. */
+uint32_t vita_thread_create(const char *name, uint32_t entry, uint32_t prio, uint32_t stack_size);
+int      vita_thread_start(uint32_t uid, uint32_t arglen, uint32_t argp);
+int      vita_thread_wait_end(uint32_t uid, uint32_t timeout_us, int *status);
+int      vita_thread_delete(uint32_t uid);
+void     vita_thread_exit(int status);          /* the running thread; never returns */
+
+/* The running thread's record, for what the kernel keeps per thread: its
+ * TLS block (written by the thread manager on first use). */
+uint32_t *vita_thread_tls_slot(uint32_t uid);
+
+/* For sceKernelGetThreadInfo. Returns 0 when the uid is a thread. */
+int vita_thread_info(uint32_t uid, char *name, uint32_t cap, uint32_t *entry,
+                     uint32_t *stack, uint32_t *stack_size, uint32_t *prio);
+
+/* Block the running thread on (kind, obj) until woken or, with a non-zero
+ * timeout in microseconds, until it passes. Returns 0 when woken, -1 on
+ * the timeout. */
+int  vita_sched_block(int kind, uint32_t obj, uint32_t timeout_us);
+
+/* Make the threads waiting on (kind, obj) runnable: one, or all. */
+void vita_sched_wake(int kind, uint32_t obj, int all);
+
+/* Let another runnable thread go, if there is one. */
+void vita_sched_yield(void);
+
+/* Sleep for the given microseconds; other threads run meanwhile. */
+void vita_sched_delay(uint32_t us);
+
+/* How many threads exist and how many are runnable, for the host's summary. */
+uint32_t vita_sched_threads(uint32_t *runnable);
+
+#endif /* VITARECOMP_SCHED_H */

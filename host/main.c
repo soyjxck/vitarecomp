@@ -42,14 +42,14 @@ extern const uint32_t vita_module_tls_addr, vita_module_tls_filesz, vita_module_
  * program's heap lives (32 MiB by default, 192 MiB for a vita2d game) and a
  * framebuffer is 2 MiB a piece; then the SceLibc heap and the stack. */
 #define MEM_BASE    0x81000000u
-#define MEM_SIZE    0x0A000000u
+#define MEM_SIZE    0x1A000000u            /* 416 MiB: the console's main memory and its CDRAM, and room */
 #define ARENA_BASE  0x82000000u            /* memory blocks                      */
-#define ARENA_SIZE  0x08000000u
-#define HEAP_BASE   0x8A000000u            /* SceLibc malloc                     */
+#define ARENA_SIZE  0x18000000u
+#define HEAP_BASE   0x9A000000u            /* SceLibc malloc                     */
 #define HEAP_SIZE   0x00E00000u
-#define KERNEL_BASE 0x8AE00000u            /* TLS slots and other kernel objects */
+#define KERNEL_BASE 0x9AE00000u            /* TLS slots and other kernel objects */
 #define KERNEL_SIZE 0x00100000u
-#define STACK_TOP   0x8B000000u            /* grows down from the end            */
+#define STACK_TOP   0x9B000000u            /* grows down from the end            */
 #define STACK_SIZE  0x00100000u
 
 /* --- the script ------------------------------------------------------------- */
@@ -167,6 +167,7 @@ void vita_host_exit(int status) {
 static int usage(void) {
     fputs("usage: vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--press BUTTON@FROM[-TO]]...\n"
           "                 [--syms module.sym] [--trace-fns]\n"
+          "  --mount P=DIR  where the guest mount P (app0, ux0, ...) lives on the host\n"
           "  --syms F       names from an `nm -n` listing, for traces\n"
           "  --trace-fns    log every function entry (VITARECOMP_TRACE=1 logs traps and bad accesses)\n"
           "  --trace-insns LO-HI  log registers at each instruction in [LO, HI]; needs C emitted\n"
@@ -191,6 +192,12 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--syms") == 0 && i + 1 < argc) {
             if (vita_symbols_load(argv[++i])) { fprintf(stderr, "vita_host: cannot read %s\n", argv[i]); return 2; }
             fprintf(stderr, "vita_host: %u symbols from %s\n", vita_symbols_count(), argv[i]);
+        } else if (strcmp(argv[i], "--mount") == 0 && i + 1 < argc) {
+            char *spec = argv[++i];
+            char *eq = strchr(spec, '=');
+            if (!eq) { fprintf(stderr, "vita_host: --mount wants PREFIX=DIR\n"); return 2; }
+            *eq = '\0';
+            vita_io_mount(spec, eq + 1);
         } else if (strcmp(argv[i], "--trace-fns") == 0) {
             vita_trace_fns = 1;
         } else if (strcmp(argv[i], "--trace-insns") == 0 && i + 1 < argc) {
@@ -227,6 +234,7 @@ int main(int argc, char **argv) {
     vita_heap_init(HEAP_BASE, HEAP_SIZE);
     vita_kernel_init(KERNEL_BASE, KERNEL_SIZE);
     vita_tls_init(vita_module_tls_addr, vita_module_tls_filesz, vita_module_tls_memsz);
+    vita_main_stack_init(STACK_TOP - STACK_SIZE, STACK_SIZE);
     vita_register_functions();
 
     fprintf(stderr, "vita_host: %s loaded, %d segments, 0x%08X..0x%08X; module_start 0x%08X\n",
@@ -240,7 +248,6 @@ int main(int argc, char **argv) {
     lr = 0xDEADC0DEu;
     r0 = 0;
     r1 = 0;
-    (void)STACK_SIZE;
 
     vita_module_start();
 

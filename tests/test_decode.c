@@ -705,6 +705,21 @@ static void test_vfp(void) {
     in = dec(ARM_T32, BASE);
     assert(in.op == OP_VMOV_D_TO_C && !in.vfp_dp && in.vm == 0);
 
+    /* vcvt.f64.u32 d1, s0 and vcvt.f64.s32 d1, s0: the signedness is bit 7
+     * of the second halfword. vcvt.f32.u32 s0, s1 likewise. */
+    put16(0, 0xEEB8); put16(2, 0x1B40);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_I2F && in.vfp_dp && in.vfp_unsigned && in.vd == 1 && in.vm == 0);
+    put16(0, 0xEEB8); put16(2, 0x1BC0);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_I2F && in.vfp_dp && !in.vfp_unsigned);
+    put16(0, 0xEEB8); put16(2, 0x0A60);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_I2F && !in.vfp_dp && in.vfp_unsigned && in.vm == 1);
+    put16(0, 0xEEB8); put16(2, 0x0AE0);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_I2F && !in.vfp_dp && !in.vfp_unsigned);
+
     /* vcvt.s32.f64 s0, d1: the integer side is an S register whichever the
      * float side is. vcvt.f64.f32 d2, s3 changes precision. */
     put16(0, 0xEEBD); put16(2, 0x0BC1);

@@ -18,6 +18,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 /* --- the guest/host boundary ------------------------------------------------ */
 
@@ -375,3 +376,96 @@ void vita_hle__Assert(void) {
             m ? (int)n : 6, m ? m : "(null)", f ? " in " : "", f ? (int)fn : 0, f ? f : "");
     vita_host_exit(134);
 }
+
+/* --- setjmp and longjmp ---------------------------------------------------------
+ *
+ * setjmp records the callee-saved state in the buffer and returns 0, which is
+ * what every program that calls it expects on the way in. longjmp cannot be
+ * answered: the saved state is a guest register file, but the place to resume
+ * is a point inside a recompiled C function whose host frames are gone. A
+ * program that gets there is told so by name, since silently returning from
+ * longjmp is the one thing it cannot be. */
+
+/* int setjmp(jmp_buf env): r4-r11, sp, lr, then d8-d15 */
+void vita_hle_setjmp(void) {
+    uint32_t env = r0;
+    if (!vita_mem_ptr(env, 10 * 4 + 8 * 8)) { r0 = 0; return; }
+    uint32_t regs[10] = { r4, r5, r6, r7, r8, r9, r10, r11, sp, lr };
+    for (int i = 0; i < 10; i++) vita_write32(env + 4 * (uint32_t)i, regs[i]);
+    for (int i = 0; i < 8; i++) {
+        uint64_t d = vita_d_get(8 + i);
+        vita_write32(env + 40 + 8 * (uint32_t)i, (uint32_t)d);
+        vita_write32(env + 44 + 8 * (uint32_t)i, (uint32_t)(d >> 32));
+    }
+    r0 = 0;
+}
+
+/* void longjmp(jmp_buf env, int val) */
+void vita_hle_longjmp(void) {
+    vita_trap_unimpl(r0, r1, "longjmp: the host stack cannot be unwound to a guest setjmp");
+    vita_host_exit(1);
+}
+
+/* --- rand -------------------------------------------------------------------------
+ * The library's own generator, so a program seeded the same way draws the same
+ * numbers: the Dinkumware linear congruence, 15 bits of result. */
+static uint32_t g_randseed = 1;
+void vita_hle_srand(void) { g_randseed = r0; }
+void vita_hle_rand(void) {
+    g_randseed = g_randseed * 1103515245u + 12345u;
+    r0 = (g_randseed >> 16) & 0x7FFFu;
+}
+
+/* time_t time(time_t *t): seconds since 1970, 32 bits on this platform */
+void vita_hle_time(void) {
+    uint32_t now = (uint32_t)time(NULL);
+    if (r0 && vita_mem_ptr(r0, 4)) vita_write32(r0, now);
+    r0 = now;
+}
+
+/* --- the C++ runtime's type_info and exceptions ---------------------------------
+ *
+ * type_info is { vtable, const char *name } on this ABI, so name() is the
+ * second word and equality is the names' equality. An exception thrown is the
+ * end: the unwinder would need the tables the module ships and a way to land
+ * in the middle of a recompiled function, and neither exists here. It says
+ * which type was thrown, which is usually the diagnosis. */
+
+/* const char *std::type_info::name() const */
+void vita_hle__ZNKSt9type_info4nameEv(void) {
+    r0 = vita_mem_ptr(r0, 8) ? vita_read32(r0 + 4) : 0;
+}
+
+/* bool std::type_info::operator==(const type_info &) const */
+void vita_hle__ZNKSt9type_infoeqERKS_(void) {
+    uint32_t a = vita_mem_ptr(r0, 8) ? vita_read32(r0 + 4) : 0;
+    uint32_t b = vita_mem_ptr(r1, 8) ? vita_read32(r1 + 4) : 0;
+    if (a == b) { r0 = 1; return; }
+    uint32_t na = gstrlen(a, "type_info name"), nb = gstrlen(b, "type_info name");
+    const char *sa = na ? (const char *)vita_mem_ptr(a, na) : NULL, *sb = nb ? (const char *)vita_mem_ptr(b, nb) : NULL;
+    r0 = (sa && sb && na == nb && memcmp(sa, sb, na) == 0) ? 1u : 0u;
+}
+
+/* void *__cxa_allocate_exception(size_t size): the object, with room for the
+ * header the unwinder would put before it */
+void vita_hle___cxa_allocate_exception(void) {
+    uint32_t n = r0 + 128;
+    uint32_t at = heap_alloc(n);
+    r0 = at ? at + 128 : 0;
+}
+
+/* void __cxa_throw(void *obj, std::type_info *tinfo, void (*dest)(void *)) */
+void vita_hle___cxa_throw(void) {
+    uint32_t name = vita_mem_ptr(r1, 8) ? vita_read32(r1 + 4) : 0;
+    uint32_t n = name ? vita_mem_avail(name) : 0;
+    const char *s = n ? (const char *)vita_mem_ptr(name, 1) : NULL;
+    fprintf(stderr, "vitarecomp: C++ exception thrown, type %.*s: not unwound\n", s ? (int)n : 1, s ? s : "?");
+    vita_trap_unimpl(r0, r1, "__cxa_throw: exceptions are not unwound");
+    vita_host_exit(1);
+}
+
+/* std::bad_typeid::bad_typeid(): the object is the caller's; nothing to set
+ * that a throw would read before the trap above ends things. */
+void vita_hle__ZNSt10bad_typeidC1Ev(void) { }
+void vita_hle__ZNSt9bad_allocC1Ev(void)   { }
+void vita_hle__ZNSt8bad_castC1Ev(void)    { }

@@ -51,9 +51,19 @@ add_library(vitarecomp STATIC
     src/hle_io.c
     src/hle_clib.c
     src/hle_mspace.c
+    src/hle_fios.c
+    src/hle_libm.c
+    src/hle_ult.c
     src/hle_rtc.c
+    src/sched.c
     src/symbols.c
 )
+
+# Guest threads are host threads (sched.c), one running at a time.
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(vitarecomp PUBLIC Threads::Threads)
+endif()
 
 target_include_directories(vitarecomp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include

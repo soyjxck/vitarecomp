@@ -35,6 +35,16 @@ void vita_memblock_init(uint32_t base, uint32_t size);
  * to vita_mem_init, and not where the program will look for anything. */
 void vita_kernel_init(uint32_t base, uint32_t size);
 
+/* Where a guest mount lives on the host: "app0" to the title's data
+ * directory, "ux0" to somewhere writable. Paths the program opens resolve
+ * through these; one nothing maps is reported missing. The same prefix
+ * mounted twice is an overlay, first one wins: a patch over the data. */
+void vita_io_mount(const char *prefix, const char *host_dir);
+
+/* The main thread's stack, so the kernel can describe it: a program's own
+ * crash handler walks frames until it leaves the stack it was told about. */
+void vita_main_stack_init(uint32_t base, uint32_t size);
+
 /* The module's thread-local image, as the generated C publishes it in
  * vita_module_tls_addr/filesz/memsz. Every thread's TLS block is built from
  * it: 0x800 bytes of kernel slots, then a copy of the image, which is what

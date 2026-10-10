@@ -14,6 +14,7 @@
 #include "vitarecomp/hle.h"
 #include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
+#include "hle_sysmem.h"
 
 #include <string.h>
 
@@ -54,10 +55,15 @@ void vita_hle_sceKernelAllocMemBlock(void) {
     uint32_t type = r1, size = r2;
     uint32_t gran = (type >> 24) == 0x09 ? 0x40000u : 0x1000u;
 
-    if (size == 0 || (size & (gran - 1))) { r0 = SCE_KERNEL_ERROR_INVALID_ARGUMENT; return; }
+    if (size == 0 || (size & (gran - 1))) {
+        vita_hle_trace("sceKernelAllocMemBlock(type 0x%08X, size 0x%X): size is not a multiple of 0x%X, INVALID_ARGUMENT", type, size, gran);
+        r0 = SCE_KERNEL_ERROR_INVALID_ARGUMENT;
+        return;
+    }
 
     uint32_t start = (g_next + gran - 1) & ~(gran - 1);
     if (start < g_next || start + size < start || start + size > g_base + g_size) {
+        vita_hle_trace("sceKernelAllocMemBlock(type 0x%08X, size 0x%X): arena exhausted, NO_MEMORY", type, size);
         r0 = SCE_KERNEL_ERROR_NO_MEMORY;
         return;
     }
@@ -97,4 +103,16 @@ void vita_hle_sceKernelFreeMemBlock(void) {
     if (i < 0) { r0 = SCE_KERNEL_ERROR_INVALID_UID; return; }
     g_blocks[i].used = 0;
     r0 = 0;
+}
+
+/* A region with no uid, for the runtime's own needs (thread stacks). */
+uint32_t vita_sysmem_reserve(uint32_t size) {
+    uint32_t start = (g_next + 0xFFFu) & ~0xFFFu;
+    size = (size + 0xFFFu) & ~0xFFFu;
+    if (start < g_next || start + size < start || start + size > g_base + g_size) return 0;
+    void *p = vita_mem_ptr(start, size);
+    if (!p) return 0;
+    memset(p, 0, size);
+    g_next = start + size;
+    return start;
 }
