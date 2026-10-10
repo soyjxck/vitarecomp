@@ -374,3 +374,52 @@ Every helper exists because the obvious C is **wrong**, not merely verbose:
 All of it is pinned by `tests/test_runtime.c`, with the expected values derived
 from the architecture's definition rather than from what the code returns.
 
+## Stage 7 — the host
+
+The generated C, the runtime and the HLE are a library. Something has to load
+the module, hand the HLE a window and a gamepad, and call `module_start`.
+That something is small on purpose, and `host/main.c` is the headless version
+of it.
+
+### The contract
+
+`include/vitarecomp/host.h` is the whole interface. The HLE calls three
+functions a host supplies:
+
+```c
+void     vita_host_vblank(void);    /* sceDisplayWaitVblankStart: present, poll, pace */
+uint32_t vita_host_buttons(void);   /* the VITA_CTRL_* mask held right now            */
+void     vita_host_exit(int);       /* sceKernelExitProcess: never returns             */
+```
+
+and the host asks the HLE two things: `vita_display_current()` for the
+framebuffer the program last set (guest address, pitch, format, size) and
+`vita_memblock_init()` to say where memory blocks come from. Nothing in
+`src/hle_*.c` knows what a window is; nothing in `host/` knows what a
+`SceDisplayFrameBuf` is.
+
+### The address space
+
+One flat region, 64 MiB at `0x81000000`, which is where vita-elf-create links
+and where the console loads a user module. The module's segments go at their
+link addresses; above them an arena for `sceKernelAllocMemBlock`, a heap for
+`SceLibc`, and a stack at the top. A module that does not fit below the arena
+is refused with its range named rather than overlapped.
+
+### Headless, scripted, hashed
+
+```
+vita_host fbdemo.elf --frames 240 --press RIGHT@10-70 --press DOWN@30-60 \
+                     --press START@200 --dump frame.ppm@120
+```
+
+Input is a list of buttons held between two vertical blanks; a frame is
+written at the vblank asked for, or at exit. That makes a run reproducible
+to the byte, which is what lets `tools/e2e.sh` compare a SHA-256 of the frame
+and lets CI prove the chain on both platforms without a display. The sample's
+frame — a gradient whose blue channel is the frame counter, and a square
+where sixty frames of RIGHT and thirty of DOWN put it — is the fixture.
+
+A windowed host is the same three functions pointed at SDL2, behind an
+option, so the core keeps its no-dependency promise.
+

@@ -37,3 +37,7 @@ jobs:
             build_dir=build/smoke
           fi
           tools/smoke.sh "$build_dir"
+
+      - name: End to end, the fbdemo sample to pixels
+        shell: bash
+        run: tools/e2e.sh build

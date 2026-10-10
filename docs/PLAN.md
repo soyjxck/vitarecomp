@@ -5,11 +5,32 @@ Upstream's six phases, with phases 1 to 5 complete, are in
 state of the tree on 2026-10-10 to the first game running, with each step
 ending in something that runs and is measured.
 
-## Milestone A: a homebrew module runs
+## Milestone A: a homebrew module runs — reached 2026-10-10
 
 The cheapest end-to-end proof that needs no game, no keys, and no GPU. The
 vitasdk sample programs that draw through `sceDisplaySetFrameBuf` and read
 `sceCtrlPeekBufferPositive` use about a dozen firmware functions, all shallow.
+
+**What landed.** `samples/fbdemo` is a freestanding program (no newlib, eight
+imports) built with vitasdk; its SELF is tracked so CI needs no toolchain.
+`armrecomp` translates every instruction of its own code. The runtime gained
+`SceSysmem` memory blocks, `SceDisplay`, `SceCtrl` and `sceKernelExitProcess`
+(`src/hle_*.c`), and a host contract (`include/vitarecomp/host.h`): three
+functions a host supplies — present a frame, report buttons, exit. `host/` is
+the headless one: scripted input, frames to PPM. `tools/e2e.sh` runs the
+whole chain and hash-checks the frame; CI runs it on Windows and Linux.
+
+Getting there found four translation bugs that the QA-build corpus had hidden
+(docs/LESSONS.md, "Four bugs the first running homebrew found"): the entry's
+Thumb bit, post-indexed write-back, IT blocks not applied, and RSB's second
+operand. Each was invisible in a translation percentage and obvious in a
+frame.
+
+**Not yet in A, and next:** a *newlib-linked* sample, which is what every real
+homebrew is. That pulls in the SceLibc heap and C++ runtime init upstream
+started, `sceKernelCreateThread` and the lightweight mutexes newlib's reent
+uses, and `SceIofilemgr` for stdio. The steps below are kept as the record of
+the plan; 1 to 6 are done for the freestanding case.
 
 1. **Relocations. Done 2026-10-10.** Homebrew and every 2015+ title are
    `ET_SCE_RELEXEC`. `tools/armrecomp/reloc.c` decodes `PT_SCE_RELA`

@@ -11,10 +11,20 @@ recompiler found anywhere. Its history is preserved here unchanged and the
 kept; this repo exists to finish what it stopped on and to widen it from one
 QA build to retail titles.
 
+**Milestone A reached 2026-10-10: a recompiled Vita homebrew module runs
+natively.** `samples/fbdemo` (freestanding, eight firmware imports) goes
+through `armrecomp emit`, links against the runtime's HLE, and runs in the
+headless host for 200 frames with zero traps: its gradient and the square the
+scripted d-pad moves come out pixel-exact, and START exits through
+`sceKernelExitProcess`. `tools/e2e.sh` repeats that in CI on Windows and
+Linux and hash-checks the frame.
+
 **Status, measured on this machine (2026-10-10):**
 
 | Check | Result |
 |---|---|
+| `tools/e2e.sh`: `samples/fbdemo` SELF to pixels | extract, emit (179 instructions, every one of the program's own translated; the 8 traps left are import stub bodies HLE replaces), build `vita_host`, run 200 frames: 0 traps, 0 bad accesses, frame hash matches |
+| `armrecomp emit` on VitaShell, whole module | 99.19 % of instructions translated; what still traps: saturating ops 0.39 %, NEON/VFP 0.20 %, general LDM/STM 0.16 % |
 | Build (MSVC 14.50, CMake 4.3, Ninja) | `armrecomp.exe` + `vitarecomp.lib` build clean |
 | `ctest` | 4 / 4 suites pass (container, inflate, decode, runtime) |
 | `armrecomp info / extract / cover` on VitaShell 2.02 `eboot.bin` (homebrew, no keys) | 3 segments inflated, Adler-32 ok, ELF 4,882,182 bytes as declared; Thumb-2 dominant, 0.22 % unknown, 2.01 % SIMD |
@@ -46,10 +56,13 @@ where the work is. See [docs/PLAN.md](docs/PLAN.md).
 ## Layout
 
 ```
-include/vitarecomp/   runtime API: cpu, mem, dispatch, vfp, hle, loader
-src/                  runtime: CPU state, memory, traps, dispatch, SceLibc batch 1
-tools/armrecomp/      the recompiler: container, inflate, decode, module, analyze, nids, emit
-tools/*.sh            helpers: MSVC env import, dependency fetch, smoke run
+include/vitarecomp/   runtime API: cpu, mem, dispatch, vfp, hle, host, loader
+src/                  runtime: CPU state, memory, traps, dispatch, and the HLE
+                      (SceLibc batch 1, SceSysmem, SceDisplay, SceCtrl, SceLibKernel)
+host/                 vita_host: the generic headless host (scripted input, frames to files)
+samples/fbdemo/       the first fixture: a freestanding homebrew program, source and prebuilt SELF
+tools/armrecomp/      the recompiler: container, inflate, decode, reloc, module, analyze, nids, emit
+tools/*.sh            helpers: MSVC env import, dependency fetch, smoke, end-to-end, vitasdk in WSL
 tests/                synthetic ctest suites, no game data
 docs/                 upstream's design notes plus this repo's research, plan and decisions
 external/             (gitignored) vita-headers NID database, fetched by tools/fetch-deps.sh
@@ -67,8 +80,29 @@ ctest --test-dir build --output-on-failure
 
 # NID database and a key-free fixture (VitaShell eboot.bin)
 tools/fetch-deps.sh
-tools/smoke.sh          # info, extract, cover on the fixture
+tools/smoke.sh          # info, extract, cover, funcs on the fixture
+tools/e2e.sh            # samples/fbdemo: SELF -> C -> vita_host -> a hash-checked frame
+
+# To rebuild the sample itself (needs vitasdk; the script installs it in a
+# Linux shell, WSL included):
+#   wsl -d <distro> -- bash /mnt/f/psvitarecomp/tools/wsl-vitasdk.sh
 ```
+
+## Running a module
+
+```
+vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--press BUTTON@FROM[-TO]]...
+```
+
+The host is built against one module's emitted C: configure with
+`-DVITARECOMP_RECOMP_DIR=<dir>` pointing at the output of `armrecomp emit`.
+It loads the ELF's segments at their link addresses, carves an arena for
+memory blocks and a heap above them, registers the dispatch table, and calls
+`module_start`. Every firmware import the runtime implements is linked by
+name; every one it does not traps by name on first use
+(`VITARECOMP_TRACE=1` to log and continue). It is headless: input is scripted
+and frames are written as PPM. A windowed host is the same three functions in
+`include/vitarecomp/host.h` pointed at a window.
 
 The core has no external dependencies: a fresh clone builds with CMake and a C
 compiler only. zlib inflate is written in-tree.

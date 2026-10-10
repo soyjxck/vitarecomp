@@ -296,3 +296,48 @@ address ranges nothing had ever compiled, because the functions containing them
 were not discovered until data-segment scanning found the constructor table.
 Better discovery did not just add coverage — it added *reach*, and reach is
 what exposes emitter bugs.
+
+## Four bugs the first running homebrew found (2026-10-10)
+
+A translation percentage says how many instructions produced C. It says
+nothing about whether the C does what the instruction did. The first module
+to run end to end — `samples/fbdemo`, 179 instructions, eight imports —
+translated at 95% on the first pass and was wrong four times, and every one
+of the four was invisible in the percentage and obvious in a frame.
+
+1. **The entry had its Thumb bit set.** vita-elf-create writes `module_start`
+   as an odd offset (`0x25`; VitaShell's is `0x8231`). Discovery seeded the
+   odd address and decoded the entry from one byte in: 163 instructions of
+   confident nonsense, every `BLX` to a stub gone, and `import calls 0`
+   on a program that makes eight. The SNC-built QA corpus had never set the
+   bit, so nothing upstream had ever seen it. Found by `armrecomp funcs`
+   printing an odd `module_start` next to a disassembly that started at the
+   even one.
+
+2. **Post-indexed write-back was a plain offset.** `strb.w r4, [r3], #1` was
+   emitted as a store to `r3 + 1` with `r3` untouched. The T32 8-bit
+   immediate form carries P, U and W bits; only U had been read. The program
+   zeroed one byte forever: the host sat at 130% CPU and printed nothing,
+   because the first trap was on the other side of the loop. Found by reading
+   the generated C for the first loop in the disassembly.
+
+3. **IT blocks were a comment.** The emitter wrote `/* it ge */` and then
+   emitted the predicated `movge` unconditionally, on the assumption that the
+   decoder had attached the condition — but the decoder is stateless and
+   never could. Every clamp in the program ran both branches: a 64-pixel
+   square became a 512-by-288 block. Found by looking at the frame, then at
+   the C beside the `it` in the disassembly. IT state now lives where
+   instructions are seen in order — the emitter's block walk and discovery's
+   — and a predicated return or branch no longer ends the flow.
+
+4. **`RSB` took no second operand.** `rsb r7, r5, r5, lsl #4` (that is,
+   `r7 = r5 * 15`) became `0 - r5`, because the 16-bit negate was the only
+   form the emitter knew. The row offset of the square went negative. Found in
+   the same frame as bug 3, after bug 3 was fixed and the block was the right
+   size in the wrong place.
+
+What the four have in common: each is an instruction form the corpus used
+rarely or never on the paths that had been compiled, and each was a
+*silently plausible* translation — valid C, no trap, wrong value. The
+percentage went from 95.53% to 95.53%. The frame went from wrong to right.
+Which is why `tools/e2e.sh` hashes a frame rather than counting traps.

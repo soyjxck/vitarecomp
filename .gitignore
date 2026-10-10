@@ -17,6 +17,9 @@ __pycache__/
 external/
 fixtures/
 
+# Frames the host writes
+*.ppm
+
 # --- no game data, ever -------------------------------------------------------
 # The recompiler is the product; the game is yours. Nothing below is ever
 # committed, and CI has no way to obtain any of it.
@@ -27,6 +30,7 @@ fixtures/
 *.skprx
 *.velf
 eboot.bin
+!samples/fbdemo/prebuilt/eboot.bin   # built from samples/fbdemo, MIT: the end-to-end fixture
 *.psvimg
 sce_module/
 sce_pfs/

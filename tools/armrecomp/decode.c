@@ -758,7 +758,9 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         o->rt2 = (h2 >> 8) & 0xF;
         o->imm = (uint32_t)(h2 & 0xFF) * 4u;   /* scaled by 4 */
         o->has_imm = 1;
-        o->mem_add = (h1 & 0x0080) != 0;       /* U bit */
+        o->mem_add   = (h1 & 0x0080) != 0;     /* U bit */
+        o->writeback = (h1 & 0x0020) != 0;     /* W bit */
+        o->mem_post  = (h1 & 0x0100) == 0;     /* P bit clear: post-indexed */
         set(o, load ? A_LOAD : A_STORE, load ? "ldrd" : "strd");
         return;
     }
@@ -966,16 +968,30 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         if (h1 & 0x0080) {                        /* 12-bit unsigned offset */
             o->imm = h2 & 0xFFF;
             o->has_imm = 1;
-        } else if ((h2 & 0x0F00) == 0x0C00) {     /* 8-bit, negative */
-            o->imm = h2 & 0xFF;
-            o->has_imm = 1;
-            o->mem_add = 0;
+        } else if (h2 & 0x0800) {
+            /* The 8-bit form: 1 P U W imm8. P = 0 is post-indexed (the base is
+             * used as it stands and the offset applied afterwards), W = 1
+             * writes the base back, U is the sign. P = 1, W = 0 with U = 1 is
+             * the unprivileged LDRT/STRT, which in user mode is the plain
+             * positive-offset access. P = 0, W = 0 is not an encoding of
+             * these and is left to fall through as unknown.
+             *
+             * Reading only the sign here, as this once did, turned
+             * `strb.w r4, [r3], #1` into a store at r3 + 1 with no write-back:
+             * a byte-fill loop that never advances. */
+            uint32_t P = (h2 >> 10) & 1, U = (h2 >> 9) & 1, W = (h2 >> 8) & 1;
+            if (!P && !W) { set(o, A_UNKNOWN, "?"); return; }
+            o->imm       = h2 & 0xFF;
+            o->has_imm   = 1;
+            o->mem_add   = (uint8_t)U;
+            o->writeback = (uint8_t)W;
+            o->mem_post  = (uint8_t)!P;
         } else if ((h2 & 0x0FC0) == 0x0000) {     /* register offset */
             o->rm = h2 & 0xF;
             o->shift_amt = (uint8_t)((h2 >> 4) & 3);
         } else {
-            o->imm = h2 & 0xFF;
-            o->has_imm = 1;
+            set(o, A_UNKNOWN, "?");
+            return;
         }
         set(o, load ? A_LOAD : A_STORE, "ldr/str.w");
         return;
@@ -1016,19 +1032,42 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         return;
     }
 
-    /* Multiply. MLA/MLS have a third operand and are left to a trap rather
-     * than translated as a plain multiply, which would silently drop the
-     * accumulate. */
-    if ((h1 & 0xFFF0) == 0xFB00 && (h2 & 0x00F0) == 0x0000) {
-        if (((h2 >> 12) & 0xF) == 0xF) {          /* ra == 15 -> plain MUL */
+    /* Multiply and multiply-accumulate: 1111 1011 0000 Rn | Ra Rd 000x Rm.
+     * Ra == 15 is a plain MUL; x = 0 accumulates (MLA), x = 1 subtracts
+     * from the accumulator (MLS). */
+    if ((h1 & 0xFFF0) == 0xFB00 && (h2 & 0x00E0) == 0x0000) {
+        uint32_t ra  = (h2 >> 12) & 0xF;
+        uint32_t sub = h2 & 0x0010;
+        o->rd = (h2 >> 8) & 0xF;
+        o->rn = h1 & 0xF;
+        o->rm = h2 & 0xF;
+        if (ra == 0xF && !sub) {
             o->op = OP_MUL;
-            o->rd = (h2 >> 8) & 0xF;
-            o->rn = h1 & 0xF;
-            o->rm = h2 & 0xF;
             set(o, A_ALU, "mul.w");
-            return;
+        } else {
+            o->ra = (int8_t)ra;
+            o->op = sub ? OP_MLS : OP_MLA;
+            set(o, A_ALU, sub ? "mls" : "mla");
         }
-        set(o, A_ALU, "mla/mls");
+        return;
+    }
+
+    /* Long multiply: 1111 1011 1xx0 Rn | RdLo RdHi 0000 Rm, where xx selects
+     * SMULL (00), UMULL (01), SMLAL (10), UMLAL (11). The same first-halfword
+     * space with other second-halfword op2 values holds the halfword and
+     * dual forms (SMLALxy, SMLALD, UMAAL), which are not these and stay
+     * classified, not translated. SDIV/UDIV (1011 1001 / 1011 1011, op2
+     * 1111) are not Cortex-A9 instructions and never appear. */
+    if ((h1 & 0xFF90) == 0xFB80 && (h2 & 0x00F0) == 0x0000) {
+        static const arm_op lm[4] = { OP_SMULL, OP_UMULL, OP_SMLAL, OP_UMLAL };
+        static const char *lmn[4] = { "smull", "umull", "smlal", "umlal" };
+        uint32_t which = (h1 >> 5) & 3;
+        o->op   = lm[which];
+        o->rd   = (h2 >> 12) & 0xF;          /* RdLo */
+        o->rdhi = (h2 >> 8) & 0xF;
+        o->rn   = h1 & 0xF;
+        o->rm   = h2 & 0xF;
+        set(o, A_ALU, lmn[which]);
         return;
     }
 

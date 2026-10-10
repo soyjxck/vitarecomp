@@ -1,12 +1,13 @@
-﻿# vitarecomp â€” a static-recompilation toolkit for PlayStation Vita games.
+# psvitarecomp — a static-recompilation toolkit for PlayStation Vita games.
 #
-# This file builds two things:
-#   1. the `vitarecomp` runtime static library â€” what recompiled game code links
-#      against (CPU state, memory, semantic helpers)
-#   2. `armrecomp` â€” the tool that turns a Vita module into C
+# This file builds:
+#   1. the `vitarecomp` runtime static library — what recompiled game code links
+#      against (CPU state, memory, semantic helpers, the HLE)
+#   2. `armrecomp` — the tool that turns a Vita module into C
+#   3. optionally `vita_host`, the headless host, against one module's emitted C
 #
 # A game repo consumes this repo as a git submodule and does:
-#     add_subdirectory(vitarecomp)
+#     add_subdirectory(psvitarecomp)
 #     add_subdirectory(games/<game>)
 # and links its host against the `vitarecomp` target.
 #
@@ -14,7 +15,7 @@
 # ever appear behind an opt-in option, so a fresh clone builds with nothing
 # installed. (zlib matters here in a way it did not for psprecomp: SELF segments
 # are routinely zlib-compressed *as well as* encrypted. The inflate path is
-# opt-in and the container parser reports compression without needing it.)
+# written in-tree and the container parser reports compression without needing it.)
 
 cmake_minimum_required(VERSION 3.16)
 project(vitarecomp C)
@@ -33,9 +34,6 @@ else()
 endif()
 
 # --- the runtime library ------------------------------------------------------
-#
-# Empty until phase 3. Declared now so a game repo's add_subdirectory() and
-# target_link_libraries() are stable from the start.
 
 add_library(vitarecomp STATIC
     src/cpu.c
@@ -45,6 +43,10 @@ add_library(vitarecomp STATIC
     src/dispatch.c
     src/vfp.c
     src/hle_libc.c
+    src/hle_sysmem.c
+    src/hle_display.c
+    src/hle_ctrl.c
+    src/hle_kernel.c
 )
 
 target_include_directories(vitarecomp PUBLIC
@@ -54,6 +56,14 @@ target_include_directories(vitarecomp PUBLIC
 # --- the recompiler -----------------------------------------------------------
 
 add_subdirectory(tools/armrecomp)
+
+# --- the host, against one module's emitted C ---------------------------------
+
+set(VITARECOMP_RECOMP_DIR "" CACHE PATH
+    "Directory holding recomp_funcs.c and recomp_funcs_imports/ from `armrecomp emit`; builds vita_host against it")
+if(VITARECOMP_RECOMP_DIR)
+    add_subdirectory(host)
+endif()
 
 # --- tests (only when vitarecomp is the top-level project, not a submodule) ----
 

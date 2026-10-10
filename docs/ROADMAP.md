@@ -198,3 +198,48 @@ established what the input path actually is:
 3. **2D** — `sceGxm` is the deepest part of phase 6; a title that leans on it
    lightly gets to "runs" sooner.
 4. **Low NEON density** — measurable with `cover` before committing.
+
+## Beyond the six phases — psvitarecomp, from 2026-10-10
+
+Upstream's phases stand as written above. What this repository added on top,
+measured on its own fixtures:
+
+### Discovery and translation
+
+- [x] **`PT_SCE_RELA` decoded and seeded** (phase 4's open item): all ten
+      entry formats, applied at the link addresses as a check, relocated
+      Thumb-tagged pointers seeded with a text filter that pointer tables
+      bypass. VitaShell: functions 8,074 → 9,195, coverage 65.3% → 71.5%
+- [x] **`module_start` with its Thumb bit masked.** vita-elf-create sets it;
+      SNC did not; seeding the odd address decoded the entry one byte in
+- [x] **Post- and pre-indexed write-back** on the T32 8-bit immediate loads
+      and stores and on LDRD/STRD, with the P/U/W bits read rather than the
+      sign alone
+- [x] **IT blocks applied.** The emitter and discovery carry IT state through
+      a block; predicated instructions are guarded, a predicated return or
+      branch no longer ends the flow
+- [x] **`RSB` with a real operand2**; the 16-bit negate is the special case
+- [x] **`MLA`/`MLS`, `UMULL`/`SMULL`/`UMLAL`/`SMLAL`**; `mul.w` reads `rn`
+- [x] Whole-module translation on VitaShell: **99.19%**
+- [ ] Saturating ops (`SSAT`/`USAT`/`QADD`...) — 0.39% of VitaShell, the
+      largest remaining bucket there
+- [ ] General `LDM`/`STM` against a non-SP base — 0.16%
+- [ ] NEON — 0.20% of VitaShell; still the milestone B item
+- [ ] The 14,532 even-aligned relocated pointers into `.text` (ARM code or
+      literals): unseeded, reported
+
+### Runtime and HLE
+
+- [x] **`SceSysmem`**: `sceKernelAllocMemBlock` / `GetMemBlockBase` /
+      `FreeMemBlock` on a bump arena with the console's granularity
+- [x] **`SceDisplay`**: `sceDisplaySetFrameBuf` with the console's checks,
+      `sceDisplayWaitVblankStart` as the host's turn
+- [x] **`SceCtrl`**: `sceCtrlSetSamplingMode`, `sceCtrlPeekBufferPositive`
+- [x] **`sceKernelExitProcess`**
+- [x] **The host contract** (`host.h`): present, buttons, exit. The headless
+      `vita_host`: scripted input, frames to PPM
+- [x] **Emitted entry by name**: `vita_module_start()`
+- [x] **End to end in CI**: `samples/fbdemo` from SELF to a hash-checked frame
+- [ ] A newlib-linked sample: threads, lightweight mutexes, the SceLibc heap
+      for real, `SceIofilemgr`
+- [ ] A windowed host (SDL2 behind an option)

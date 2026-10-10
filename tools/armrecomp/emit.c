@@ -149,6 +149,15 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
     while (sp_ > 0 && b->n < MAX_INSNS_PER_FUNC) {
         uint32_t a = stack[--sp_];
 
+        /* IT state. The decoder is stateless, so the block structure is
+         * applied here, where instructions are seen in order: after an IT,
+         * the next one to four instructions carry its condition (or its
+         * inverse, per the mask), and a return or branch among them is
+         * conditional rather than the end of the block. A block boundary
+         * ends an IT block too; branching into one is UNPREDICTABLE. */
+        uint32_t it_first = 0, it_mask = 0;
+        int it_left = 0, it_k = 0;
+
         for (;;) {
             if (a < base || a >= base + img->seg_len) break;
             if (a >= bound) break;                   /* extent as a bound */
@@ -157,9 +166,33 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
             arm_insn in;
             int n = arm_decode(text, base, img->seg_len, a, fn->mode, &in);
             if (n == 0) break;
+
+            int in_it = 0;
+            if (it_left > 0) {
+                it_k++;
+                /* The first instruction takes the IT's condition; each later
+                 * one takes it or its inverse according to the mask bit for
+                 * its position (bit 3 for the second, 2 for the third, 1 for
+                 * the fourth), compared against the condition's low bit. */
+                uint32_t c = it_first;
+                if (it_k > 1 && (((it_mask >> (4 - it_k)) & 1) != (it_first & 1)))
+                    c = it_first ^ 1;
+                in.cond = (uint8_t)c;
+                if (in.cls == A_BRANCH || in.cls == A_CALL ||
+                    in.cls == A_RETURN || in.cls == A_INDIRECT)
+                    in.conditional = 1;
+                it_left--;
+                in_it = 1;
+            }
+            if (in.op == OP_IT) {
+                it_first = in.cond;
+                it_mask  = in.it_mask;
+                it_left  = (it_mask & 1) ? 4 : (it_mask & 2) ? 3 : (it_mask & 4) ? 2 : 1;
+                it_k     = 0;
+            }
             fb_push(b, &in);
 
-            if (in.cls == A_RETURN) break;
+            if (in.cls == A_RETURN && !in_it) break;
 
             /* `bound`, not `fn->end`.
              *
@@ -279,9 +312,25 @@ static void operand2(char *dst, size_t cap, const arm_insn *in) {
              src_name(in, in->rm), in->shift_amt);
 }
 
+/* The base-register update of a write-back form, emitted AFTER the access.
+ * Pre-indexed ([rn, #imm]!) and post-indexed ([rn], #imm) differ only in
+ * which address the access itself used; the register ends up the same. */
+static void writeback(FILE *f, const arm_insn *in) {
+    if (!in->writeback || !in->has_imm) return;
+    if (in->rn == ARM_NO_REG || in->rn == 15) return;
+    fprintf(f, "    %s = %s %c 0x%X;\n", reg_name(in->rn), reg_name(in->rn),
+            in->mem_add ? '+' : '-', in->imm);
+}
+
 /* The address expression for a load or store. */
 static int address(char *dst, size_t cap, const arm_insn *in) {
     if (in->rn == ARM_NO_REG) return 0;
+
+    /* Post-indexed: the access uses the base as it stands. */
+    if (in->mem_post && in->rn != 15) {
+        snprintf(dst, cap, "%s", src_name(in, in->rn));
+        return 1;
+    }
 
     if (in->rn == 15) {
         /* PC-relative. A recompiled program has no PC, so it is resolved here:
@@ -369,8 +418,12 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
         if (s) {
             char sym[96];
             hle_symbol(sym, sizeof(sym), db, s);
-            if (in->cls == A_CALL) fprintf(f, "    %s();\n", sym);
-            else                   fprintf(f, "    %s(); return;\n", sym);  /* tail call */
+            /* Inside an IT block the call is conditional like anything else. */
+            char guard[40] = "";
+            if (in->cond != ARM_COND_AL)
+                snprintf(guard, sizeof(guard), "if (vita_cond(%u)) ", in->cond);
+            if (in->cls == A_CALL) fprintf(f, "    %s%s();\n", guard, sym);
+            else                   fprintf(f, "    %s{ %s(); return; }\n", guard, sym);  /* tail call */
             st->import_calls++;
             return 1;
         }
@@ -476,7 +529,12 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
         }
 
         case OP_RSB:
-            fprintf(f, "    { uint32_t _a = 0, _b = %s;\n", src_name(in, in->rn));
+            /* rd = operand2 - rn. The 16-bit form is the negate, which the
+             * decoder presents as operand2 == #0; the 32-bit form carries a
+             * real operand2 (immediate or shifted register), and reading it as
+             * the negate turned `rsb r7, r5, r5, lsl #4` into `0 - r5`. */
+            operand2(o2, sizeof(o2), in);
+            fprintf(f, "    { uint32_t _a = %s, _b = %s;\n", o2, src_name(in, in->rn));
             fprintf(f, "      %s = _a - _b;\n", reg_name(in->rd));
             if (in->sets_flags)
                 fprintf(f, "      vita_flags_sub(_a, _b, %s);\n", reg_name(in->rd));
@@ -511,9 +569,49 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
         }
 
         case OP_MUL:
+            /* The 16-bit form is rd = rd * rm; the 32-bit form names rn. */
             fprintf(f, "    %s = %s * %s;\n", reg_name(in->rd),
-                    reg_name(in->rd), src_name(in, in->rm));
+                    reg_name(in->rn != ARM_NO_REG ? in->rn : in->rd), src_name(in, in->rm));
             if (in->sets_flags) fprintf(f, "    vita_flags_nz(%s);\n", reg_name(in->rd));
+            break;
+
+        case OP_MLA:
+            fprintf(f, "    %s = %s + %s * %s;\n", reg_name(in->rd), reg_name(in->ra),
+                    reg_name(in->rn), reg_name(in->rm));
+            break;
+
+        case OP_MLS:
+            fprintf(f, "    %s = %s - %s * %s;\n", reg_name(in->rd), reg_name(in->ra),
+                    reg_name(in->rn), reg_name(in->rm));
+            break;
+
+        /* The 64-bit product goes into a temporary first: RdLo may be one of
+         * the operands, and the accumulating forms read both halves before
+         * either is written. */
+        case OP_UMULL:
+            fprintf(f, "    { uint64_t _p = (uint64_t)%s * %s;\n", reg_name(in->rn), reg_name(in->rm));
+            fprintf(f, "      %s = (uint32_t)_p; %s = (uint32_t)(_p >> 32); }\n",
+                    reg_name(in->rd), reg_name(in->rdhi));
+            break;
+
+        case OP_SMULL:
+            fprintf(f, "    { int64_t _p = (int64_t)(int32_t)%s * (int32_t)%s;\n", reg_name(in->rn), reg_name(in->rm));
+            fprintf(f, "      %s = (uint32_t)_p; %s = (uint32_t)((uint64_t)_p >> 32); }\n",
+                    reg_name(in->rd), reg_name(in->rdhi));
+            break;
+
+        case OP_UMLAL:
+            fprintf(f, "    { uint64_t _p = (((uint64_t)%s << 32) | %s) + (uint64_t)%s * %s;\n",
+                    reg_name(in->rdhi), reg_name(in->rd), reg_name(in->rn), reg_name(in->rm));
+            fprintf(f, "      %s = (uint32_t)_p; %s = (uint32_t)(_p >> 32); }\n",
+                    reg_name(in->rd), reg_name(in->rdhi));
+            break;
+
+        case OP_SMLAL:
+            fprintf(f, "    { int64_t _p = (int64_t)(((uint64_t)%s << 32) | %s) + (int64_t)(int32_t)%s * (int32_t)%s;\n",
+                    reg_name(in->rdhi), reg_name(in->rd), reg_name(in->rn), reg_name(in->rm));
+            fprintf(f, "      %s = (uint32_t)_p; %s = (uint32_t)((uint64_t)_p >> 32); }\n",
+                    reg_name(in->rd), reg_name(in->rdhi));
             break;
 
         case OP_CMP: case OP_CMN:
@@ -561,6 +659,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             fprintf(f, "    %s = ", reg_name(in->rt));
             fprintf(f, rd, addr);
             fprintf(f, ";\n");
+            writeback(f, in);
             break;
         }
 
@@ -587,6 +686,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
                 fprintf(f, "    vita_write32(%s, %s);\n", base, reg_name(in->rt));
                 fprintf(f, "    vita_write32((%s) + 4, %s);\n", base, reg_name(in->rt2));
             }
+            writeback(f, in);
             break;
         }
 
@@ -595,6 +695,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             const char *w = in->op == OP_STR ? "vita_write32"
                           : in->op == OP_STRB ? "vita_write8" : "vita_write16";
             fprintf(f, "    %s(%s, %s);\n", w, addr, reg_name(in->rt));
+            writeback(f, in);
             break;
         }
 
@@ -1141,6 +1242,18 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
     fprintf(f, "    vita_dispatch_init(vita_functions,\n");
     fprintf(f, "        (uint32_t)(sizeof(vita_functions) / sizeof(vita_functions[0])));\n");
     fprintf(f, "}\n");
+
+    /* The entry, by name. A host should not have to read .sce_module_info to
+     * learn where the program starts; the module said, and discovery seeded
+     * it, so the function exists. The Thumb bit is an instruction-set marker
+     * and is not part of the name. */
+    if (mod->have_info && mod->info.module_start != 0 &&
+        mod->info.module_start != 0xFFFFFFFF) {
+        uint32_t ms = img->seg_vaddr + (mod->info.module_start & 0x3FFFFFFF & ~1u);
+        fprintf(f, "\n/* module_start */\n");
+        fprintf(f, "const uint32_t vita_module_start_addr = 0x%08Xu;\n", ms);
+        fprintf(f, "void vita_module_start(void) { vita_func_%08X(); }\n", ms);
+    }
 
     free(fs.v);
     return 0;

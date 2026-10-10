@@ -96,6 +96,12 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
         seed s = local.v[--local.n];
         uint32_t a = s.addr;
 
+        /* IT state, as in the emitter's collect(): a return or an
+         * unconditional branch inside an IT block is conditional, so the
+         * flow continues past it. Without this the walk stops at the first
+         * `it eq; bxeq lr` and never sees the rest of the function. */
+        int it_left = 0;
+
         for (;;) {
             if (a < base || a >= base + len) break;
             uint32_t off = a - base;
@@ -104,6 +110,14 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
             arm_insn in;
             int n = arm_decode(text, base, len, a, s.mode, &in);
             if (n == 0) break;
+
+            if (it_left > 0) {
+                it_left--;
+                if (in.cls == A_BRANCH || in.cls == A_RETURN || in.cls == A_INDIRECT)
+                    in.conditional = 1;
+            }
+            if (in.op == OP_IT)
+                it_left = (in.it_mask & 1) ? 4 : (in.it_mask & 2) ? 3 : (in.it_mask & 4) ? 2 : 1;
 
             seen_set(r, off);
             r->insns_total++;
@@ -419,10 +433,18 @@ int vf_discover(const vm_image *img, const vm_module *mod,
     seedq q = {0};
     const uint32_t base = img->seg_vaddr;
 
-    /* 1. module_start. The offset carries no Thumb bit, and the corpus is
-     *    overwhelmingly Thumb, so it is seeded as Thumb. */
+    /* 1. module_start. Segment-relative, top two bits naming the segment.
+     *
+     *    The low bit is the Thumb bit when the toolchain sets it, and
+     *    vita-elf-create (every homebrew module) does: VitaShell's is 0x8231,
+     *    the fbdemo sample's 0x25. Seeding the odd address decodes from one
+     *    byte in and produces a function of confident nonsense, which is what
+     *    happened before this was masked. SNC-built retail modules leave the
+     *    bit clear, and the corpus is overwhelmingly Thumb, so a clear bit is
+     *    still seeded as Thumb. */
     if (mod->have_info && mod->info.module_start != 0xFFFFFFFF) {
-        sq_push(&q, base + (mod->info.module_start & 0x3FFFFFFF), ARM_T32, 0);
+        uint32_t ms = mod->info.module_start & 0x3FFFFFFF;
+        sq_push(&q, base + (ms & ~1u), ARM_T32, 0);
         out->seeds_entry++;
     }
 

@@ -58,6 +58,9 @@ typedef enum {
     OP_CMP, OP_CMN, OP_TST,
     OP_LSL, OP_LSR, OP_ASR, OP_ROR,
     OP_MUL,
+    OP_MLA, OP_MLS,                     /* rd = ra +/- rn * rm                  */
+    OP_UMULL, OP_SMULL,                 /* rdhi:rd = rn * rm, 64-bit            */
+    OP_UMLAL, OP_SMLAL,                 /* rdhi:rd += rn * rm, 64-bit           */
     OP_LDR, OP_LDRB, OP_LDRH, OP_LDRSB, OP_LDRSH, OP_LDRD,
     OP_STR, OP_STRB, OP_STRH, OP_STRD,
     OP_PUSH, OP_POP,
@@ -107,6 +110,8 @@ typedef struct {
     arm_op     op;
     int8_t     rd, rn, rm, rt;  /* ARM_NO_REG when unused                */
     int8_t     rt2;             /* second transfer register: LDRD/STRD    */
+    int8_t     ra;              /* accumulator: MLA/MLS                   */
+    int8_t     rdhi;            /* high result register: long multiplies  */
 
     /* VFP register numbers. Single-precision registers are numbered 0-31;
      * double-precision 0-15, aliased onto the same storage. */
@@ -121,8 +126,10 @@ typedef struct {
     uint8_t    shift_is_reg;
     uint16_t   reglist;         /* PUSH/POP/LDM/STM                      */
     uint8_t    cond;            /* ARM_COND_AL when unconditional        */
-    uint8_t    writeback;
+    uint8_t    writeback;       /* W bit: the base register is updated        */
     uint8_t    mem_add;         /* U bit: offset added rather than subtracted */
+    uint8_t    mem_post;        /* P == 0: the access uses the base as it was,
+                                   the offset is applied to it afterwards    */
     uint8_t    it_mask;         /* IT: which of the next 4 are conditional */
 
     /* Bitfield ops. Kept out of `imm`/`shift_amt` because a field named for
