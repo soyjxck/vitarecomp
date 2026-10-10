@@ -30,8 +30,9 @@ fixtures/
 *.skprx
 *.velf
 eboot.bin
-# Except the one built from samples/fbdemo (MIT): the end-to-end fixture.
+# Except the ones built from samples/ (MIT): the end-to-end fixtures.
 !samples/fbdemo/prebuilt/eboot.bin
+!samples/hello/prebuilt/eboot.bin
 *.psvimg
 sce_module/
 sce_pfs/

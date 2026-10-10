@@ -30,6 +30,11 @@ void vita_host_exit(int status);
  * given to vita_mem_init. */
 void vita_memblock_init(uint32_t base, uint32_t size);
 
+/* A small region for objects the kernel keeps on the program's behalf —
+ * thread-local storage slots, and whatever follows. Inside the region given
+ * to vita_mem_init, and not where the program will look for anything. */
+void vita_kernel_init(uint32_t base, uint32_t size);
+
 typedef struct {
     uint32_t base;         /* guest address of the pixels                 */
     uint32_t pitch;        /* in pixels                                    */
@@ -43,6 +48,20 @@ int vita_display_current(vita_framebuf *out);
 
 /* sceDisplaySetFrameBuf calls so far. */
 uint32_t vita_display_flips(void);
+
+/* --- bring-up aids ------------------------------------------------------------ */
+
+/* Names for addresses, from an `nm -n` listing (symbols.c). Optional: a
+ * retail module has none. */
+int         vita_symbols_load(const char *path);
+uint32_t    vita_symbols_count(void);
+const char *vita_symbol_name(uint32_t addr, uint32_t *off);
+
+/* Function-entry tracing. The generated C calls vita_trace_fn at the start
+ * of every function; it prints only while vita_trace_fns is set, naming the
+ * function when symbols are loaded. */
+extern int vita_trace_fns;
+void vita_trace_fn(uint32_t addr);
 
 /* Button bits, for hosts that map keys. The Vita's own values. */
 #define VITA_CTRL_SELECT    0x00000001u

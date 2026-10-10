@@ -3,7 +3,7 @@
 #include "vitarecomp/vfp.h"
 #include "vitarecomp/cpu.h"
 
-vfp_reg vfp_s[32];
+vfp_reg vfp_s[64];
 int fpscr_n, fpscr_z, fpscr_c, fpscr_v;
 
 /* ARM's four comparison outcomes, written as the architecture defines them

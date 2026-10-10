@@ -75,6 +75,7 @@ void vita_hle_sceKernelAllocMemBlock(void) {
     g_blocks[i].used = 1;
     g_next = start + size;
     r0 = UID_FIRST + (uint32_t)i;
+    vita_hle_trace("sceKernelAllocMemBlock(type 0x%08X, size 0x%X) -> 0x%08X at 0x%08X", type, size, r0, start);
 }
 
 /* int sceKernelGetMemBlockBase(SceUID uid, void **base) */

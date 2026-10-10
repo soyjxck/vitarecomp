@@ -16,13 +16,36 @@
  */
 
 #include "vitarecomp/recomp_rt.h"
+#include "vitarecomp/hle.h"
+#include "vitarecomp/host.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static int   g_trace = -1;
 static FILE *g_out;
+
+/* --- function-entry trace ------------------------------------------------------
+ *
+ * Every generated function begins with a call here. The cost while off is
+ * one global load and a branch; while on, it is the call log that turns
+ * "it exited with 2" into "it exited from _malloc_r after _sbrk_r returned
+ * early", which is the question bring-up keeps asking. */
+
+int vita_trace_fns;
+static uint32_t g_depth_hint;
+
+void vita_trace_fn(uint32_t addr) {
+    if (!vita_trace_fns) return;
+    uint32_t off = 0;
+    const char *name = vita_symbol_name(addr, &off);
+    g_depth_hint++;
+    if (name && off == 0) fprintf(stderr, "TRACE fn  %6u  0x%08X  %s\n", g_depth_hint, addr, name);
+    else if (name)        fprintf(stderr, "TRACE fn  %6u  0x%08X  %s+0x%X\n", g_depth_hint, addr, name, off);
+    else                  fprintf(stderr, "TRACE fn  %6u  0x%08X\n", g_depth_hint, addr);
+}
 
 /* Distinct traps already reported, so a loop does not bury the log. */
 #define SEEN_SLOTS 4096
@@ -50,6 +73,16 @@ static int first_time(uint32_t key) {
 }
 
 uint32_t vita_trap_count(void) { return g_hits; }
+
+void vita_hle_trace(const char *fmt, ...) {
+    if (!trace_on()) return;
+    va_list ap;
+    va_start(ap, fmt);
+    fputs("TRACE hle     ", g_out);
+    vfprintf(g_out, fmt, ap);
+    fputc('\n', g_out);
+    va_end(ap);
+}
 
 void vita_trap_unimpl(uint32_t addr, uint32_t raw, const char *what) {
     g_hits++;

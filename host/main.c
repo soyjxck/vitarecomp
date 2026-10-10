@@ -36,13 +36,19 @@ extern const uint32_t vita_module_start_addr;
 
 /* --- the address space ------------------------------------------------------ */
 
+/* 160 MiB: 0x81000000 .. 0x8B000000. The module gets 16 MiB where it was
+ * linked; memory blocks get 128 MiB above it, because that is where a newlib
+ * program's heap lives (32 MiB by default, 192 MiB for a vita2d game) and a
+ * framebuffer is 2 MiB a piece; then the SceLibc heap and the stack. */
 #define MEM_BASE    0x81000000u
-#define MEM_SIZE    0x04000000u            /* 64 MiB: 0x81000000 .. 0x85000000 */
+#define MEM_SIZE    0x0A000000u
 #define ARENA_BASE  0x82000000u            /* memory blocks                      */
-#define ARENA_SIZE  0x01000000u
-#define HEAP_BASE   0x83000000u            /* SceLibc malloc                     */
-#define HEAP_SIZE   0x01000000u
-#define STACK_TOP   0x85000000u            /* grows down from the end            */
+#define ARENA_SIZE  0x08000000u
+#define HEAP_BASE   0x8A000000u            /* SceLibc malloc                     */
+#define HEAP_SIZE   0x00E00000u
+#define KERNEL_BASE 0x8AE00000u            /* TLS slots and other kernel objects */
+#define KERNEL_SIZE 0x00100000u
+#define STACK_TOP   0x8B000000u            /* grows down from the end            */
 #define STACK_SIZE  0x00100000u
 
 /* --- the script ------------------------------------------------------------- */
@@ -158,7 +164,13 @@ void vita_host_exit(int status) {
 /* --- main ------------------------------------------------------------------- */
 
 static int usage(void) {
-    fputs("usage: vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--press BUTTON@FROM[-TO]]...\n", stderr);
+    fputs("usage: vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--press BUTTON@FROM[-TO]]...\n"
+          "                 [--syms module.sym] [--trace-fns]\n"
+          "  --syms F       names from an `nm -n` listing, for traces\n"
+          "  --trace-fns    log every function entry (VITARECOMP_TRACE=1 logs traps and bad accesses)\n"
+          "  --trace-insns LO-HI  log registers at each instruction in [LO, HI]; needs C emitted\n"
+          "                 with VITARECOMP_EMIT_PC=1, which also names the PC of bad accesses\n",
+          stderr);
     return 2;
 }
 
@@ -175,6 +187,17 @@ int main(int argc, char **argv) {
             g.dump_path = spec;
         } else if (strcmp(argv[i], "--press") == 0 && i + 1 < argc) {
             if (parse_press(argv[++i])) { fprintf(stderr, "vita_host: bad --press %s\n", argv[i]); return 2; }
+        } else if (strcmp(argv[i], "--syms") == 0 && i + 1 < argc) {
+            if (vita_symbols_load(argv[++i])) { fprintf(stderr, "vita_host: cannot read %s\n", argv[i]); return 2; }
+            fprintf(stderr, "vita_host: %u symbols from %s\n", vita_symbols_count(), argv[i]);
+        } else if (strcmp(argv[i], "--trace-fns") == 0) {
+            vita_trace_fns = 1;
+        } else if (strcmp(argv[i], "--trace-insns") == 0 && i + 1 < argc) {
+            unsigned lo, hi;
+            if (sscanf(argv[++i], "%x-%x", &lo, &hi) != 2) { fprintf(stderr, "vita_host: bad --trace-insns window\n"); return 2; }
+            vita_trace_insns = 1;
+            vita_trace_lo = lo;
+            vita_trace_hi = hi;
         } else {
             return usage();
         }
@@ -201,6 +224,7 @@ int main(int argc, char **argv) {
     }
     vita_memblock_init(ARENA_BASE, ARENA_SIZE);
     vita_heap_init(HEAP_BASE, HEAP_SIZE);
+    vita_kernel_init(KERNEL_BASE, KERNEL_SIZE);
     vita_register_functions();
 
     fprintf(stderr, "vita_host: %s loaded, %d segments, 0x%08X..0x%08X; module_start 0x%08X\n",

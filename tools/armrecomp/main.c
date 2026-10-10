@@ -811,6 +811,11 @@ static int cmd_discover(const char *path) {
     if (r.seeds_arm_refused)
         printf("  arm seeds refused   %u  (blx to a non-stub: unconfirmed ARM)\n",
                r.seeds_arm_refused);
+    if (r.seeds_interwork || r.seeds_tail)
+        printf("  tail calls          %u  (branch targets registered as functions; %u through bx pc)\n",
+               r.seeds_tail, r.seeds_interwork);
+    if (r.jump_tables)
+        printf("  jump tables         %u  (tbb/tbh followed through their tables)\n", r.jump_tables);
 
     printf("\nfunctions:            %u\n", r.count);
     printf("  from seeds          %u\n", principled);

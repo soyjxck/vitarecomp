@@ -70,6 +70,13 @@ typedef struct {
      * genuine ARM code outside its stub table, this is the number that says
      * so. */
     uint32_t seeds_arm_refused;
+    /* `bx pc` veneers followed into the other instruction set. */
+    uint32_t seeds_interwork;
+    /* Unconditional branch targets, registered as functions in case the
+     * branch was a tail call. */
+    uint32_t seeds_tail;
+    /* TBB/TBH tables whose length the guarding compare gave, followed. */
+    uint32_t jump_tables;
     uint32_t simd_insns;
     uint32_t indirect_sites;
 

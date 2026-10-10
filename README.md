@@ -11,20 +11,23 @@ recompiler found anywhere. Its history is preserved here unchanged and the
 kept; this repo exists to finish what it stopped on and to widen it from one
 QA build to retail titles.
 
-**Milestone A reached 2026-10-10: a recompiled Vita homebrew module runs
-natively.** `samples/fbdemo` (freestanding, eight firmware imports) goes
-through `armrecomp emit`, links against the runtime's HLE, and runs in the
-headless host for 200 frames with zero traps: its gradient and the square the
-scripted d-pad moves come out pixel-exact, and START exits through
-`sceKernelExitProcess`. `tools/e2e.sh` repeats that in CI on Windows and
-Linux and hash-checks the frame.
+**Milestone A reached 2026-10-10: recompiled Vita homebrew runs natively.**
+`samples/fbdemo` (freestanding, eight firmware imports) and `samples/hello`
+(a newlib-linked C program: snprintf, malloc, text on screen, a console log) go
+through `armrecomp emit`, link against the runtime's HLE, and run in the
+headless host with zero traps, pixel-exact, exiting through firmware on a
+scripted START. `tools/e2e.sh` repeats both in CI on Windows and Linux and
+hash-checks the frames. The newlib sample needed a kernel, file and C-runtime
+HLE surface, a first NEON subset, jump tables, and fixes for nine emitter
+bugs that only running could find (docs/LESSONS.md).
 
 **Status, measured on this machine (2026-10-10):**
 
 | Check | Result |
 |---|---|
 | `tools/e2e.sh`: `samples/fbdemo` SELF to pixels | extract, emit (179 instructions, every one of the program's own translated; the 8 traps left are import stub bodies HLE replaces), build `vita_host`, run 200 frames: 0 traps, 0 bad accesses, frame hash matches |
-| `armrecomp emit` on VitaShell, whole module | 99.19 % of instructions translated; what still traps: saturating ops 0.39 %, NEON/VFP 0.20 %, general LDM/STM 0.16 % |
+| `tools/e2e.sh`: `samples/hello`, a newlib-linked program | 52 KB SELF, 54 imports across 11 libraries, all implemented on its path; 99.7 % translated; runs 60 frames with 0 traps and 0 bad accesses: `sceClibPrintf` reaches the console, `snprintf`/`malloc` output is drawn on screen with its own font, frame hash matches |
+| `armrecomp emit` on VitaShell, whole module | 21,593 functions, 78.6 % of the code segment reached (251 jump tables, 23,263 tail-call targets), 98.79 % of emitted instructions translated; what still traps: NEON/VFP 0.49 %, saturating ops 0.31 %, general LDM/STM 0.20 % |
 | Build (MSVC 14.50, CMake 4.3, Ninja) | `armrecomp.exe` + `vitarecomp.lib` build clean |
 | `ctest` | 4 / 4 suites pass (container, inflate, decode, runtime) |
 | `armrecomp info / extract / cover` on VitaShell 2.02 `eboot.bin` (homebrew, no keys) | 3 segments inflated, Adler-32 ok, ELF 4,882,182 bytes as declared; Thumb-2 dominant, 0.22 % unknown, 2.01 % SIMD |

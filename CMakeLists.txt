@@ -47,6 +47,11 @@ add_library(vitarecomp STATIC
     src/hle_display.c
     src/hle_ctrl.c
     src/hle_kernel.c
+    src/hle_threadmgr.c
+    src/hle_io.c
+    src/hle_clib.c
+    src/hle_rtc.c
+    src/symbols.c
 )
 
 target_include_directories(vitarecomp PUBLIC

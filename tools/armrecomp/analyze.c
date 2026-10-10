@@ -102,6 +102,11 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
          * `it eq; bxeq lr` and never sees the rest of the function. */
         int it_left = 0;
 
+        /* The last few instructions in flow, for the compare that bounds a
+         * jump table. */
+        arm_insn prev[4];
+        uint32_t nprev = 0;
+
         for (;;) {
             if (a < base || a >= base + len) break;
             uint32_t off = a - base;
@@ -110,6 +115,27 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
             arm_insn in;
             int n = arm_decode(text, base, len, a, s.mode, &in);
             if (n == 0) break;
+
+            /* A jump table whose length the guarding compare gives is a set
+             * of local branches, and its targets are followed as such. One
+             * without is the computed transfer it looks like. */
+            if (in.cls == A_INDIRECT && (in.op == OP_TBB || in.op == OP_TBH)) {
+                uint32_t count = arm_table_count(prev, nprev, &in);
+                uint32_t tg[256];
+                uint32_t nt = count ? arm_table_targets(text, base, len, &in, count, tg, 256) : 0;
+                seen_set(r, off);
+                r->insns_total++;
+                r->bytes_covered += (uint32_t)n;
+                fn->insns++;
+                if (a + (uint32_t)n > fn->end) fn->end = a + (uint32_t)n;
+                if (nt) {
+                    for (uint32_t i = 0; i < nt; i++) sq_push(&local, tg[i], s.mode, 0);
+                    r->jump_tables++;
+                } else {
+                    r->indirect_sites++;
+                }
+                break;
+            }
 
             if (it_left > 0) {
                 it_left--;
@@ -174,9 +200,45 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
 
             if (in.cls == A_INDIRECT) { r->indirect_sites++; break; }
 
+            /* A branch into the other instruction set (`bx pc`) is a transfer
+             * to a function that must be decoded in that set, not local flow:
+             * a function has one mode. It is accepted as an ARM seed without
+             * the stub check, because it was decoded in flow from a real
+             * instruction, not manufactured by a linear sweep over data. */
+            if (in.cls == A_BRANCH && in.has_target && in.switches_mode) {
+                sq_push(q, in.target, s.mode == ARM_T32 ? ARM_A32 : ARM_T32, 0);
+                r->seeds_interwork++;
+                if (!in.conditional) break;
+                a += (uint32_t)n;
+                continue;
+            }
+
+            if (nprev < 4) prev[nprev++] = in;
+            else { prev[0] = prev[1]; prev[1] = prev[2]; prev[2] = prev[3]; prev[3] = in; }
+
             if (in.cls == A_BRANCH && in.has_target) {
                 sq_push(&local, in.target, s.mode, 0);
-                if (!in.conditional) break;       /* unconditional: flow ends */
+                /* A branch to before the function's own start leaves the
+                 * function whatever its condition: a shared tail, or a
+                 * conditional tail call. libgcc's division helpers branch
+                 * back into their neighbours this way. */
+                if (in.conditional && in.target < start) {
+                    sq_push(q, in.target, s.mode, 0);
+                    r->seeds_tail++;
+                }
+                if (!in.conditional) {
+                    /* An unconditional branch is also a possible tail call,
+                     * and the function it lands in is a function whether or
+                     * not anything BL's it. Registering the target as a
+                     * function as well as following it locally costs a
+                     * duplicate body where the branch was merely a jump; the
+                     * alternative, leaving it out, costs a trap on every
+                     * `b <callee>` that leaves the caller's extent — which is
+                     * how newlib reaches most of its veneers. */
+                    sq_push(q, in.target, s.mode, 0);
+                    r->seeds_tail++;
+                    break;                        /* unconditional: flow ends */
+                }
             }
 
             a += (uint32_t)n;

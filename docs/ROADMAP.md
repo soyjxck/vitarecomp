@@ -220,7 +220,22 @@ measured on its own fixtures:
       branch no longer ends the flow
 - [x] **`RSB` with a real operand2**; the 16-bit negate is the special case
 - [x] **`MLA`/`MLS`, `UMULL`/`SMULL`/`UMLAL`/`SMLAL`**; `mul.w` reads `rn`
-- [x] Whole-module translation on VitaShell: **99.19%**
+- [x] **Jump tables**: `tbb`/`tbh` with the count from the guarding compare,
+      followed by discovery and emitted as a `switch`
+- [x] **Veneers and tail calls**: `bx pc` PIC veneers resolved in the
+      decoder; unconditional and backward-conditional branch targets
+      registered as functions. VitaShell: 9,195 → 21,593 functions, 71.5% →
+      78.6% coverage
+- [x] **`CLZ`, `RBIT`, `REV16`/`REVSH`, `UADD8`/`USUB8`/`SEL`** with the GE
+      bits — the C library's strlen
+- [x] **A first NEON subset on D registers**: `VMOV`/`VORR`/`VBIC` immediate,
+      the bitwise ops, `VADD`/`VSUB`/`VCEQ`/`VTST`/`VPADD`, `VDUP`, the 32-bit
+      lane moves, `VLD1`/`VST1`; D16-D31 exist
+- [x] The emitter bugs the newlib sample found (LESSONS.md): `pop.w` with
+      PC, `bx lr`, the ITE mask bit and IT flag suppression, scaled register
+      offsets, shift-by-register's `rn`, `pld`, backward `bgt.w`/`ble.w`
+- [x] Whole-module translation on VitaShell: **98.79%** of 7.28 M emitted
+      instructions (the count grew with the reach; 99.19% of the old 6.07 M)
 - [ ] Saturating ops (`SSAT`/`USAT`/`QADD`...) — 0.39% of VitaShell, the
       largest remaining bucket there
 - [ ] General `LDM`/`STM` against a non-SP base — 0.16%
@@ -240,6 +255,13 @@ measured on its own fixtures:
       `vita_host`: scripted input, frames to PPM
 - [x] **Emitted entry by name**: `vita_module_start()`
 - [x] **End to end in CI**: `samples/fbdemo` from SELF to a hash-checked frame
-- [ ] A newlib-linked sample: threads, lightweight mutexes, the SceLibc heap
-      for real, `SceIofilemgr`
+- [x] **A newlib-linked sample runs** (`samples/hello`): `SceThreadmgr`
+      mutexes and lightweight mutexes, thread id, TLS slots; `SceIofilemgr`
+      open/write/close/stat for the console streams; `sceClib*` memory
+      routines and a guest-aware `sceClibPrintf`; `SceRtc`; printf,
+      snprintf, malloc and a 5x7 font on screen
+- [x] **Bring-up tools in the runtime**: function-entry trace with names
+      from an `nm` listing, per-instruction register trace in a window,
+      write watchpoints, bad accesses reported with their PC
 - [ ] A windowed host (SDL2 behind an option)
+- [ ] Threads for real: `sceKernelCreateThread`, and a scheduler model

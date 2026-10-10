@@ -39,4 +39,10 @@ void vita_heap_init(uint32_t base, uint32_t size);
 uint32_t vita_heap_used(void);
 uint32_t vita_heap_size(void);
 
+/* One line to stderr while VITARECOMP_TRACE is set, nothing otherwise. For
+ * an HLE body to say what it was asked and what it answered: the call log
+ * that turns "the program read a null pointer" into "the slot it read was
+ * the one I handed out, and it was empty". */
+void vita_hle_trace(const char *fmt, ...);
+
 #endif /* VITARECOMP_HLE_H */

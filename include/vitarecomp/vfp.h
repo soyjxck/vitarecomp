@@ -12,6 +12,10 @@
  * occupies S(2n) and S(2n+1) with S(2n) holding the LOW half. Keeping one
  * backing array rather than two makes that aliasing automatic instead of
  * something to remember at every access.
+ *
+ * Advanced SIMD has sixteen more, D16-D31, with no single-precision names.
+ * They live in the same array past S31, so a D register is always the pair
+ * at 2n and 2n+1 whichever side of 16 it is (neon.h).
  */
 
 #ifndef VITARECOMP_VFP_H
@@ -28,7 +32,7 @@ typedef union {
     float    f;
 } vfp_reg;
 
-extern vfp_reg vfp_s[32];
+extern vfp_reg vfp_s[64];
 
 /* VFP comparisons write FPSCR, not the integer flags. A separate VMRS then
  * copies them into APSR, and only after that can a conditional branch see
@@ -46,7 +50,7 @@ static inline void     vfp_setu(int n, uint32_t v) { vfp_s[n & 31].u = v; }
 
 /* Doubles occupy a register pair, low half first. */
 static inline double vfp_getd(int n) {
-    uint32_t lo = vfp_s[(n * 2) & 31].u, hi = vfp_s[(n * 2 + 1) & 31].u;
+    uint32_t lo = vfp_s[(n * 2) & 63].u, hi = vfp_s[(n * 2 + 1) & 63].u;
     uint64_t bits = ((uint64_t)hi << 32) | lo;
     double d;
     memcpy(&d, &bits, sizeof(d));
@@ -56,8 +60,8 @@ static inline double vfp_getd(int n) {
 static inline void vfp_setd(int n, double v) {
     uint64_t bits;
     memcpy(&bits, &v, sizeof(bits));
-    vfp_s[(n * 2) & 31].u     = (uint32_t)bits;
-    vfp_s[(n * 2 + 1) & 31].u = (uint32_t)(bits >> 32);
+    vfp_s[(n * 2) & 63].u     = (uint32_t)bits;
+    vfp_s[(n * 2 + 1) & 63].u = (uint32_t)(bits >> 32);
 }
 
 /* Compare two floats and write FPSCR.

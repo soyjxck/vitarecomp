@@ -65,8 +65,11 @@ typedef enum {
     OP_STR, OP_STRB, OP_STRH, OP_STRD,
     OP_PUSH, OP_POP,
     OP_B, OP_BL, OP_BX, OP_BLX,
+    OP_TBB, OP_TBH,     /* jump through a byte/halfword table at PC          */
     OP_ADR,
     OP_SXTB, OP_SXTH, OP_UXTB, OP_UXTH, OP_REV,
+    OP_REV16, OP_REVSH, OP_RBIT, OP_CLZ,
+    OP_UADD8, OP_USUB8, OP_SEL,         /* byte-parallel, through the GE bits   */
     OP_IT, OP_NOP, OP_SVC, OP_CBZ, OP_CBNZ,
     OP_SBFX, OP_UBFX, OP_BFI, OP_BFC,
 
@@ -84,6 +87,19 @@ typedef enum {
     OP_VLDM, OP_VSTM,   /* register-list float load/store, incl. VPUSH/VPOP */
     OP_VMLA, OP_VMLS,   /* multiply-accumulate: vd = vd +/- (vn * vm)       */
     OP_VNMUL,
+
+    /* Advanced SIMD on D registers (neon.h). vd/vn/vm are D numbers 0-31,
+     * neon_q doubles them up, neon_size is the lane width in bits. */
+    OP_NEON_MOV_IMM,    /* vd = imm64                                       */
+    OP_NEON_ORR_IMM,    /* vd |= imm64                                      */
+    OP_NEON_BIC_IMM,    /* vd &= ~imm64                                     */
+    OP_NEON_AND, OP_NEON_BIC, OP_NEON_ORR, OP_NEON_ORN,
+    OP_NEON_EOR, OP_NEON_BSL, OP_NEON_BIT, OP_NEON_BIF,
+    OP_NEON_ADD, OP_NEON_SUB, OP_NEON_CEQ, OP_NEON_TST, OP_NEON_PADD,
+    OP_NEON_DUP,        /* every lane from a core register rt               */
+    OP_NEON_SET32,      /* vd[imm] = rt                                     */
+    OP_NEON_GET32,      /* rt = vn[imm]                                     */
+    OP_NEON_LD1, OP_NEON_ST1,  /* imm registers from/to [rn], rm as ARM has it */
 } arm_op;
 
 /* Shift types, in the architecture's encoding order. */
@@ -136,6 +152,11 @@ typedef struct {
      * something else is how a reader ends up trusting the wrong one. */
     uint8_t    bf_lsb;
     uint8_t    bf_width;
+
+    /* Advanced SIMD. */
+    uint8_t    neon_q;          /* Q form: the operation covers vd and vd+1  */
+    uint8_t    neon_size;       /* lane width in bits: 8, 16, 32 or 64       */
+    uint64_t   imm64;           /* an expanded modified immediate            */
 } arm_insn;
 
 const char *arm_cond_name(uint8_t cond);
@@ -150,5 +171,15 @@ const char *arm_class_name(arm_class c);
  * is no reliable way to infer it from a single instruction. */
 int arm_decode(const uint8_t *code, uint32_t code_addr, uint32_t code_len,
                uint32_t addr, arm_mode mode, arm_insn *out);
+
+/* Jump tables. A TBB/TBH indexes a table of byte or halfword offsets that
+ * follows it at PC; the compiler guards the index with `cmp rm, #last`.
+ * arm_table_count looks back through up to `nprev` instructions decoded in
+ * flow before `tb` (most recent last) for that compare and returns the entry
+ * count, or 0 when there is none to be found. arm_table_targets reads the
+ * table and returns how many targets it wrote. */
+uint32_t arm_table_count(const arm_insn *prev, uint32_t nprev, const arm_insn *tb);
+uint32_t arm_table_targets(const uint8_t *code, uint32_t code_addr, uint32_t code_len,
+                           const arm_insn *tb, uint32_t count, uint32_t *out, uint32_t max);
 
 #endif /* ARMRECOMP_DECODE_H */

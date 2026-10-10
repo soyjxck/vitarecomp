@@ -172,15 +172,24 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
                 it_k++;
                 /* The first instruction takes the IT's condition; each later
                  * one takes it or its inverse according to the mask bit for
-                 * its position (bit 3 for the second, 2 for the third, 1 for
-                 * the fourth), compared against the condition's low bit. */
+                 * its position — bit 3 for the second, 2 for the third, 1
+                 * for the fourth — compared against the condition's low bit.
+                 * Reading bit 2 for the second was the bug that made
+                 * `ite ls; movls r1, #0; movhi r1, #1` set r1 to 1 on both
+                 * paths, and malloc report out of memory on every call. */
                 uint32_t c = it_first;
-                if (it_k > 1 && (((it_mask >> (4 - it_k)) & 1) != (it_first & 1)))
+                if (it_k > 1 && (((it_mask >> (5 - it_k)) & 1) != (it_first & 1)))
                     c = it_first ^ 1;
                 in.cond = (uint8_t)c;
                 if (in.cls == A_BRANCH || in.cls == A_CALL ||
                     in.cls == A_RETURN || in.cls == A_INDIRECT)
                     in.conditional = 1;
+                /* Inside an IT block the 16-bit data-processing forms do not
+                 * set the flags, whatever their S bit would say outside one;
+                 * only the compares do. A `movls` that wrote NZ would wreck
+                 * the condition the next instruction of the block tests. */
+                if (in.width == 2 && in.op != OP_CMP && in.op != OP_CMN && in.op != OP_TST)
+                    in.sets_flags = 0;
                 it_left--;
                 in_it = 1;
             }
@@ -190,9 +199,33 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
                 it_left  = (it_mask & 1) ? 4 : (it_mask & 2) ? 3 : (it_mask & 4) ? 2 : 1;
                 it_k     = 0;
             }
+
+            /* A jump table: the count comes from the compare just before it,
+             * which is the last thing pushed, and travels in `imm` so the
+             * emitter can read the table again. Its targets are blocks of
+             * this function. */
+            if (in.cls == A_INDIRECT && (in.op == OP_TBB || in.op == OP_TBH)) {
+                uint32_t have = b->n < 4 ? b->n : 4;
+                uint32_t count = arm_table_count(b->v + (b->n - have), have, &in);
+                uint32_t tg[256];
+                uint32_t nt = count ? arm_table_targets(text, base, img->seg_len, &in, count, tg, 256) : 0;
+                in.imm = nt ? count : 0;
+                in.has_imm = nt != 0;
+                fb_push(b, &in);
+                for (uint32_t i = 0; i < nt; i++) {
+                    if (tg[i] < fn->addr || tg[i] >= bound) continue;
+                    fb_label(b, tg[i]);
+                    if (sp_ < (int)(sizeof(stack) / sizeof(stack[0])))
+                        stack[sp_++] = tg[i];
+                }
+                break;
+            }
             fb_push(b, &in);
 
             if (in.cls == A_RETURN && !in_it) break;
+            /* A computed transfer ends the block; what follows it is reached
+             * by a label if at all, and may be data. */
+            if (in.cls == A_INDIRECT) break;
 
             /* `bound`, not `fn->end`.
              *
@@ -209,7 +242,7 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
              * trapped: 2,547 instructions, and every one of them an ordinary
              * intra-function branch that had already been translated correctly
              * a few lines above. */
-            if (in.has_target && in.cls == A_BRANCH &&
+            if (in.has_target && in.cls == A_BRANCH && !in.switches_mode &&
                 in.target >= fn->addr && in.target < bound) {
                 fb_label(b, in.target);
                 if (sp_ < (int)(sizeof(stack) / sizeof(stack[0])))
@@ -352,6 +385,12 @@ static int address(char *dst, size_t cap, const arm_insn *in) {
     if (in->has_imm && in->imm)
         snprintf(dst, cap, "%s %c 0x%X", src_name(in, in->rn),
                  in->mem_add ? '+' : '-', in->imm);
+    else if (in->rm != ARM_NO_REG && in->shift_amt)
+        /* The T32 register-offset form scales the index: [rn, rm, lsl #n].
+         * Dropping the shift read newlib's descriptor table one byte in,
+         * and the pointer it produced looked like any other pointer. */
+        snprintf(dst, cap, "%s + (%s << %u)", src_name(in, in->rn),
+                 src_name(in, in->rm), in->shift_amt);
     else if (in->rm != ARM_NO_REG)
         snprintf(dst, cap, "%s + %s", src_name(in, in->rn), src_name(in, in->rm));
     else
@@ -562,8 +601,13 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
                 fprintf(f, "    %s = %s(%s, %u);\n", reg_name(in->rd),
                         fn2[which], src, in->imm);
             else
+                /* Shift by register: the 16-bit form shifts rd by rm; the
+                 * 32-bit form names a separate rn. Reading rd for both turned
+                 * `asr.w r3, r9, ip` into a shift of r3, and a font's bit
+                 * test into noise. */
                 fprintf(f, "    %s = %s(%s, %s & 0xFF);\n", reg_name(in->rd),
-                        fn2[which], reg_name(in->rd), src_name(in, in->rm));
+                        fn2[which], reg_name(in->rn != ARM_NO_REG ? in->rn : in->rd),
+                        src_name(in, in->rm));
             if (in->sets_flags) fprintf(f, "    vita_flags_nz(%s);\n", reg_name(in->rd));
             break;
         }
@@ -613,6 +657,95 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             fprintf(f, "      %s = (uint32_t)_p; %s = (uint32_t)((uint64_t)_p >> 32); }\n",
                     reg_name(in->rd), reg_name(in->rdhi));
             break;
+
+        case OP_REV16: case OP_REVSH: case OP_RBIT: case OP_CLZ: {
+            const char *fn1 = in->op == OP_REV16 ? "vita_rev16" : in->op == OP_REVSH ? "vita_revsh"
+                            : in->op == OP_RBIT  ? "vita_rbit"  : "vita_clz";
+            fprintf(f, "    %s = %s(%s);\n", reg_name(in->rd), fn1, reg_name(in->rm));
+            break;
+        }
+
+        case OP_UADD8: case OP_USUB8: case OP_SEL: {
+            const char *fn1 = in->op == OP_UADD8 ? "vita_uadd8" : in->op == OP_USUB8 ? "vita_usub8" : "vita_sel";
+            fprintf(f, "    %s = %s(%s, %s);\n", reg_name(in->rd), fn1, reg_name(in->rn), reg_name(in->rm));
+            break;
+        }
+
+        /* --- Advanced SIMD, lane-wise on D registers ----------------------
+         *
+         * A Q form is its two D halves one after the other; no lane crosses
+         * the middle in any of these. */
+        case OP_NEON_MOV_IMM: case OP_NEON_ORR_IMM: case OP_NEON_BIC_IMM:
+            for (int q = 0; q <= in->neon_q; q++) {
+                int d = in->vd + q;
+                if (in->op == OP_NEON_MOV_IMM)
+                    fprintf(f, "    vita_d_set(%d, 0x%016llXull);\n", d, (unsigned long long)in->imm64);
+                else if (in->op == OP_NEON_ORR_IMM)
+                    fprintf(f, "    vita_d_set(%d, vita_d_get(%d) | 0x%016llXull);\n", d, d, (unsigned long long)in->imm64);
+                else
+                    fprintf(f, "    vita_d_set(%d, vita_d_get(%d) & ~0x%016llXull);\n", d, d, (unsigned long long)in->imm64);
+            }
+            break;
+
+        case OP_NEON_AND: case OP_NEON_BIC: case OP_NEON_ORR: case OP_NEON_ORN:
+        case OP_NEON_EOR: case OP_NEON_BSL: case OP_NEON_BIT: case OP_NEON_BIF:
+            for (int q = 0; q <= in->neon_q; q++) {
+                int d = in->vd + q, n = in->vn + q, m = in->vm + q;
+                switch (in->op) {
+                case OP_NEON_AND: fprintf(f, "    vita_d_set(%d, vita_d_get(%d) & vita_d_get(%d));\n", d, n, m); break;
+                case OP_NEON_BIC: fprintf(f, "    vita_d_set(%d, vita_d_get(%d) & ~vita_d_get(%d));\n", d, n, m); break;
+                case OP_NEON_ORR: fprintf(f, "    vita_d_set(%d, vita_d_get(%d) | vita_d_get(%d));\n", d, n, m); break;
+                case OP_NEON_ORN: fprintf(f, "    vita_d_set(%d, vita_d_get(%d) | ~vita_d_get(%d));\n", d, n, m); break;
+                case OP_NEON_EOR: fprintf(f, "    vita_d_set(%d, vita_d_get(%d) ^ vita_d_get(%d));\n", d, n, m); break;
+                case OP_NEON_BSL: fprintf(f, "    vita_d_set(%d, vita_neon_bsl(vita_d_get(%d), vita_d_get(%d), vita_d_get(%d)));\n", d, d, n, m); break;
+                case OP_NEON_BIT: fprintf(f, "    vita_d_set(%d, (vita_d_get(%d) & ~vita_d_get(%d)) | (vita_d_get(%d) & vita_d_get(%d)));\n", d, d, m, n, m); break;
+                default:          fprintf(f, "    vita_d_set(%d, (vita_d_get(%d) & vita_d_get(%d)) | (vita_d_get(%d) & ~vita_d_get(%d)));\n", d, d, m, n, m); break;
+                }
+            }
+            break;
+
+        case OP_NEON_ADD: case OP_NEON_SUB: case OP_NEON_CEQ: case OP_NEON_TST: case OP_NEON_PADD: {
+            const char *fn1 = in->op == OP_NEON_ADD ? "vita_neon_add" : in->op == OP_NEON_SUB ? "vita_neon_sub"
+                            : in->op == OP_NEON_CEQ ? "vita_neon_ceq" : in->op == OP_NEON_TST ? "vita_neon_tst"
+                            : "vita_neon_padd";
+            for (int q = 0; q <= in->neon_q; q++)
+                fprintf(f, "    vita_d_set(%d, %s(vita_d_get(%d), vita_d_get(%d), %u));\n",
+                        in->vd + q, fn1, in->vn + q, in->vm + q, in->neon_size);
+            break;
+        }
+
+        case OP_NEON_DUP:
+            for (int q = 0; q <= in->neon_q; q++)
+                fprintf(f, "    vita_d_set(%d, vita_neon_dup(%s, %u));\n", in->vd + q, reg_name(in->rt), in->neon_size);
+            break;
+
+        case OP_NEON_SET32:
+            fprintf(f, "    vita_d_set(%d, vita_neon_set32(vita_d_get(%d), %u, %s));\n",
+                    in->vd, in->vd, in->imm, reg_name(in->rt));
+            break;
+
+        case OP_NEON_GET32:
+            fprintf(f, "    %s = vita_neon_get32(vita_d_get(%d), %u);\n", reg_name(in->rt), in->vn, in->imm);
+            break;
+
+        case OP_NEON_LD1: case OP_NEON_ST1: {
+            if (in->rn == 15) { ok = 0; trap(f, in, "vld1/vst1 pc base"); break; }
+            const char *rn = reg_name(in->rn);
+            for (uint32_t k = 0; k < in->imm; k++) {
+                int d = in->vd + (int)k;
+                if (in->op == OP_NEON_LD1)
+                    fprintf(f, "    vita_d_set(%d, (uint64_t)vita_read32(%s + %u) | ((uint64_t)vita_read32(%s + %u) << 32));\n",
+                            d, rn, k * 8, rn, k * 8 + 4);
+                else {
+                    fprintf(f, "    vita_write32(%s + %u, (uint32_t)vita_d_get(%d));\n", rn, k * 8, d);
+                    fprintf(f, "    vita_write32(%s + %u, (uint32_t)(vita_d_get(%d) >> 32));\n", rn, k * 8 + 4, d);
+                }
+            }
+            /* Rm = 13: advance by the bytes moved; another register: by it. */
+            if (in->rm == 13)      fprintf(f, "    %s += %u;\n", rn, in->imm * 8);
+            else if (in->rm != 15) fprintf(f, "    %s += %s;\n", rn, reg_name(in->rm));
+            break;
+        }
 
         case OP_CMP: case OP_CMN:
             operand2(o2, sizeof(o2), in);
@@ -794,7 +927,33 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             }
             break;
 
+        case OP_TBB: case OP_TBH: {
+            uint32_t tg[256];
+            uint32_t nt = in->has_imm
+                        ? arm_table_targets(img->data + img->seg_file, img->seg_vaddr, img->seg_len,
+                                            in, in->imm, tg, 256)
+                        : 0;
+            if (!nt) { ok = 0; break; }                /* no count: a trap, below */
+            fprintf(f, "    switch (%s) {\n", reg_name(in->rm));
+            for (uint32_t i = 0; i < nt; i++) {
+                if (fb_has_label(b, tg[i]))
+                    fprintf(f, "    case %u: goto L_%08X;\n", i, tg[i]);
+                else
+                    fprintf(f, "    case %u: vita_trap_indirect(0x%08X, 0x%08X); break;\n", i, in->addr, tg[i]);
+            }
+            fprintf(f, "    default: vita_trap_indirect(0x%08X, %s); break;\n", in->addr, reg_name(in->rm));
+            fprintf(f, "    }\n");
+            break;
+        }
+
         case OP_BX: case OP_BLX:
+            /* `bx lr` is a return, and a return in the generated C is
+             * `return`: the link register is not maintained across the C
+             * calls that replaced BL, so dispatching on it would look up a
+             * value nothing ever set. This was reached for every leaf
+             * function's return before the check existed; the first
+             * newlib-linked module found it in `_init`. */
+            if (in->cls == A_RETURN) { fprintf(f, "    return;\n"); break; }
             /* An indirect transfer through a register. The destination is a
              * value, so it can only be resolved while running — this is the one
              * place a recompiler genuinely needs a lookup rather than a
@@ -896,9 +1055,9 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             for (uint32_t k = 0; k < words; k++) {
                 int reg = (in->vfp_dp ? in->vd * 2 : in->vd) + (int)k;
                 if (in->op == OP_VLDM)
-                    fprintf(f, "    vfp_s[%d].u = vita_read32(%s + %u);\n", reg & 31, rn, k * 4);
+                    fprintf(f, "    vfp_s[%d].u = vita_read32(%s + %u);\n", reg & 63, rn, k * 4);
                 else
-                    fprintf(f, "    vita_write32(%s + %u, vfp_s[%d].u);\n", rn, k * 4, reg & 31);
+                    fprintf(f, "    vita_write32(%s + %u, vfp_s[%d].u);\n", rn, k * 4, reg & 63);
             }
             if (in->mem_add && in->writeback)
                 fprintf(f, "    %s += %u;\n", rn, words * 4);
@@ -1109,11 +1268,23 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
               : fn->from_heuristic == VF_RELOC ? ", discovered by relocation" : "");
         fprintf(f, " * ------------------------------------------------------------- */\n");
         fprintf(f, "void vita_func_%08X(void) {\n", fn->addr);
+        /* The function-entry trace: a global test and a branch while off. */
+        fprintf(f, "    vita_trace_fn(0x%08Xu);\n", fn->addr);
+
+        /* Per-instruction PC recording, only when asked for in the emitter's
+         * environment: it is a store per instruction in the output. */
+        static int emit_pc = -1;
+        if (emit_pc < 0) {
+            const char *e = getenv("VITARECOMP_EMIT_PC");
+            emit_pc = (e && *e && *e != '0') ? 1 : 0;
+        }
 
         for (uint32_t k = 0; k < b.n; k++) {
             const arm_insn *in = &b.v[k];
             if (fb_has_label(&b, in->addr))
                 fprintf(f, "L_%08X:\n", in->addr);
+            if (emit_pc)
+                fprintf(f, "    vita_trace_pc(0x%08Xu);\n", in->addr);
 
             fprintf(f, "    /* %08X  %-16s */\n", in->addr, in->mnemonic);
             if (emit_insn(img, mod, db, &fs, &b, in, f, st)) st->translated++;

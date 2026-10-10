@@ -26,11 +26,16 @@ Thumb bit, post-indexed write-back, IT blocks not applied, and RSB's second
 operand. Each was invisible in a translation percentage and obvious in a
 frame.
 
-**Not yet in A, and next:** a *newlib-linked* sample, which is what every real
-homebrew is. That pulls in the SceLibc heap and C++ runtime init upstream
-started, `sceKernelCreateThread` and the lightweight mutexes newlib's reent
-uses, and `SceIofilemgr` for stdio. The steps below are kept as the record of
-the plan; 1 to 6 are done for the freestanding case.
+**Done the same day: the newlib-linked sample.** `samples/hello` is what
+every real homebrew is: a C `main` over vitasdk's newlib. Its import table
+(54 functions, 11 libraries) is the C runtime's surface, and all of it on
+the sample's path is implemented: mutexes and lightweight mutexes, thread
+id, TLS slots, console file descriptors, `sceClib*`, the clock. It also
+brought the first NEON subset (GCC vectorises newlib itself), jump tables,
+interworking veneers, tail-call discovery, and nine emitter fixes found with
+the bring-up tools built alongside (function trace, instruction trace,
+watchpoints, PC on bad accesses). The steps below are kept as the record of
+the plan; all six are done.
 
 1. **Relocations. Done 2026-10-10.** Homebrew and every 2015+ title are
    `ET_SCE_RELEXEC`. `tools/armrecomp/reloc.c` decodes `PT_SCE_RELA`

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Install the vitasdk toolchain (once) and build samples/fbdemo with it.
+# Install the vitasdk toolchain (once) and build every sample under samples/.
 #
 # Runs inside a Linux shell, WSL included:
-#   wsl -d <distro> -- bash /mnt/f/psvitarecomp/tools/wsl-vitasdk.sh
+#   wsl -d <distro> -- bash /mnt/f/psvitarecomp/tools/wsl-vitasdk.sh [sample...]
 #
 # The toolchain goes to $VITASDK (default ~/vitasdk) through vdpm's bootstrap,
-# which downloads a prebuilt release; no root is needed. The built eboot.bin is
-# copied to fixtures/fbdemo/, which is gitignored like every other module.
+# which downloads a prebuilt release; no root is needed. Each sample's
+# eboot.bin, VPK and symbol-bearing ELF are copied to fixtures/<sample>/,
+# which is gitignored like every other module.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 export VITASDK="${VITASDK:-$HOME/vitasdk}"
@@ -21,14 +22,27 @@ if [ ! -x "$VITASDK/bin/arm-vita-eabi-gcc" ]; then
 fi
 echo "toolchain: $(arm-vita-eabi-gcc --version | head -1)"
 
-build="$root/build-sample"
-cmake -S "$root/samples/fbdemo" -B "$build" \
-      -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
-      -DCMAKE_BUILD_TYPE=Release >/dev/null
-cmake --build "$build"
+samples=("$@")
+if [ ${#samples[@]} -eq 0 ]; then
+    for d in "$root"/samples/*/; do samples+=("$(basename "$d")"); done
+fi
 
-mkdir -p "$root/fixtures/fbdemo"
-cp "$build/eboot.bin" "$root/fixtures/fbdemo/eboot.bin"
-cp "$build/fbdemo.vpk" "$root/fixtures/fbdemo/fbdemo.vpk" 2>/dev/null || true
-cp "$build/fbdemo" "$root/fixtures/fbdemo/fbdemo.elf"     # the linked ELF, for symbols
-echo "fixture: $root/fixtures/fbdemo/eboot.bin ($(wc -c < "$root/fixtures/fbdemo/eboot.bin") bytes)"
+for s in "${samples[@]}"; do
+    src="$root/samples/$s"
+    build="$root/build-sample/$s"
+    [ -f "$src/CMakeLists.txt" ] || { echo "no sample at $src" >&2; exit 1; }
+    echo "== $s"
+    cmake -S "$src" -B "$build" \
+          -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
+          -DCMAKE_BUILD_TYPE=Release >/dev/null
+    cmake --build "$build" | grep -E 'error|warning|Built target' || true
+    mkdir -p "$root/fixtures/$s"
+    cp "$build/eboot.bin" "$root/fixtures/$s/eboot.bin"
+    cp "$build/$s.vpk"    "$root/fixtures/$s/$s.vpk" 2>/dev/null || true
+    cp "$build/$s"        "$root/fixtures/$s/$s.elf"      # the linked ELF, for symbols
+    # Names and a listing, for vita_host --syms and for reading beside the
+    # emitted C.
+    arm-vita-eabi-nm -n "$build/$s" > "$root/fixtures/$s/$s.sym"
+    arm-vita-eabi-objdump -d --no-show-raw-insn "$build/$s" > "$root/fixtures/$s/$s.dis"
+    echo "fixture: fixtures/$s/eboot.bin ($(wc -c < "$root/fixtures/$s/eboot.bin") bytes), $s.sym, $s.dis"
+done

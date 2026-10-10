@@ -27,4 +27,29 @@ extern uint32_t sp, lr;
  * generated C readable. */
 extern int flag_n, flag_z, flag_c, flag_v;
 
+/* The four GE bits, written by the byte- and halfword-parallel arithmetic
+ * (UADD8, USUB8, ...) and read by SEL. Bit i covers byte i. They are what
+ * lets the C library's strlen test four bytes at a time. */
+extern int flag_ge;
+
+/* --- the bring-up hook ------------------------------------------------------
+ *
+ * There is no program counter in a recompiled program, which is right until
+ * something goes wrong and the question is "where". C emitted with
+ * VITARECOMP_EMIT_PC=1 set in the environment of `armrecomp emit` records
+ * each instruction's guest address here before executing it, so a bad access
+ * or a trap can say which instruction it was; with vita_trace_insns set and
+ * a window, it also logs the registers. Off, it is one store per
+ * instruction; absent (the default emit), it costs nothing. */
+extern uint32_t vita_last_pc;
+extern int      vita_trace_insns;
+extern uint32_t vita_trace_lo, vita_trace_hi;   /* the window, inclusive */
+void vita_trace_insn(uint32_t addr);
+
+static inline void vita_trace_pc(uint32_t addr) {
+    vita_last_pc = addr;
+    if (vita_trace_insns && addr >= vita_trace_lo && addr <= vita_trace_hi)
+        vita_trace_insn(addr);
+}
+
 #endif /* VITARECOMP_CPU_H */

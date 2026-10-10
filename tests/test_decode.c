@@ -484,8 +484,25 @@ static void test_mode_switches(void) {
     memset(code, 0, sizeof(code));
 
     put16(0, 0x4778);                      /* bx pc â€” switches to ARM        */
+    /* A branch with a known destination, the word-aligned address four bytes
+     * on, in ARM. The linker's interworking veneers start with it. */
     arm_insn in = dec(ARM_T32, BASE);
-    assert(in.cls == A_INDIRECT && in.switches_mode);
+    assert(in.cls == A_BRANCH && in.switches_mode && in.has_target);
+    assert(in.target == ((BASE + 4) & ~3u));
+
+    /* The PIC long-branch veneer the Vita linker writes for a Thumb tail call
+     * to an ARM symbol:  bx pc; nop; ldr ip, [pc]; add pc, ip, pc; .word off
+     * The destination is off + (veneer + 16), and the decoder resolves it so
+     * the ARM body is never walked. */
+    put16(0, 0x4778);
+    put16(2, 0x46C0);                      /* nop (mov r8, r8)               */
+    put32(4, 0xE59FC000);                  /* ldr ip, [pc, #0]               */
+    put32(8, 0xE08CF00F);                  /* add pc, ip, pc                 */
+    put32(12, 0x00000210);                 /* -> BASE + 16 + 0x210           */
+    in = dec(ARM_T32, BASE);
+    assert(in.cls == A_BRANCH && in.switches_mode && in.has_target);
+    assert(in.target == BASE + 16 + 0x210);
+    memset(code, 0, sizeof(code));
 
     put16(0, 0x4780);                      /* blx r0                         */
     in = dec(ARM_T32, BASE);

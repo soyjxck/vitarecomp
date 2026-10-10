@@ -327,6 +327,78 @@ static void test_hle_libc(void) {
 
 /* --- memory ----------------------------------------------------------------- */
 
+/* --- byte-parallel ops, bit tricks ------------------------------------------- */
+
+static void test_parallel(void) {
+    /* UADD8: each byte adds on its own; the GE bit is the carry OUT of the
+     * byte, which is how strlen's "add 0xFEFEFEFF" test finds a zero byte. */
+    assert(vita_uadd8(0x01020304u, 0x01010101u) == 0x02030405u);
+    assert(flag_ge == 0);
+    assert(vita_uadd8(0xFF000000u, 0x01000000u) == 0x00000000u);
+    assert(flag_ge == 0x8);
+    assert(vita_uadd8(0x00FF00FFu, 0x00010001u) == 0x00000000u);
+    assert(flag_ge == 0x5);
+
+    /* USUB8: GE is "no borrow", i.e. a >= b per byte. */
+    assert(vita_usub8(0x05050505u, 0x01060105u) == 0x04FF0400u);
+    assert(flag_ge == 0xB);                      /* byte 2 borrowed */
+
+    /* SEL picks per byte by GE. */
+    flag_ge = 0x5;
+    assert(vita_sel(0xAABBCCDDu, 0x11223344u) == 0x11BB33DDu);
+    flag_ge = 0xF;
+    assert(vita_sel(0xAABBCCDDu, 0x11223344u) == 0xAABBCCDDu);
+
+    assert(vita_clz(0) == 32);
+    assert(vita_clz(1) == 31);
+    assert(vita_clz(0x80000000u) == 0);
+    assert(vita_clz(0x00010000u) == 15);
+
+    assert(vita_rbit(0x00000001u) == 0x80000000u);
+    assert(vita_rbit(0x12345678u) == 0x1E6A2C48u);
+    assert(vita_rev16(0x11223344u) == 0x22114433u);
+    assert(vita_revsh(0x000080FFu) == 0xFFFFFF80u);
+    assert(vita_revsh(0x0000017Fu) == 0x00007F01u);
+
+    printf("  uadd8/usub8/sel, clz/rbit/rev   ok\n");
+}
+
+/* --- NEON lanes ------------------------------------------------------------- */
+
+static void test_neon(void) {
+    /* Lane-wise add does not carry between lanes. */
+    assert(vita_neon_add(0x00000001FFFFFFFFull, 0x0000000100000001ull, 32) == 0x0000000200000000ull);
+    assert(vita_neon_add(0xFF01FF01FF01FF01ull, 0x0101010101010101ull, 8)  == 0x0002000200020002ull);
+    assert(vita_neon_sub(0x0000000000000000ull, 0x0000000100000001ull, 32) == 0xFFFFFFFFFFFFFFFFull);
+
+    /* VCEQ.I8: all ones per equal byte; this is memchr's test. */
+    assert(vita_neon_ceq(0x0041424344454647ull, 0x4444444444444444ull, 8) == 0x00000000FF000000ull);
+    assert(vita_neon_ceq(0x1234567812345678ull, 0x1234567812345678ull, 32) == 0xFFFFFFFFFFFFFFFFull);
+
+    /* VPADD.I8: adjacent lanes summed, a's results low, b's high. */
+    assert(vita_neon_padd(0x0807060504030201ull, 0x1010101010101010ull, 8) == 0x202020200F0B0703ull);
+    assert(vita_neon_padd(0x0000000400000003ull, 0x0000000200000001ull, 32) == 0x0000000300000007ull);
+
+    /* VDUP from a core register. */
+    assert(vita_neon_dup(0x12345678u, 32) == 0x1234567812345678ull);
+    assert(vita_neon_dup(0x000000ABu, 8)  == 0xABABABABABABABABull);
+    assert(vita_neon_dup(0x0000BEEFu, 16) == 0xBEEFBEEFBEEFBEEFull);
+
+    assert(vita_neon_bsl(0xFFFF0000FFFF0000ull, 0x1111111111111111ull, 0x2222222222222222ull)
+           == 0x1111222211112222ull);
+    assert(vita_neon_set32(0x1111111122222222ull, 1, 0x33333333u) == 0x3333333322222222ull);
+    assert(vita_neon_get32(0x1111111122222222ull, 0) == 0x22222222u);
+
+    /* D16 and up are real registers. */
+    vita_d_set(16, 0x0102030405060708ull);
+    vita_d_set(31, 0xA0A1A2A3A4A5A6A7ull);
+    assert(vita_d_get(16) == 0x0102030405060708ull);
+    assert(vita_d_get(31) == 0xA0A1A2A3A4A5A6A7ull);
+    assert(vfp_s[32].u == 0x05060708u && vfp_s[33].u == 0x01020304u);
+
+    printf("  neon lanes (add/ceq/padd/dup)   ok\n");
+}
+
 static void test_memory(void) {
     assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
     vita_mem_bad_access = 0;
@@ -367,6 +439,8 @@ int main(void) {
     test_bitfields();
     test_dispatch();
     test_hle_libc();
+    test_parallel();
+    test_neon();
     test_memory();
     printf("all runtime tests passed\n");
     return 0;

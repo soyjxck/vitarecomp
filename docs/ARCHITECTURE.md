@@ -423,3 +423,22 @@ where sixty frames of RIGHT and thirty of DOWN put it — is the fixture.
 A windowed host is the same three functions pointed at SDL2, behind an
 option, so the core keeps its no-dependency promise.
 
+### Bring-up: seeing what the program did
+
+A recompiled program that is wrong is wrong quietly: valid C, no trap, a
+pixel in the wrong place or a pointer with a plausible value. The runtime
+carries four ways of looking, all off by default and free when off:
+
+| Tool | Switch | What it shows |
+|---|---|---|
+| Function-entry trace | `vita_host --trace-fns`, `--syms module.sym` | every function entered, by name when an `nm -n` listing is given |
+| Instruction trace | C emitted with `VITARECOMP_EMIT_PC=1`; `--trace-insns LO-HI` | registers and flags at each instruction in an address window |
+| Bad-access reports | `VITARECOMP_TRACE=1` | the first bad guest accesses, with the PC when the C records it |
+| Write watchpoint | `VITARECOMP_WATCH=<hex>` | every store that covers an address, with value and PC |
+
+The order they are reached for is the order above: the function trace says
+which function went wrong, the instruction trace says where in it, the
+watchpoint says who touched the memory it read. The nine newlib bugs in
+LESSONS.md were found that way, none of them by reading the disassembly
+first.
+

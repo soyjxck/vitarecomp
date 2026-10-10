@@ -341,3 +341,75 @@ rarely or never on the paths that had been compiled, and each was a
 *silently plausible* translation — valid C, no trap, wrong value. The
 percentage went from 95.53% to 95.53%. The frame went from wrong to right.
 Which is why `tools/e2e.sh` hashes a frame rather than counting traps.
+
+## Nine more from the first newlib program (2026-10-10)
+
+`samples/hello` is 179 instructions of its own and some 13,000 of newlib's,
+and newlib is a different compiler's output from a different decade of
+idioms. It translated at 99.7% before anything ran and was wrong nine times.
+Every one of the nine was found by *tracing*, not by reading: a function
+trace with names, a per-instruction register trace in a window, a watchpoint
+on a stack slot, and bad-access reports with the PC. Those four tools were
+built during this bring-up and are in the runtime now (`host.h`).
+
+1. **The conditional-branch decoder tested the wrong bits.** `b<cond>.w`
+   with S = 1 and cond = 110x — every backward `bgt.w` and `ble.w` — was
+   classed as a system instruction, because the test for the 111x
+   condition field read bits 10:8 instead of 9:6.
+
+2. **`pop {..., pc}` in its 32-bit form returned nothing.** `ldmia.w sp!,
+   {r4-r10, pc}` was classified as a return before its register list was
+   recorded, and emitted as a bare `return`. Callee-saved registers came
+   back holding the callee's locals and the stack pointer stayed where the
+   callee left it. The 16-bit `pop` never had the bug, so every leaf
+   function in the corpus had worked. Found with a watchpoint on the saved
+   r4 slot: nothing wrote it after the push, so the restore was what was
+   missing.
+
+3. **`bx lr` was a dispatch.** The register-indirect case came before the
+   return check, so every leaf return looked up the link register in the
+   dispatch table — a value nothing maintains.
+
+4. **The ITE mask bit was off by one.** `ite ls; movls r1, #0; movhi r1, #1`
+   ran both moves under `ls`, so r1 was always 1, so malloc's size check
+   always failed with ENOMEM. The else-bit for the second instruction is
+   mask bit 3, not bit 2. And a second rule the same block taught: 16-bit
+   instructions inside an IT block do not set flags.
+
+5. **`ldr.w r4, [r3, r4, lsl #2]` dropped the shift.** The register-offset
+   address builder ignored the scale, so newlib's descriptor table was read
+   one byte in and the pointer it produced looked like any other.
+
+6. **`asr.w r3, r9, ip` shifted r3.** The 32-bit shift-by-register names a
+   separate source; the emitter read rd for both forms. The font's bit test
+   became noise and every glyph came out scrambled.
+
+7. **`pld [r0]` was `ldr pc`.** The cache hints share the byte-load
+   encoding with Rt = 15. strlen opens with one; it was emitted as a return,
+   strlen returned its argument, and the write length became the string's
+   address. Found by a register trace that showed the function executing
+   exactly one instruction.
+
+8. **Jump tables were computed transfers.** `tbb [pc, r2]` is how every
+   switch compiles, including the one in `_fstat_r` and the one in printf.
+   The count comes from the `cmp rm, #n` that guards the table; with it the
+   table is a `switch` in the C, and discovery follows the cases.
+
+9. **Veneers and tail calls.** vita-elf-create links with PIC veneers, so
+   every Thumb tail call to a firmware stub goes through `bx pc; nop;
+   ldr ip, [pc]; add pc, ip, pc; .word off`. The veneer is now resolved to
+   its destination by the decoder, and unconditional branch targets — and
+   conditional ones that leave the function backwards — are registered as
+   functions, which is what made `b.w __aeabi_idivmod`'s neighbours
+   reachable. VitaShell went from 9,195 functions to 21,593.
+
+Also learned, about the platform rather than the toolkit: on vitasdk,
+`printf` output never appears. The C library's internals use a per-thread
+reent reached through `__getreent()`, while the `stdout` user code names
+goes through `_impure_ptr`, which nothing ever repoints — two different
+FILE objects. So `setvbuf(stdout, ...)` and `fflush(stdout)` from a program
+configure and flush a stream printf never writes to, and exit() cleans up
+a third reent. The disassembly shows it: `_impure_ptr` is read in `main`
+and in `_reclaim_reent` and written nowhere. The hour spent proving that
+the write never happened ended at the toolchain, not the translation; real
+homebrew logs through `sceClibPrintf`, and so does the sample.

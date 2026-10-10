@@ -12,6 +12,7 @@
 #include "cpu.h"
 #include "mem.h"
 #include "vfp.h"
+#include "neon.h"
 
 #include <math.h>
 
@@ -123,6 +124,70 @@ static inline uint32_t vita_rev(uint32_t v) {
          | ((v >> 8) & 0xFF00) | ((v >> 24) & 0xFF);
 }
 
+static inline uint32_t vita_rev16(uint32_t v) {
+    return ((v & 0x00FF00FFu) << 8) | ((v >> 8) & 0x00FF00FFu);
+}
+
+static inline uint32_t vita_revsh(uint32_t v) {
+    return vita_sxth(((v & 0xFF) << 8) | ((v >> 8) & 0xFF));
+}
+
+/* --- bit counting and reversal ----------------------------------------------- */
+
+static inline uint32_t vita_clz(uint32_t v) {
+    if (v == 0) return 32;
+    uint32_t n = 0;
+    while (!(v & 0x80000000u)) { v <<= 1; n++; }
+    return n;
+}
+
+static inline uint32_t vita_rbit(uint32_t v) {
+    v = ((v >> 1) & 0x55555555u) | ((v & 0x55555555u) << 1);
+    v = ((v >> 2) & 0x33333333u) | ((v & 0x33333333u) << 2);
+    v = ((v >> 4) & 0x0F0F0F0Fu) | ((v & 0x0F0F0F0Fu) << 4);
+    return vita_rev(v);
+}
+
+/* --- byte-parallel arithmetic ----------------------------------------------------
+ *
+ * UADD8 adds four bytes independently and records the carry out of each in
+ * the GE bits; USUB8 records "no borrow"; SEL then picks each byte from one
+ * operand or the other by those bits. The C library's strlen and memchr
+ * use the three together to test four bytes per iteration, which is why they
+ * are here before any other SIMD.
+ */
+
+static inline uint32_t vita_uadd8(uint32_t a, uint32_t b) {
+    uint32_t r = 0;
+    flag_ge = 0;
+    for (int i = 0; i < 4; i++) {
+        uint32_t s = ((a >> (8 * i)) & 0xFF) + ((b >> (8 * i)) & 0xFF);
+        if (s >= 0x100) flag_ge |= 1 << i;
+        r |= (s & 0xFF) << (8 * i);
+    }
+    return r;
+}
+
+static inline uint32_t vita_usub8(uint32_t a, uint32_t b) {
+    uint32_t r = 0;
+    flag_ge = 0;
+    for (int i = 0; i < 4; i++) {
+        uint32_t x = (a >> (8 * i)) & 0xFF, y = (b >> (8 * i)) & 0xFF;
+        if (x >= y) flag_ge |= 1 << i;
+        r |= ((x - y) & 0xFF) << (8 * i);
+    }
+    return r;
+}
+
+static inline uint32_t vita_sel(uint32_t a, uint32_t b) {
+    uint32_t r = 0;
+    for (int i = 0; i < 4; i++) {
+        uint32_t m = 0xFFu << (8 * i);
+        r |= ((flag_ge >> i) & 1) ? (a & m) : (b & m);
+    }
+    return r;
+}
+
 /* --- bitfields ---------------------------------------------------------------
  *
  * The obvious C is wrong in two places. `(1u << width) - 1` is UNDEFINED at
@@ -170,6 +235,10 @@ void vita_trap_import(uint32_t addr, uint32_t nid, const char *name);
 /* Total traps hit. Only meaningful under VITARECOMP_TRACE=1, where execution
  * continues past them; otherwise the first one ends the program. */
 uint32_t vita_trap_count(void);
+
+/* Function-entry trace (host.h). The generated C calls this first thing in
+ * every function; it does nothing unless the host turned it on. */
+void vita_trace_fn(uint32_t addr);
 
 #endif /* VITARECOMP_RECOMP_RT_H */
 
