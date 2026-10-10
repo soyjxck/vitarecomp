@@ -12,8 +12,11 @@
  */
 
 #include "vitarecomp/hle.h"
+#include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
+#include "hle_format.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* --- the guest/host boundary ------------------------------------------------ */
@@ -139,6 +142,27 @@ void vita_hle_malloc(void) {
 }
 
 void vita_hle_free(void) { /* bump allocator: nothing to return */ }
+
+/* void *memalign(size_t align, size_t size): the bump allocator rounds its
+ * cursor up to the alignment, which costs the gap and nothing else. */
+void vita_hle_memalign(void) {
+    uint32_t align = r0, n = r1;
+    if (align < 8 || (align & (align - 1))) align = 8;
+    if (!g_heap_size) { vita_trap_unimpl(0, n, "memalign before vita_heap_init"); r0 = 0; return; }
+    uint32_t at = (g_heap_base + g_heap_used + align - 1) & ~(align - 1);
+    uint32_t size = (n + 7u) & ~7u;
+    if (at - g_heap_base > g_heap_size || size > g_heap_size - (at - g_heap_base)) {
+        vita_trap_unimpl(g_heap_used, n, "guest heap exhausted");
+        r0 = 0; return;
+    }
+    g_heap_used = at - g_heap_base + size;
+    r0 = n ? at : 0u;
+}
+
+/* void malloc_stats(void) */
+void vita_hle_malloc_stats(void) {
+    vita_hle_trace("malloc_stats: %u of %u bytes used", g_heap_used, g_heap_size);
+}
 
 void vita_hle_realloc(void) {
     uint32_t old = r0, n = r1;
@@ -268,4 +292,86 @@ void vita_hle_strstr(void) {
     if (!h || !n) { r0 = 0; return; }
     char *hit = strstr(h, n);
     r0 = hit ? base + (uint32_t)(hit - h) : 0u;
+}
+
+/* --- the printf family ---------------------------------------------------------
+ *
+ * One formatter (hle_format.h) and the two places its result can go: the
+ * console, or guest memory with a bound. A FILE argument is answered as the
+ * console whatever it points at: SceLibc's streams are the firmware's own
+ * objects, which this runtime does not model, and a program printing to a
+ * stream at this stage is reporting something worth seeing.
+ */
+
+static void print_console(uint32_t fmt, vita_vargs *v) {
+    char out[2048];
+    size_t n = vita_guest_vformat(out, sizeof(out), fmt, v);
+    fputs(out, stdout);
+    fflush(stdout);
+    r0 = (uint32_t)n;
+}
+
+static void print_guest(uint32_t dst, uint32_t cap, uint32_t fmt, vita_vargs *v) {
+    char out[4096];
+    size_t n = vita_guest_vformat(out, sizeof(out), fmt, v);
+    if (cap) {
+        uint32_t take = (uint32_t)(n < cap - 1 ? n : cap - 1);
+        if (take > sizeof(out) - 1) take = sizeof(out) - 1;
+        void *d = gp(dst, take + 1, "sprintf dst");
+        if (d) { memcpy(d, out, take); ((char *)d)[take] = '\0'; }
+    }
+    r0 = (uint32_t)n;
+}
+
+/* int printf(const char *fmt, ...) */
+void vita_hle_printf(void)   { vita_vargs v = { 1, 0, 0 };  print_console(r0, &v); }
+/* int vprintf(const char *fmt, va_list ap) */
+void vita_hle_vprintf(void)  { vita_vargs v = { 0, 0, r1 }; print_console(r0, &v); }
+/* int fprintf(FILE *f, const char *fmt, ...) */
+void vita_hle_fprintf(void)  { vita_vargs v = { 2, 0, 0 };  print_console(r1, &v); }
+/* int vfprintf(FILE *f, const char *fmt, va_list ap) */
+void vita_hle_vfprintf(void) { vita_vargs v = { 0, 0, r2 }; print_console(r1, &v); }
+/* int snprintf(char *dst, size_t n, const char *fmt, ...) */
+void vita_hle_snprintf(void)  { vita_vargs v = { 3, 0, 0 };  print_guest(r0, r1, r2, &v); }
+/* int vsnprintf(char *dst, size_t n, const char *fmt, va_list ap) */
+void vita_hle_vsnprintf(void) { vita_vargs v = { 0, 0, r3 }; print_guest(r0, r1, r2, &v); }
+/* int sprintf(char *dst, const char *fmt, ...): unbounded, so bounded by what
+ * the destination has behind it. */
+void vita_hle_sprintf(void)  { vita_vargs v = { 2, 0, 0 };  print_guest(r0, vita_mem_avail(r0), r1, &v); }
+/* int vsprintf(char *dst, const char *fmt, va_list ap) */
+void vita_hle_vsprintf(void) { vita_vargs v = { 0, 0, r2 }; print_guest(r0, vita_mem_avail(r0), r1, &v); }
+
+/* int puts(const char *s) */
+void vita_hle_puts(void) {
+    uint32_t n = gstrlen(r0, "puts");
+    const char *s = n ? (const char *)vita_mem_ptr(r0, n) : "";
+    fprintf(stdout, "%.*s\n", (int)n, s);
+    fflush(stdout);
+    r0 = (uint32_t)n + 1;
+}
+
+/* --- leaving, loudly -------------------------------------------------------------- */
+
+/* void exit(int status) */
+void vita_hle_exit(void) {
+    vita_hle_trace("exit(%d)", (int)r0);
+    vita_host_exit((int)r0);
+}
+
+/* void abort(void) */
+void vita_hle_abort(void) {
+    fprintf(stderr, "vitarecomp: the program called abort()\n");
+    vita_host_exit(134);
+}
+
+/* void _Assert(const char *message, const char *function): Sony's libc
+ * reaches it from assert(); the message is "file:line expression". */
+void vita_hle__Assert(void) {
+    uint32_t n = vita_mem_avail(r0);
+    const char *m = n ? (const char *)vita_mem_ptr(r0, 1) : NULL;
+    uint32_t fn = vita_mem_avail(r1);
+    const char *f = fn ? (const char *)vita_mem_ptr(r1, 1) : NULL;
+    fprintf(stderr, "vitarecomp: assertion failed: %.*s%s%.*s\n",
+            m ? (int)n : 6, m ? m : "(null)", f ? " in " : "", f ? (int)fn : 0, f ? f : "");
+    vita_host_exit(134);
 }

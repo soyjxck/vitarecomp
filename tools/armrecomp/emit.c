@@ -38,6 +38,7 @@ typedef struct {
     uint32_t  n, cap;
     uint32_t *labels;
     uint32_t  nlabels, lcap;
+    uint32_t  cut_at;     /* non-zero: the walk stopped here short of a return */
 } fbody;
 
 static void fb_push(fbody *b, const arm_insn *in) {
@@ -135,12 +136,19 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
     visited seen;
     memset(&seen, 0, sizeof(seen));
 
-    /* A function registered because something called it may have been walked
-     * by discovery only briefly — its recorded extent can be zero or tiny. The
-     * body is still real, so fall back to a generous bound and let control flow
-     * terminate the walk, which it does at the first return. Extent is a
-     * safety limit here, not the definition of the body. */
-    uint32_t bound = (fn->end > fn->addr + 16) ? fn->end : fn->addr + 8192;
+    /* The body is what control flow reaches from the entry, and nothing
+     * discovery recorded bounds it. Its walk stops at code another walk has
+     * already seen, so the extent it writes down ends wherever that happened:
+     * 36 bytes into a 14-instruction function whose remaining ten another
+     * function had decoded first. Using that extent as the bound here, as an
+     * earlier revision did, cut the body at that point and the C function
+     * returned from the middle of the ARM one with its frame still pushed;
+     * the caller then read through registers the callee never restored. The
+     * only bound is the segment, with the instruction limit below as the
+     * safety, and a body that does hit the limit ends in a trap that says so
+     * rather than in a return. */
+    uint32_t bound = base + img->seg_len;
+    b->cut_at = 0;
 
     uint32_t stack[512];
     int sp_ = 0;
@@ -159,13 +167,13 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
         int it_left = 0, it_k = 0;
 
         for (;;) {
-            if (a < base || a >= base + img->seg_len) break;
-            if (a >= bound) break;                   /* extent as a bound */
+            if (a < base || a >= bound) { b->cut_at = a; break; }
             if (!visit_mark(&seen, a)) break;        /* already emitted */
+            if (b->n >= MAX_INSNS_PER_FUNC) { b->cut_at = a; break; }
 
             arm_insn in;
             int n = arm_decode(text, base, img->seg_len, a, fn->mode, &in);
-            if (n == 0) break;
+            if (n == 0) { b->cut_at = a; break; }
 
             int in_it = 0;
             if (it_left > 0) {
@@ -1760,6 +1768,13 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
             st->insns++;
         }
 
+        /* A walk that ran out of segment or of the instruction limit left
+         * flow with nowhere to go. Silence here is a return from the middle
+         * of a function; a trap names the place. */
+        if (b.cut_at) {
+            fprintf(pf, "    vita_trap_unimpl(0x%08X, 0, \"body cut short: no return reached\");\n", b.cut_at);
+            st->bodies_cut++;
+        }
         fprintf(pf, "}\n\n");
         st->funcs++;
 

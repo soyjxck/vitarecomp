@@ -909,6 +909,9 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
     if (st.funcs_promoted)
         printf("  weak roots    %u  pointer targets without a prologue, kept because their bodies translate cleanly\n",
                st.funcs_promoted);
+    if (st.bodies_cut)
+        printf("  bodies cut    %u  walks that ran out of segment or of the instruction limit; each ends in a trap\n",
+               st.bodies_cut);
     printf("  instructions  %u\n", st.insns);
     printf("  translated    %u  (%.2f%%)\n", st.translated,
            st.insns ? 100.0 * st.translated / st.insns : 0.0);

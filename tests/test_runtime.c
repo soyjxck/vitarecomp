@@ -12,6 +12,13 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
+
+/* The host contract (host.h), as the tests stand in for a host: the HLE
+ * reaches these from exit paths and vblank waits. */
+void vita_host_vblank(void) { }
+uint32_t vita_host_buttons(void) { return 0; }
+void vita_host_exit(int status) { exit(status); }
 
 #ifdef NDEBUG
 #error "tests must be built with asserts enabled (NDEBUG is defined)"

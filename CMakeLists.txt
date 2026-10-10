@@ -50,6 +50,7 @@ add_library(vitarecomp STATIC
     src/hle_threadmgr.c
     src/hle_io.c
     src/hle_clib.c
+    src/hle_mspace.c
     src/hle_rtc.c
     src/symbols.c
 )
