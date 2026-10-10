@@ -1,8 +1,8 @@
-﻿/* armrecomp â€” the Vita static-recompilation toolkit CLI.
+﻿/* armrecomp — the Vita static-recompilation toolkit CLI.
  *
  * Phase 1: identify any layer of the container stack and report exactly what
  * stands between here and decodable ARM code. No key material is needed for
- * any of this, and none is bundled â€” see docs/DECRYPT.md.
+ * any of this, and none is bundled — see docs/DECRYPT.md.
  */
 
 #include "container.h"
@@ -30,7 +30,7 @@
 #include <errno.h>
 
 static const char *USAGE =
-    "armrecomp â€” static-recompilation toolkit for PlayStation Vita\n"
+    "armrecomp — static-recompilation toolkit for PlayStation Vita\n"
     "\n"
     "  armrecomp info    <file>          identify a module and report structure\n"
     "  armrecomp extract <file> <out>    SELF -> plain ELF32\n"
@@ -184,13 +184,13 @@ static int cmd_info(const char *path) {
         printf("\n");
         if (disagree) {
             printf("%d segment(s) disagree with their own flags. Do not trust this\n", disagree);
-            printf("report â€” the container layout or the flag encoding is being misread.\n");
+            printf("report — the container layout or the flag encoding is being misread.\n");
         } else if (encrypted) {
             printf("%d of %d segments are encrypted. armrecomp does not ship or\n",
                    encrypted, m.seg_count);
             printf("derive key material; supply a decrypted ELF. See docs/DECRYPT.md.\n");
         } else {
-            printf("no encrypted segments, verified against zlib headers â€” this\n");
+            printf("no encrypted segments, verified against zlib headers — this\n");
             printf("module can go straight to the decoder once inflated.\n");
         }
     }
@@ -331,7 +331,7 @@ static int cmd_extract(const char *path, const char *outpath) {
      *
      * It is encoded relative to the module: the top two bits select a program
      * header, the low 30 are a byte offset into that segment. Checking it as an
-     * absolute address fails on every module â€” Uncharted's 0x004BA470 sits far
+     * absolute address fails on every module — Uncharted's 0x004BA470 sits far
      * below segment 0's vaddr of 0x81000000, while being comfortably inside
      * that segment's 5,656,372 bytes.
      *
@@ -436,7 +436,7 @@ static void sweep(const uint8_t *text, uint32_t vaddr, uint32_t len,
 /* Which instruction set is this really?
  *
  * NOT the unknown rate. That measures how permissive the decoder is for a given
- * mode, not whether the bytes are that mode â€” the ARM decoder assigns a class to
+ * mode, not whether the bytes are that mode — the ARM decoder assigns a class to
  * every op value, so it reports near-zero unknowns on any input at all,
  * including pure noise. An earlier revision used it and concluded that a module
  * whose returns are 10:1 Thumb was "dominant ARM".
@@ -445,7 +445,7 @@ static void sweep(const uint8_t *text, uint32_t vaddr, uint32_t len,
  * *arithmetic performed on the decoded bits* rather than a classification of
  * them. Decode real code in its real mode and its branches point at other code
  * in the same segment. Decode it in the wrong mode and the offsets are computed
- * from misaligned bits, so targets scatter â€” many landing outside the segment
+ * from misaligned bits, so targets scatter — many landing outside the segment
  * entirely. This is a check the wrong answer can fail. */
 static double target_score(const cover_stats *st) {
     if (st->targets == 0) return 0.0;

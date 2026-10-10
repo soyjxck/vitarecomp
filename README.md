@@ -18,7 +18,7 @@ through `armrecomp emit`, link against the runtime's HLE, and run in the
 headless host with zero traps, pixel-exact, exiting through firmware on a
 scripted START. `tools/e2e.sh` repeats both in CI on Windows and Linux and
 hash-checks the frames. The newlib sample needed a kernel, file and C-runtime
-HLE surface, a first NEON subset, jump tables, and fixes for nine emitter
+HLE surface, the NEON a retail title's own code asked for, jump tables, and fixes for nine emitter
 bugs that only running could find (docs/LESSONS.md).
 
 **Status, measured on this machine (2026-10-10):**
@@ -26,11 +26,11 @@ bugs that only running could find (docs/LESSONS.md).
 | Check | Result |
 |---|---|
 | `tools/e2e.sh`: `samples/fbdemo` SELF to pixels | extract, emit (179 instructions, every one of the program's own translated; the 8 traps left are import stub bodies HLE replaces), build `vita_host`, run 200 frames: 0 traps, 0 bad accesses, frame hash matches |
-| `tools/e2e.sh`: `samples/hello`, a newlib-linked program | 52 KB SELF, 54 imports across 11 libraries, all implemented on its path; 99.7 % translated; runs 60 frames with 0 traps and 0 bad accesses: `sceClibPrintf` reaches the console, `snprintf`/`malloc` output is drawn on screen with its own font, frame hash matches |
-| `armrecomp emit` on VitaShell, whole module | 21,593 functions, 78.6 % of the code segment reached (251 jump tables, 23,263 tail-call targets), 98.79 % of emitted instructions translated; what still traps: NEON/VFP 0.49 %, saturating ops 0.31 %, general LDM/STM 0.20 % |
-| *Uncharted: Golden Abyss* (retail, PCSA00029), decrypted by Vita3K from a NoNpDrm dump with its own licence | `ET_SCE_EXEC`, 9.43 MB of code, 3.33 M Thumb instructions, 5.34 % SIMD; 70,967 functions, 75.0 % covered; 618 imports across 42 libraries, 585 named (SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34); whole module emits at 96.23 % translated, and NEON/VFP is 85 % of what still traps |
+| `tools/e2e.sh`: `samples/hello`, a newlib-linked program | 52 KB SELF, 54 imports across 11 libraries, all implemented on its path; 99.91 % translated; runs 60 frames with 0 traps and 0 bad accesses: `sceClibPrintf` reaches the console, `snprintf`/`malloc` output is drawn on screen with its own font, frame hash matches |
+| `armrecomp emit` on VitaShell, whole module | 21,593 functions, 78.6 % of the code segment reached (251 jump tables, 23,263 tail-call targets), 99.17 % of emitted instructions translated; most of what still traps is data the walker ran into (one undefined word accounts for 15,739 of the 60,319), the rest saturating arithmetic and `vqshl`/`vqmovn` |
+| *Uncharted: Golden Abyss* (retail, PCSA00029), decrypted by Vita3K from a NoNpDrm dump with its own licence | `ET_SCE_EXEC`, 9.43 MB of code, 3.33 M Thumb instructions, 5.34 % SIMD; 70,967 functions, 75.0 % covered; 618 imports across 42 libraries, 585 named (SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34); whole module emits at 99.7 % translated, up from 96.23 % before the NEON pass its own trap census ordered; NEON/VFP is now 0.11 % and most of that is data read as code |
 | Build (MSVC 14.50, CMake 4.3, Ninja) | `armrecomp.exe` + `vitarecomp.lib` build clean |
-| `ctest` | 4 / 4 suites pass (container, inflate, decode, runtime) |
+| `ctest` | 5 / 5 suites pass (container, inflate, decode, reloc, runtime) |
 | `armrecomp info / extract / cover` on VitaShell 2.02 `eboot.bin` (homebrew, no keys) | 3 segments inflated, Adler-32 ok, ELF 4,882,182 bytes as declared; Thumb-2 dominant, 0.22 % unknown, 2.01 % SIMD |
 | `armrecomp relocs` on the same module (`ET_SCE_RELEXEC`) | 63,334 entries decoded, all format 0; 6,735 relocated words hold Thumb-tagged `.text` addresses; applying the stream at the link addresses changes 0 bytes |
 | `armrecomp discover` with relocation seeding | 9,195 functions (4,523 from seeds, 2,975 only the relocations named, 1,697 from shape), 71.5 % of the segment covered; was 8,074 and 65.3 % before the stream was read |

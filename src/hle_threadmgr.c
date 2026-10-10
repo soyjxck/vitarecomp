@@ -54,17 +54,49 @@ void vita_hle_sceKernelGetProcessId(void) { r0 = PROCESS_UID; }
 
 /* --- thread-local storage ----------------------------------------------------
  *
- * The console keeps 0x100 TLS slots per thread, addressed by key. The
- * function returns the ADDRESS of the slot, and the C runtime keeps its
- * reent pointer in one of them. One thread, so one block. */
+ * A thread's TLS block has the layout the console gives it, which Vita3K
+ * reproduces (kernel/src/thread.cpp, kernel.cpp): 0x800 bytes of kernel-side
+ * slots, then the module's thread-local image, and TPIDRURO points at the
+ * image. The kernel part holds the 0x101 word slots that sceKernelGetTLSAddr
+ * hands out by key (the C runtime keeps its reent pointer in one); the image
+ * is what `mrc p15, 0, rt, c13, c0, 3` plus a linker-chosen offset reaches,
+ * and how Sony's own runtime finds its per-thread state. Getting the two
+ * into one block matters because both kinds of access happen in one program.
+ * One thread, so one block. */
 
-#define TLS_SLOTS 0x100
-static uint32_t g_tls;
+#define TLS_KERNEL_SIZE 0x800
+#define TLS_SLOTS       0x101
+
+static uint32_t g_tls_image, g_tls_filesz, g_tls_memsz;
+static uint32_t g_tls;                  /* the block, made on first use */
+
+void vita_tls_init(uint32_t image, uint32_t filesz, uint32_t memsz) {
+    g_tls_image  = image;
+    g_tls_filesz = filesz;
+    g_tls_memsz  = memsz;
+}
+
+static uint32_t tls_block(void) {
+    if (!g_tls) {
+        g_tls = kalloc(TLS_KERNEL_SIZE + ((g_tls_memsz + 15) & ~15u));
+        if (g_tls && g_tls_filesz) {
+            void       *dst = vita_mem_ptr(g_tls + TLS_KERNEL_SIZE, g_tls_filesz);
+            const void *src = vita_mem_ptr(g_tls_image, g_tls_filesz);
+            if (dst && src) memcpy(dst, src, g_tls_filesz);
+        }
+    }
+    return g_tls;
+}
+
+uint32_t vita_tls_base(void) {
+    uint32_t b = tls_block();
+    return b ? b + TLS_KERNEL_SIZE : 0;
+}
 
 static uint32_t tls_slot(uint32_t key) {
     if (key >= TLS_SLOTS) return 0;
-    if (!g_tls) g_tls = kalloc(TLS_SLOTS * 4);
-    return g_tls ? g_tls + key * 4 : 0;
+    uint32_t b = tls_block();
+    return b ? b + key * 4 : 0;
 }
 
 /* void *sceKernelGetTLSAddr(int key) */

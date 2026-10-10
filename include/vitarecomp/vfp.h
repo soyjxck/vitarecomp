@@ -77,4 +77,33 @@ void vfp_cmp_f64(double a, double b);
 /* VMRS APSR_nzcv, FPSCR — copy the float flags to the integer ones. */
 void vfp_mrs_apsr(void);
 
+/* Float to integer, toward zero, as VCVT does it: out of range saturates and
+ * NaN gives zero. A plain C cast is undefined there, and on x86 it yields
+ * 0x80000000 for every such input, signed or not. */
+static inline int32_t vita_f32_to_s32(float f) {
+    if (f != f) return 0;
+    if (f >= 2147483648.0f) return INT32_MAX;
+    if (f <= -2147483648.0f) return INT32_MIN;
+    return (int32_t)f;
+}
+
+static inline uint32_t vita_f32_to_u32(float f) {
+    if (!(f > 0.0f)) return 0;
+    if (f >= 4294967296.0f) return UINT32_MAX;
+    return (uint32_t)f;
+}
+
+static inline int32_t vita_f64_to_s32(double d) {
+    if (d != d) return 0;
+    if (d >= 2147483648.0) return INT32_MAX;
+    if (d <= -2147483648.0) return INT32_MIN;
+    return (int32_t)d;
+}
+
+static inline uint32_t vita_f64_to_u32(double d) {
+    if (!(d > 0.0)) return 0;
+    if (d >= 4294967296.0) return UINT32_MAX;
+    return (uint32_t)d;
+}
+
 #endif /* VITARECOMP_VFP_H */

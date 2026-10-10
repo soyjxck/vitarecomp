@@ -289,7 +289,11 @@ static void decode_t16(uint16_t h, arm_insn *o) {
         int load = (h & 0x0800) != 0;
         o->rn = (h >> 8) & 7;
         o->reglist = h & 0xFF;
-        o->writeback = 1;
+        /* STMIA always writes back; LDMIA writes back unless the base is
+         * also in the list, in which case the loaded value wins. */
+        o->writeback = load ? ((h & (1u << o->rn)) == 0) : 1;
+        o->mem_add = 1;
+        o->op = load ? OP_LDM : OP_STM;
         set(o, load ? A_LOADM : A_STOREM, "ldm/stm");
         return;
     }
@@ -351,11 +355,15 @@ static void decode_t16(uint16_t h, arm_insn *o) {
                 set(o, A_ALU, "extend");
                 return;
             }
-            if ((h & 0xFF00) == 0xBA00 && ((h >> 6) & 3) != 1) {
-                o->op = OP_REV;
+            if ((h & 0xFF00) == 0xBA00 && ((h >> 6) & 3) != 2) {
+                /* 1011 1010 op rm rd: op 00 REV, 01 REV16, 11 REVSH; 10 is
+                 * unallocated. An earlier revision read every op but 01 as
+                 * REV, which turned REVSH into a full byte reverse. */
+                static const arm_op rv16[4] = { OP_REV, OP_REV16, OP_NONE, OP_REVSH };
+                o->op = rv16[(h >> 6) & 3];
                 o->rd = h & 7;
                 o->rm = (h >> 3) & 7;
-                set(o, A_ALU, "rev");
+                set(o, A_ALU, o->op == OP_REV ? "rev" : o->op == OP_REV16 ? "rev16" : "revsh");
                 return;
             }
             if ((h & 0xF600) == 0xB400) {
@@ -437,6 +445,21 @@ static void decode_t16(uint16_t h, arm_insn *o) {
 static int vfp_sreg(int field, int extra) { return (field << 1) | extra; }
 static int vfp_dreg(int field, int extra) { return (extra << 4) | field; }
 
+/* VFPExpandImm: a sign, a three-bit exponent centred on 1.0 and four bits of
+ * fraction. The exponent's top bit is stored inverted and then replicated,
+ * which is what keeps the range symmetric around 1.0: 0.125 to 31.0. */
+static uint32_t vfp_expand_imm32(uint32_t imm8) {
+    uint32_t sign = (imm8 >> 7) & 1, b6 = (imm8 >> 6) & 1;
+    uint32_t exp  = ((b6 ^ 1) << 7) | (b6 ? 0x7Cu : 0u) | ((imm8 >> 4) & 3);
+    return (sign << 31) | (exp << 23) | ((imm8 & 0xF) << 19);
+}
+
+static uint64_t vfp_expand_imm64(uint32_t imm8) {
+    uint64_t sign = (imm8 >> 7) & 1, b6 = (imm8 >> 6) & 1;
+    uint64_t exp  = ((b6 ^ 1) << 10) | (b6 ? 0x3FCull : 0ull) | ((imm8 >> 4) & 3);
+    return (sign << 63) | (exp << 52) | ((uint64_t)(imm8 & 0xF) << 48);
+}
+
 static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
     int coproc = (h2 >> 8) & 0xF;
     int dp     = (coproc == 11);
@@ -459,18 +482,30 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
          * that bucket, and they do no arithmetic at all. imm8 counts the
          * registers transferred — one per register for single precision, two
          * for double. */
-        /* The list forms are exactly W == 1:
+        /* The list forms are W == 1, and P=0 U=1 whatever W is:
          *   P=1 W=0  VLDR/VSTR, a single register at an offset
          *   P=0 W=1  VLDMIA
          *   P=1 W=1  VLDMDB / VPUSH / VPOP
-         *   P=0 W=0  64-bit core<->VFP transfer, not claimed here
+         *   P=0 U=1 W=0  VLDMIA / VSTMIA without write-back
+         *   P=0 U=0 W=0  the 64-bit core<->VFP transfers, claimed just below
          *
          * An earlier revision tested `P != W`, which is also true for P=1 W=0 —
          * so it captured the plain VLDR/VSTR forms that were already working
          * and re-decoded them as register lists. Translation went DOWN. Worth
          * recording: a change that claims more encodings can still be a
          * regression if it claims the wrong ones. */
-        if (W) {
+        /* VMOV between two core registers and a D register or an S pair:
+         * 1110 1100 010 L Rt2 | Rt 101 C 00 M 1 Vm. L=1 reads the register. */
+        if (!P && !U && D && !W && (h2 & 0x00D0) == 0x0010) {
+            o->op  = L ? OP_VMOV_D_TO_C : OP_VMOV_C_TO_D;
+            o->rt  = (h2 >> 12) & 0xF;
+            o->rt2 = h1 & 0xF;
+            o->vm  = (int8_t)(dp ? vfp_dreg(h2 & 0xF, (h2 >> 5) & 1) : vfp_sreg(h2 & 0xF, (h2 >> 5) & 1));
+            o->vd  = ARM_NO_REG;
+            set(o, A_ALU, L ? "vmov r,r,d" : "vmov d,r,r");
+            return 1;
+        }
+        if (W || (!P && U)) {
             int vd_first = dp ? vfp_dreg(vd, D) : vfp_sreg(vd, D);
             uint32_t n = (uint32_t)(h2 & 0xFF);
             if (dp) n /= 2;
@@ -548,13 +583,17 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
             set(o, A_ALU, op ? "vmls" : "vmla");
             return 1;
 
-        case 0x1:                                  /* VNMLA / VNMLS / VNMUL   */
-            if (op) { o->op = OP_VNMUL; set(o, A_ALU, "vnmul"); return 1; }
-            return 0;                              /* negated accumulate forms */
+        case 0x1:                                  /* VNMLS / VNMLA           */
+            /* The negated accumulates: vd = -vd + vn*vm (op clear) and
+             * vd = -vd - vn*vm (op set). An earlier revision read the op=1
+             * form here as VNMUL, which drops the accumulator entirely. */
+            o->op = op ? OP_VNMLA : OP_VNMLS;
+            set(o, A_ALU, op ? "vnmla" : "vnmls");
+            return 1;
 
-        case 0x2:
-            o->op = OP_VMUL;
-            set(o, A_ALU, "vmul");
+        case 0x2:                                  /* VMUL / VNMUL            */
+            o->op = op ? OP_VNMUL : OP_VMUL;
+            set(o, A_ALU, op ? "vnmul" : "vmul");
             return 1;
 
         case 0x3:
@@ -570,6 +609,20 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
         case 0xB: {                                /* the "other" group       */
             int opc2 = h1 & 0xF;
             int opc3 = (h2 >> 6) & 3;
+
+            /* VMOV (immediate): bits 7:4 clear, the constant in imm4H:imm4L.
+             * Eight bits name a sign, a small exponent and four bits of
+             * fraction: 0.5, 1.0, 2.75 and the like. The retail census had
+             * 45,000 of them, every one a trap. */
+            if ((h2 & 0x00F0) == 0) {
+                uint32_t imm8 = ((uint32_t)(h1 & 0xF) << 4) | (uint32_t)(h2 & 0xF);
+                o->op = OP_VMOV_IMM;
+                o->has_imm = 1;
+                if (dp) o->imm64 = vfp_expand_imm64(imm8);
+                else    o->imm   = vfp_expand_imm32(imm8);
+                set(o, A_ALU, "vmov imm");
+                return 1;
+            }
 
             if (opc2 == 0x0 && opc3 == 1) { o->op = OP_VMOV;  set(o, A_ALU, "vmov"); return 1; }
             if (opc2 == 0x0 && opc3 == 3) { o->op = OP_VABS;  set(o, A_ALU, "vabs"); return 1; }
@@ -591,6 +644,10 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
             if (opc2 == 0x8 && (opc3 & 1)) {
                 o->op = OP_VCVT_I2F;
                 o->vfp_unsigned = (uint8_t)(op == 0);
+                /* The integer side is always an S register, whatever the
+                 * float side is. Numbering it as a D register, as this once
+                 * did for the f64 form, read the wrong register silently. */
+                o->vm = (int8_t)vfp_sreg(vm, M);
                 set(o, A_ALU, "vcvt f,i");
                 return 1;
             }
@@ -599,9 +656,19 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
              * zero). Only the toward-zero forms are claimed, because that is
              * what C's conversion does and the other rounding modes would need
              * explicit modelling to be right. */
+            /* Between precisions: opc2 0111, opc3 11. The coprocessor bit
+             * names the SOURCE size, so the destination is the other kind. */
+            if (opc2 == 0x7 && opc3 == 3) {
+                o->op = OP_VCVT_FF;
+                o->vd = (int8_t)(dp ? vfp_sreg(vd, D) : vfp_dreg(vd, D));
+                set(o, A_ALU, dp ? "vcvt.f32.f64" : "vcvt.f64.f32");
+                return 1;
+            }
+
             if ((opc2 & 0xE) == 0xC && (opc3 & 1)) {
                 o->op = OP_VCVT_F2I;
                 o->vfp_unsigned = (uint8_t)((opc2 & 1) == 0);
+                o->vd = (int8_t)vfp_sreg(vd, D);     /* the integer result */
                 set(o, A_ALU, "vcvt i,f");
                 return 1;
             }
@@ -775,9 +842,90 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         return 1;
     }
 
-    /* Three registers of the same length: 111 U 1111 0 D size Vn | Vd A N Q M B Vm */
+    /* Two registers and a shift amount: 111 U 1111 1 D imm6 Vd | opc L Q M 1 Vm.
+     * The lane width is the position of the top set bit of L:imm6 and the
+     * shift sits in the bits below it, counted up from the lane's bottom
+     * for left shifts and down from its top for right ones. The retail
+     * title's favourite is `vsli.64 d, d, #32`, which is how the compiler
+     * packs two 32-bit halves into one D register. */
+    if ((h1 & 0x0080) && (h2 & 0x0010)) {
+        int imm6 = h1 & 0x3F, L = (h2 >> 7) & 1, opc = (h2 >> 8) & 0xF;
+        int size, left, right;
+        if (L)                { size = 64; left = imm6;      right = 64 - imm6; }
+        else if (imm6 & 0x20) { size = 32; left = imm6 - 32; right = 64 - imm6; }
+        else if (imm6 & 0x10) { size = 16; left = imm6 - 16; right = 32 - imm6; }
+        else if (imm6 & 0x08) { size = 8;  left = imm6 - 8;  right = 16 - imm6; }
+        else return 0;                       /* the modified-immediate space */
+        o->neon_size = (uint8_t)size;
+        o->has_imm = 1;
+        o->vfp_unsigned = (uint8_t)U;
+        switch (opc) {
+        case 0x0: o->op = OP_NEON_SHR;  o->imm = (uint32_t)right; set(o, A_SIMD, U ? "vshr.u" : "vshr.s");   return 1;
+        case 0x1: o->op = OP_NEON_SRA;  o->imm = (uint32_t)right; set(o, A_SIMD, U ? "vsra.u" : "vsra.s");   return 1;
+        case 0x2: o->op = OP_NEON_RSHR; o->imm = (uint32_t)right; set(o, A_SIMD, U ? "vrshr.u" : "vrshr.s"); return 1;
+        case 0x3: o->op = OP_NEON_RSRA; o->imm = (uint32_t)right; set(o, A_SIMD, U ? "vrsra.u" : "vrsra.s"); return 1;
+        case 0x4:
+            if (!U) return 0;
+            o->op = OP_NEON_SRI; o->imm = (uint32_t)right; set(o, A_SIMD, "vsri"); return 1;
+        case 0x5:
+            o->op = U ? OP_NEON_SLI : OP_NEON_SHL; o->imm = (uint32_t)left;
+            set(o, A_SIMD, U ? "vsli" : "vshl.i"); return 1;
+        case 0x8:
+            /* VSHRN / VRSHRN: a Q source narrowed to a D, bit 6 the
+             * rounding. The U form is the saturating VQSHRUN. */
+            if (U || L) return 0;
+            o->op = (h2 & 0x0040) ? OP_NEON_RSHRN : OP_NEON_SHRN;
+            o->neon_size = (uint8_t)(size * 2);  /* the source lane */
+            o->imm = (uint32_t)right;
+            o->neon_q = 0;
+            set(o, A_SIMD, (h2 & 0x0040) ? "vrshrn" : "vshrn");
+            return 1;
+        case 0xA:
+            /* VMOVL / VSHLL: a D source widened to a Q, then shifted left
+             * by the amount, which is zero for the plain move. */
+            if (L || (h2 & 0x0040)) return 0;
+            o->op = left ? OP_NEON_SHLL : OP_NEON_MOVL;
+            o->imm = (uint32_t)left;
+            o->neon_q = 1;
+            set(o, A_SIMD, left ? (U ? "vshll.u" : "vshll.s") : (U ? "vmovl.u" : "vmovl.s"));
+            return 1;
+        default:
+            return 0;                        /* saturating shifts, fixed-point conversions */
+        }
+    }
+
+    /* Two registers and a scalar: 111 Q 1111 1 D size Vn Vd | opc N 1 M 0 Vm.
+     * One operand is a single lane of a D register, broadcast. Bit 28 is Q
+     * here rather than U, and for 16-bit lanes the lane index borrows the
+     * top bit of Vm. */
+    if ((h1 & 0x0080) && (h1 & 0x0030) != 0x0030 && (h2 & 0x0050) == 0x0040) {
+        int Qf = (h1 >> 12) & 1, size = (h1 >> 4) & 3, opc = (h2 >> 8) & 0xF;
+        int vm4 = h2 & 0xF, M = (h2 >> 5) & 1, F = opc & 1;
+        if (size == 0 || (F && size != 2)) return 0;
+        o->neon_q    = (uint8_t)Qf;
+        o->neon_size = (uint8_t)(8 << size);
+        o->neon_f    = (uint8_t)F;
+        if (size == 2) { o->vm = (int8_t)vm4;       o->imm = (uint32_t)M; }
+        else           { o->vm = (int8_t)(vm4 & 7); o->imm = (uint32_t)((M << 1) | (vm4 >> 3)); }
+        o->has_imm = 1;
+        switch (opc & 0xE) {
+        case 0x0: o->op = OP_NEON_MLA_SCALAR; set(o, A_SIMD, F ? "vmla.f32 d[x]" : "vmla.i d[x]"); return 1;
+        case 0x4: o->op = OP_NEON_MLS_SCALAR; set(o, A_SIMD, F ? "vmls.f32 d[x]" : "vmls.i d[x]"); return 1;
+        case 0x8: o->op = OP_NEON_MUL_SCALAR; set(o, A_SIMD, F ? "vmul.f32 d[x]" : "vmul.i d[x]"); return 1;
+        default:  return 0;                  /* the long and saturating forms */
+        }
+    }
+
+    /* Three registers of the same length: 111 U 1111 0 D size Vn | Vd A N Q M B Vm.
+     *
+     * The floating-point forms are the same encoding with size<0> clear (the
+     * Cortex-A9 has no half-precision arithmetic, so they are all f32) and
+     * size<1> choosing between two operations. The retail census put these
+     * first: VMUL.F32 alone was 30,000 instructions, VADD/VSUB/VPADD.F32 and
+     * the two Newton-Raphson steps most of the rest. */
     if ((h1 & 0x0080) == 0) {
         int size = (h1 >> 4) & 3, A = (h2 >> 8) & 0xF, B = (h2 >> 4) & 1;
+        int f32 = (size & 1) == 0, hi = (size >> 1) & 1;
         o->neon_size = (uint8_t)(8 << size);
         if (A == 0x1 && B == 1) {
             static const arm_op l0[4] = { OP_NEON_AND, OP_NEON_BIC, OP_NEON_ORR, OP_NEON_ORN };
@@ -788,9 +936,156 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             set(o, A_SIMD, U ? n1[size] : n0[size]);
             return 1;
         }
+        if (A == 0x3) {
+            o->op = B ? OP_NEON_CGE : OP_NEON_CGT;
+            o->vfp_unsigned = (uint8_t)U;
+            set(o, A_SIMD, B ? (U ? "vcge.u" : "vcge.s") : (U ? "vcgt.u" : "vcgt.s"));
+            return 1;
+        }
+        if (A == 0x6) {
+            o->op = B ? OP_NEON_MIN : OP_NEON_MAX;
+            o->vfp_unsigned = (uint8_t)U;
+            set(o, A_SIMD, B ? (U ? "vmin.u" : "vmin.s") : (U ? "vmax.u" : "vmax.s"));
+            return 1;
+        }
         if (A == 0x8 && B == 0) { o->op = U ? OP_NEON_SUB : OP_NEON_ADD; set(o, A_SIMD, U ? "vsub.i" : "vadd.i"); return 1; }
         if (A == 0x8 && B == 1) { o->op = U ? OP_NEON_CEQ : OP_NEON_TST; set(o, A_SIMD, U ? "vceq.i" : "vtst");  return 1; }
+        if (A == 0x9 && B == 0) { o->op = U ? OP_NEON_MLS : OP_NEON_MLA; set(o, A_SIMD, U ? "vmls.i" : "vmla.i"); return 1; }
+        if (A == 0x9 && B == 1 && !U) { o->op = OP_NEON_MUL; set(o, A_SIMD, "vmul.i"); return 1; }
         if (A == 0xB && B == 1 && !U && !Q) { o->op = OP_NEON_PADD; set(o, A_SIMD, "vpadd.i"); return 1; }
+
+        if (!f32) return 0;
+        o->neon_size = 32;
+        o->neon_f = 1;
+        if (A == 0xD && B == 0) {
+            if (!U) { o->op = hi ? OP_NEON_FSUB : OP_NEON_FADD; set(o, A_SIMD, hi ? "vsub.f32" : "vadd.f32"); return 1; }
+            if (hi) { o->op = OP_NEON_FABD; set(o, A_SIMD, "vabd.f32"); return 1; }
+            if (Q) return 0;                          /* VPADD has no Q form */
+            o->op = OP_NEON_FPADD; set(o, A_SIMD, "vpadd.f32"); return 1;
+        }
+        if (A == 0xD && B == 1) {
+            if (!U) { o->op = hi ? OP_NEON_FMLS : OP_NEON_FMLA; set(o, A_SIMD, hi ? "vmls.f32" : "vmla.f32"); return 1; }
+            if (hi) return 0;
+            o->op = OP_NEON_FMUL; set(o, A_SIMD, "vmul.f32"); return 1;
+        }
+        if (A == 0xE && B == 0) {
+            if (!U) { if (hi) return 0; o->op = OP_NEON_FCEQ; set(o, A_SIMD, "vceq.f32"); return 1; }
+            o->op = hi ? OP_NEON_FCGT : OP_NEON_FCGE; set(o, A_SIMD, hi ? "vcgt.f32" : "vcge.f32"); return 1;
+        }
+        if (A == 0xF && B == 0 && !U) { o->op = hi ? OP_NEON_FMIN : OP_NEON_FMAX; set(o, A_SIMD, hi ? "vmin.f32" : "vmax.f32"); return 1; }
+        if (A == 0xF && B == 1 && !U) { o->op = hi ? OP_NEON_FRSQRTS : OP_NEON_FRECPS; set(o, A_SIMD, hi ? "vrsqrts.f32" : "vrecps.f32"); return 1; }
+        return 0;
+    }
+
+    /* Bits 23 and 21:20 all set: 111 U 1111 1 D 11 .... Four groups share
+     * it, told apart by U and by bits 11:8 and 4 of the second halfword. */
+    if ((h1 & 0x00B0) == 0x00B0) {
+        if (!U) {
+            /* VEXT: 1110 1111 1 D 11 Vn | Vd imm4 N Q M 0 Vm. Bytes imm4 and up
+             * of the pair vm:vn, vn being the low half. The compiler's way of
+             * swapping the halves of a Q register is `vext.8 q, q, q, #8`. */
+            if (h2 & 0x0010) return 0;
+            uint32_t pos = (h2 >> 8) & 0xF;
+            if (!Q && pos > 7) return 0;
+            o->op = OP_NEON_EXT;
+            o->imm = pos;
+            o->has_imm = 1;
+            o->neon_size = 8;
+            set(o, A_SIMD, "vext");
+            return 1;
+        }
+
+        /* VDUP (scalar): 1111 1111 1 D 11 imm4 | Vd 1100 0 Q M 0 Vm. The lowest
+         * set bit of imm4 is the lane width, the bits above it the lane. The
+         * single most frequent untranslated instruction of the retail title:
+         * every vector-by-scalar multiply the compiler emits starts with one. */
+        if ((h2 & 0x0F90) == 0x0C00) {
+            int imm4 = h1 & 0xF;
+            if (imm4 & 1)      { o->neon_size = 8;  o->imm = (uint32_t)imm4 >> 1; }
+            else if (imm4 & 2) { o->neon_size = 16; o->imm = (uint32_t)imm4 >> 2; }
+            else if (imm4 & 4) { o->neon_size = 32; o->imm = (uint32_t)imm4 >> 3; }
+            else return 0;
+            o->op = OP_NEON_DUP_LANE;
+            o->has_imm = 1;
+            set(o, A_SIMD, "vdup lane");
+            return 1;
+        }
+
+        /* Two registers, miscellaneous:
+         * 1111 1111 1 D 11 size opc1 | Vd 0 opc2 Q M 0 Vm */
+        if ((h2 & 0x0810) == 0) {
+            int size = (h1 >> 2) & 3, opc1 = h1 & 3, opc2 = (h2 >> 7) & 0xF;
+            o->neon_size = (uint8_t)(8 << size);
+            switch (opc1) {
+            case 0:
+                /* The architecture's table gives this column as five bits,
+                 * opc2 then Q; opc2 alone is its first four. */
+                switch (opc2) {
+                case 0: case 1: case 2: {              /* VREV64 / VREV32 / VREV16 */
+                    int group = 64 >> opc2;
+                    if (o->neon_size >= group) return 0;
+                    o->op = OP_NEON_REV;
+                    o->imm = (uint32_t)group;
+                    o->has_imm = 1;
+                    set(o, A_SIMD, group == 64 ? "vrev64" : group == 32 ? "vrev32" : "vrev16");
+                    return 1;
+                }
+                case 9:  if (size == 3) return 0; o->op = OP_NEON_CLZ; set(o, A_SIMD, "vclz"); return 1;
+                case 10: if (size != 0) return 0; o->op = OP_NEON_CNT; set(o, A_SIMD, "vcnt"); return 1;
+                case 11: if (size != 0) return 0; o->op = OP_NEON_MVN; set(o, A_SIMD, "vmvn"); return 1;
+                default: return 0;
+                }
+            case 1: {
+                static const char *cmp0[5] = { "vcgt #0", "vcge #0", "vceq #0", "vcle #0", "vclt #0" };
+                int F = (opc2 >> 3) & 1, sub = opc2 & 7;
+                if (size == 3 || (F && size != 2)) return 0;
+                o->neon_f = (uint8_t)F;
+                if (sub <= 4) {
+                    o->op = OP_NEON_CMP0;
+                    o->imm = (uint32_t)sub;
+                    o->has_imm = 1;
+                    set(o, A_SIMD, cmp0[sub]);
+                    return 1;
+                }
+                if (sub == 6) { o->op = F ? OP_NEON_FABS : OP_NEON_ABS; set(o, A_SIMD, F ? "vabs.f32" : "vabs"); return 1; }
+                if (sub == 7) { o->op = F ? OP_NEON_FNEG : OP_NEON_NEG; set(o, A_SIMD, F ? "vneg.f32" : "vneg"); return 1; }
+                return 0;
+            }
+            case 2:
+                if (opc2 == 0 && size == 0) { o->op = OP_NEON_SWP; set(o, A_SIMD, "vswp"); return 1; }
+                /* VMOVN: the low half of each lane of a Q, into a D. The
+                 * size field names the RESULT lane; bit 6 set would be the
+                 * saturating VQMOVUN. */
+                if (opc2 == 4 && !(h2 & 0x0040) && size != 3) {
+                    o->op = OP_NEON_MOVN;
+                    o->neon_size = (uint8_t)(16 << size);  /* the source lane */
+                    o->imm = 0;
+                    o->has_imm = 1;
+                    o->neon_q = 0;
+                    set(o, A_SIMD, "vmovn");
+                    return 1;
+                }
+                return 0;                              /* VTRN/VUZP/VZIP, the rest */
+            case 3:
+                if (size != 2) return 0;
+                if ((opc2 & 0xC) == 0x8) {             /* VRECPE / VRSQRTE */
+                    if (!((opc2 >> 1) & 1)) return 0;  /* the integer estimates */
+                    o->neon_f = 1;
+                    o->op = (opc2 & 1) ? OP_NEON_FRSQRTE : OP_NEON_FRECPE;
+                    set(o, A_SIMD, (opc2 & 1) ? "vrsqrte.f32" : "vrecpe.f32");
+                    return 1;
+                }
+                if ((opc2 & 0xC) == 0xC) {             /* VCVT, f32 and 32-bit integers */
+                    o->op = OP_NEON_CVT;
+                    o->imm = (uint32_t)(opc2 & 3);
+                    o->has_imm = 1;
+                    o->neon_f = 1;
+                    set(o, A_SIMD, "vcvt");
+                    return 1;
+                }
+                return 0;
+            }
+        }
         return 0;
     }
     return 0;
@@ -818,10 +1113,34 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
      * and worse on another, which is why the trap breakdown by kind was what
      * finally surfaced it: 2.16% of instructions decoding to "?" is a number
      * that demands an explanation, and there wasn't one. */
+    /* MRC p15, 0, Rt, c13, c0, 3 reads TPIDRURO, the user-readable thread ID
+     * register (claimed before the coprocessor space swallows it) that the kernel points at the running thread's TLS block. It
+     * is how Sony's C runtime finds its per-thread state, and the only
+     * system register user code on this console reads. */
+    if (h1 == 0xEE1D && (h2 & 0x0FFF) == 0x0F70) {
+        o->op = OP_MRC_TLS;
+        o->rt = (h2 >> 12) & 0xF;
+        set(o, A_SYS, "mrc tpidruro");
+        return;
+    }
+
     if ((h1 & 0xEC00) == 0xEC00) {
         if (decode_vfp(h1, h2, o)) return;
         set(o, A_SIMD, "simd/vfp");
         return;
+    }
+
+    /* Barriers and CLREX: 1111 0011 1011 1111 | 1000 1111 op option. DMB, DSB
+     * and ISB order memory that this host's single thread already sees in
+     * order; CLREX drops an exclusive monitor the runtime never arms (below).
+     * All four do nothing here. */
+    if (h1 == 0xF3BF && (h2 & 0xFF00) == 0x8F00) {
+        int op = (h2 >> 4) & 0xF;
+        if (op == 0x2 || op == 0x4 || op == 0x5 || op == 0x6) {
+            o->op = OP_NOP;
+            set(o, A_NOP, op == 0x2 ? "clrex" : op == 0x4 ? "dsb" : op == 0x5 ? "dmb" : "isb");
+            return;
+        }
     }
 
     /* 11110 ... with bit 15 of the second halfword set: branches and
@@ -921,6 +1240,35 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         return;
     }
 
+    /* Exclusive loads and stores, the pair every lock and atomic counter is
+     * built from:
+     *   1110 1000 0101 Rn | Rt 1111 imm8      LDREX  rt, [rn, #imm8*4]
+     *   1110 1000 0100 Rn | Rt Rd   imm8      STREX  rd, rt, [rn, #imm8*4]
+     *   1110 1000 1101 Rn | Rt 1111 010x 1111 LDREXB/H
+     *   1110 1000 1100 Rn | Rt 1111 010x Rd   STREXB/H
+     * 17,000 of the retail title's traps. One guest thread runs at a time on
+     * this host, so the monitor cannot be broken between the pair: the store
+     * always succeeds and rd reads 0. */
+    if ((h1 & 0xFFE0) == 0xE840 || ((h1 & 0xFFE0) == 0xE8C0 && (h2 & 0x00E0) == 0x0040)) {
+        int load = (h1 & 0x0010) != 0, word = (h1 & 0x0080) == 0;
+        o->op = load ? OP_LDREX : OP_STREX;
+        o->rn = h1 & 0xF;
+        o->rt = (h2 >> 12) & 0xF;
+        if (word) {
+            o->rd = load ? ARM_NO_REG : (h2 >> 8) & 0xF;
+            o->imm = (uint32_t)(h2 & 0xFF) * 4u;
+            o->mem_size = 32;
+        } else {
+            o->rd = load ? ARM_NO_REG : h2 & 0xF;
+            o->imm = 0;
+            o->mem_size = (h2 & 0x0010) ? 16 : 8;
+        }
+        o->has_imm = 1;
+        o->mem_add = 1;
+        set(o, load ? A_LOAD : A_STORE, load ? "ldrex" : "strex");
+        return;
+    }
+
     /* Load/store DUAL. Bit 6 separates these from the multiple forms below, and
      * the earlier mask excluded them by keeping that bit — so every LDRD/STRD
      * fell through to unknown. They are common: compilers use them to move
@@ -947,10 +1295,16 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         o->rn = h1 & 0xF;
         o->reglist = h2;
         o->writeback = (h1 & 0x0020) != 0;
-        /* Only the SP-relative writeback forms are PUSH/POP proper; the rest
-         * are general LDM/STM against an arbitrary base and the emitter's
-         * stack-shaped translation would be wrong for them. */
-        if (o->rn != 13) o->op = OP_NONE;
+        /* Bits 8:7 of the first halfword are the direction: 01 is
+         * increment-after (LDMIA/STMIA, 0xE88x/0xE8Bx), 10 decrement-before
+         * (LDMDB/STMDB, 0xE90x/0xE92x). Bit 7 alone tells them apart. */
+        o->mem_add = (h1 & 0x0080) != 0;
+        /* Only the SP-relative forms with the stack's own direction are
+         * PUSH (STMDB sp!) and POP (LDMIA sp!); everything else is a general
+         * LDM/STM against whatever base, which the emitter writes as the
+         * loads and stores it is, in whichever direction. */
+        if (o->rn != 13 || !o->writeback || (load && !o->mem_add) || (!load && o->mem_add))
+            o->op = load ? OP_LDM : OP_STM;
         /* A pop that includes the PC is the return — AFTER the registers
          * before it are restored and the stack pointer moved. Classifying it
          * as a return without the list, as this once did, emitted a bare

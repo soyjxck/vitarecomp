@@ -1,4 +1,4 @@
-﻿/* recomp_rt.h â€” the instructions whose C translation is not obvious.
+﻿/* recomp_rt.h — the instructions whose C translation is not obvious.
  *
  * Everything here exists because a direct C expression would be WRONG, not
  * merely verbose. Each one is a place where ARM's definition and C's differ,
@@ -23,7 +23,7 @@
  * C leaves a shift by >= the operand width UNDEFINED. ARM defines it: shifting
  * a 32-bit value left by 32 or more yields zero. On x86 the natural C
  * translation silently masks the count to 5 bits, so `x << 32` returns x
- * unchanged â€” the exact opposite of the right answer, and a bug that only
+ * unchanged — the exact opposite of the right answer, and a bug that only
  * appears when a shift amount is computed rather than constant.
  */
 
@@ -79,7 +79,7 @@ static inline void vita_flags_adc(uint32_t a, uint32_t b, uint32_t carry,
     flag_v = (int)(((a ^ res) & (b ^ res)) >> 31);
 }
 
-/* ARM's carry on subtraction is set when there is NO borrow â€” the opposite of
+/* ARM's carry on subtraction is set when there is NO borrow — the opposite of
  * most people's intuition and of several other architectures. */
 static inline void vita_flags_sub(uint32_t a, uint32_t b, uint32_t res) {
     vita_flags_nz(res);
@@ -239,6 +239,10 @@ uint32_t vita_trap_count(void);
 /* Function-entry trace (host.h). The generated C calls this first thing in
  * every function; it does nothing unless the host turned it on. */
 void vita_trace_fn(uint32_t addr);
+
+/* TPIDRURO: the running thread's TLS block, as `mrc p15, 0, rt, c13, c0, 3`
+ * reads it. Implemented by the thread manager (hle_threadmgr.c). */
+uint32_t vita_tls_base(void);
 
 #endif /* VITARECOMP_RECOMP_RT_H */
 

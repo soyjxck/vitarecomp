@@ -33,6 +33,7 @@
 void vita_register_functions(void);
 void vita_module_start(void);
 extern const uint32_t vita_module_start_addr;
+extern const uint32_t vita_module_tls_addr, vita_module_tls_filesz, vita_module_tls_memsz;
 
 /* --- the address space ------------------------------------------------------ */
 
@@ -225,6 +226,7 @@ int main(int argc, char **argv) {
     vita_memblock_init(ARENA_BASE, ARENA_SIZE);
     vita_heap_init(HEAP_BASE, HEAP_SIZE);
     vita_kernel_init(KERNEL_BASE, KERNEL_SIZE);
+    vita_tls_init(vita_module_tls_addr, vita_module_tls_filesz, vita_module_tls_memsz);
     vita_register_functions();
 
     fprintf(stderr, "vita_host: %s loaded, %d segments, 0x%08X..0x%08X; module_start 0x%08X\n",

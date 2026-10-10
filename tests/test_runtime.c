@@ -399,6 +399,117 @@ static void test_neon(void) {
     printf("  neon lanes (add/ceq/padd/dup)   ok\n");
 }
 
+static uint64_t f32x2(float lo, float hi) {
+    return ((uint64_t)vita_f32_bits(hi) << 32) | vita_f32_bits(lo);
+}
+
+static void test_neon_more(void) {
+    /* Lanes, signed and not. */
+    assert(vita_neon_lane(0x1122334455667788ull, 1, 32) == 0x11223344u);
+    assert(vita_neon_lane(0x1122334455667788ull, 3, 16) == 0x1122u);
+    assert(vita_neon_slane(0x00000000FFFFFFFFull, 0, 32) == -1);
+    assert(vita_neon_slane(0x0000000000000080ull, 0, 8) == -128);
+
+    /* VEXT takes bytes from the pair, low register first. */
+    assert(vita_neon_ext(0x0807060504030201ull, 0x100F0E0D0C0B0A09ull, 3) == 0x0B0A090807060504ull);
+    assert(vita_neon_ext(0x0807060504030201ull, 0x100F0E0D0C0B0A09ull, 0) == 0x0807060504030201ull);
+    vita_d_set(0, 0x0807060504030201ull); vita_d_set(1, 0x100F0E0D0C0B0A09ull);
+    vita_d_set(2, 0x1817161514131211ull); vita_d_set(3, 0x201F1E1D1C1B1A19ull);
+    vita_neon_ext_q(0, 0, 2, 8);           /* the halves swapped, in place */
+    assert(vita_d_get(0) == 0x100F0E0D0C0B0A09ull && vita_d_get(1) == 0x1817161514131211ull);
+
+    /* VREV: reverse lanes within a group. */
+    assert(vita_neon_rev(0x0807060504030201ull, 8, 64) == 0x0102030405060708ull);
+    assert(vita_neon_rev(0x0807060504030201ull, 8, 16) == 0x0708050603040102ull);
+    assert(vita_neon_rev(0x0807060504030201ull, 16, 32) == 0x0605080702010403ull);
+
+    assert(vita_neon_clz(0x00000001000000FFull, 32) == 0x0000001F00000018ull);
+    assert(vita_neon_cnt(0xFF0F000100000000ull) == 0x0804000100000000ull);
+    assert(vita_neon_abs(0xFFFFFFFF00000005ull, 32) == 0x0000000100000005ull);
+    assert(vita_neon_cmp0(0x00000001FFFFFFFFull, 32, 0) == 0xFFFFFFFF00000000ull);
+    assert(vita_neon_cmp0(0x00000001FFFFFFFFull, 32, 4) == 0x00000000FFFFFFFFull);
+    assert(vita_neon_cmp0(0x0000000000000000ull, 32, 2) == 0xFFFFFFFFFFFFFFFFull);
+    assert(vita_neon_mul(0x0000000300000002ull, 0x0000000500000007ull, 32) == 0x0000000F0000000Eull);
+    assert(vita_neon_mul(0x0000000000000080ull, 0x0000000000000002ull, 8) == 0x0000000000000000ull);
+    assert(vita_neon_mla(0x0000000100000001ull, 0x0000000300000002ull, 0x0000000500000007ull, 32) == 0x000000100000000Full);
+    assert(vita_neon_max(0x00000001FFFFFFFFull, 0x0000000200000000ull, 32, 0) == 0x0000000200000000ull);
+    assert(vita_neon_max(0x00000001FFFFFFFFull, 0x0000000200000000ull, 32, 1) == 0x00000002FFFFFFFFull);
+    assert(vita_neon_min(0x00000001FFFFFFFFull, 0x0000000200000000ull, 32, 0) == 0x00000001FFFFFFFFull);
+    assert(vita_neon_cgt(0x0000000000000002ull, 0x0000000100000001ull, 32, 0) == 0x00000000FFFFFFFFull);
+    assert(vita_neon_cge(0x0000000100000001ull, 0x0000000100000002ull, 32, 0) == 0xFFFFFFFF00000000ull);
+    assert(vita_neon_cgt(0x00000000000000FFull, 0x0000000000000001ull, 8, 1) == 0x00000000000000FFull);
+    assert(vita_neon_cgt(0x00000000000000FFull, 0x0000000000000001ull, 8, 0) == 0);
+
+    /* f32 lanes. */
+    uint64_t a = f32x2(1.0f, 2.0f), b = f32x2(3.0f, 4.0f);
+    assert(vita_neon_fadd(a, a) == f32x2(2.0f, 4.0f));
+    assert(vita_neon_fsub(a, a) == 0);
+    assert(vita_neon_fmul(a, b) == f32x2(3.0f, 8.0f));
+    assert(vita_neon_fpadd(a, b) == f32x2(3.0f, 7.0f));
+    assert(vita_neon_fmla(a, a, b) == f32x2(4.0f, 10.0f));
+    assert(vita_neon_fmls(b, a, a) == f32x2(2.0f, 0.0f));
+    assert(vita_neon_fabd(a, b) == f32x2(2.0f, 2.0f));
+    assert(vita_neon_fceq(a, a) == 0xFFFFFFFFFFFFFFFFull);
+    assert(vita_neon_fcgt(a, b) == 0);
+    assert(vita_neon_fcge(b, a) == 0xFFFFFFFFFFFFFFFFull);
+    assert(vita_neon_fmax(a, b) == b && vita_neon_fmin(a, b) == a);
+    assert(vita_neon_fmax(a, f32x2(NAN, 4.0f)) == f32x2(vita_f32_of(VITA_NEON_DEFAULT_NAN), 4.0f));
+    assert((vita_d_get(0), vita_d_get(0) ^ 0x8000000080000000ull, 1));
+    assert(vita_neon_frecpe(f32x2(2.0f, 4.0f)) == f32x2(0.5f, 0.25f));
+    assert(vita_neon_frsqrte(f32x2(4.0f, 16.0f)) == f32x2(0.5f, 0.25f));
+    assert(vita_neon_frecps(f32x2(2.0f, 2.0f), f32x2(0.5f, 0.25f)) == f32x2(1.0f, 1.5f));
+    assert(vita_neon_frsqrts(f32x2(4.0f, 4.0f), f32x2(0.5f, 0.25f)) == f32x2(0.5f, 1.0f));
+    assert(vita_neon_frecps(f32x2(INFINITY, 0.0f), f32x2(0.0f, INFINITY)) == f32x2(2.0f, 2.0f));
+    assert(vita_neon_fcmp0(f32x2(1.0f, -1.0f), 0) == 0x00000000FFFFFFFFull);
+    assert(vita_neon_fcmp0(f32x2(1.0f, -1.0f), 4) == 0xFFFFFFFF00000000ull);
+    assert(vita_neon_fcmp0(f32x2(NAN, 0.0f), 2) == 0xFFFFFFFF00000000ull);
+
+    /* Conversions saturate and send NaN to zero. */
+    assert(vita_neon_cvt(0xFFFFFFFF00000002ull, 0) == f32x2(2.0f, -1.0f));
+    assert(vita_neon_cvt(0xFFFFFFFF00000002ull, 1) == f32x2(2.0f, 4294967296.0f));
+    assert(vita_neon_cvt(f32x2(1.9f, -1.9f), 2) == 0xFFFFFFFF00000001ull);
+    assert(vita_neon_cvt(f32x2(3e9f, NAN), 2) == 0x000000007FFFFFFFull);
+    assert(vita_neon_cvt(f32x2(3e9f, -1.0f), 3) == 0x00000000B2D05E00ull);
+    assert(vita_f32_to_s32(1e10f) == INT32_MAX && vita_f32_to_s32(-1e10f) == INT32_MIN);
+    assert(vita_f32_to_u32(-1.0f) == 0 && vita_f32_to_u32(1e10f) == UINT32_MAX);
+    assert(vita_f64_to_s32(-2.5) == -2 && vita_f64_to_u32(2.5) == 2);
+
+    printf("  neon lanes (float, misc, ext)   ok\n");
+}
+
+static void test_neon_shifts(void) {
+    assert(vita_neon_shl(0x0000000100000001ull, 32, 4) == 0x0000001000000010ull);
+    assert(vita_neon_shl(0x00000000000000FFull, 8, 4) == 0x00000000000000F0ull);
+    assert(vita_neon_shl(0x0000000100000001ull, 32, 32) == 0);
+    assert(vita_neon_shr(0xFFFFFFF000000010ull, 32, 4, 1) == 0x0FFFFFFF00000001ull);
+    assert(vita_neon_shr(0xFFFFFFF000000010ull, 32, 4, 0) == 0xFFFFFFFF00000001ull);
+    assert(vita_neon_shr(0xFFFFFFF000000010ull, 32, 32, 0) == 0xFFFFFFFF00000000ull);
+    assert(vita_neon_shr(0xFFFFFFF000000010ull, 32, 32, 1) == 0);
+    /* Rounding: 7 >> 2 is 1.75, rounds to 2; -7 >> 2 is -1.75, rounds to -2;
+     * 6 >> 2 is 1.5, the tie rounds up to 2; -6 >> 2 rounds to -1. */
+    assert(vita_neon_rshr(0x0000000700000006ull, 32, 2, 1) == 0x0000000200000002ull);
+    assert(vita_neon_rshr(0xFFFFFFF9FFFFFFFAull, 32, 2, 0) == 0xFFFFFFFEFFFFFFFFull);
+    assert(vita_neon_rshr(0x00000000FFFFFFFFull, 32, 32, 1) == 0x0000000000000001ull);
+    assert(vita_neon_rshr(0x00000000FFFFFFFFull, 32, 32, 0) == 0);
+    /* The retail title's favourite: two halves packed into one D register. */
+    assert(vita_neon_sli(0x00000000AAAAAAAAull, 0x00000000BBBBBBBBull, 64, 32) == 0xBBBBBBBBAAAAAAAAull);
+    assert(vita_neon_sri(0xAAAAAAAA00000000ull, 0xBBBBBBBB00000000ull, 64, 32) == 0xAAAAAAAABBBBBBBBull);
+    assert(vita_neon_sli(0x00000000000000FFull, 0x000000000000000Full, 8, 4) == 0x00000000000000FFull);
+    assert(vita_neon_sli(0x0000000000000000ull, 0x000000000000000Full, 8, 4) == 0x00000000000000F0ull);
+    assert(vita_neon_sri(0x00000000000000F0ull, 0x00000000000000F0ull, 8, 4) == 0x00000000000000FFull);
+    assert(vita_neon_sri(0x0000000000000012ull, 0x0000000000000034ull, 8, 8) == 0x0000000000000012ull);
+    /* Widening and narrowing. */
+    assert(vita_neon_widen(0x80FF0102u, 8, 1) == 0x008000FF00010002ull);
+    assert(vita_neon_widen(0x80FF0102u, 8, 0) == 0xFF80FFFF00010002ull);
+    assert(vita_neon_widen(0x8000FFFFu, 16, 0) == 0xFFFF8000FFFFFFFFull);
+    assert(vita_neon_widen(0x8000FFFFu, 16, 1) == 0x000080000000FFFFull);
+    assert(vita_neon_narrow(0x0000000200000001ull, 0x0000000400000003ull, 32, 0, 0) == 0x0004000300020001ull);
+    assert(vita_neon_narrow(0x0000123400005678ull, 0x00000000FFFF0000ull, 32, 8, 0) == 0x0000FF0000120056ull);
+    assert(vita_neon_narrow(0x0000000000000180ull, 0, 16, 8, 1) == 0x0000000000000002ull);
+    assert(vita_neon_narrow(0x0000000000000180ull, 0, 16, 8, 0) == 0x0000000000000001ull);
+    printf("  neon shifts, widen, narrow      ok\n");
+}
+
 static void test_memory(void) {
     assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
     vita_mem_bad_access = 0;
@@ -441,6 +552,8 @@ int main(void) {
     test_hle_libc();
     test_parallel();
     test_neon();
+    test_neon_more();
+    test_neon_shifts();
     test_memory();
     printf("all runtime tests passed\n");
     return 0;

@@ -64,6 +64,7 @@ typedef enum {
     OP_LDR, OP_LDRB, OP_LDRH, OP_LDRSB, OP_LDRSH, OP_LDRD,
     OP_STR, OP_STRB, OP_STRH, OP_STRD,
     OP_PUSH, OP_POP,
+    OP_LDM, OP_STM,     /* against any base: mem_add = increment-after, else decrement-before */
     OP_B, OP_BL, OP_BX, OP_BLX,
     OP_TBB, OP_TBH,     /* jump through a byte/halfword table at PC          */
     OP_ADR,
@@ -72,6 +73,8 @@ typedef enum {
     OP_UADD8, OP_USUB8, OP_SEL,         /* byte-parallel, through the GE bits   */
     OP_IT, OP_NOP, OP_SVC, OP_CBZ, OP_CBNZ,
     OP_SBFX, OP_UBFX, OP_BFI, OP_BFC,
+    OP_LDREX, OP_STREX, /* exclusive access, mem_size wide; rd gets STREX's status */
+    OP_MRC_TLS,         /* rt = TPIDRURO, the running thread's TLS pointer     */
 
     /* Scalar VFP. Not vector work — 82% of this platform's coprocessor traffic
      * is ordinary floating point, and it maps onto C almost one to one. */
@@ -87,6 +90,11 @@ typedef enum {
     OP_VLDM, OP_VSTM,   /* register-list float load/store, incl. VPUSH/VPOP */
     OP_VMLA, OP_VMLS,   /* multiply-accumulate: vd = vd +/- (vn * vm)       */
     OP_VNMUL,
+    OP_VNMLA, OP_VNMLS, /* vd = -vd - vn*vm, vd = -vd + vn*vm                  */
+    OP_VMOV_IMM,        /* a VFP constant: imm holds f32 bits, imm64 f64 bits  */
+    OP_VMOV_D_TO_C,     /* rt2:rt = a D register, or the S pair vm, vm+1       */
+    OP_VMOV_C_TO_D,     /* the other way                                       */
+    OP_VCVT_FF,         /* between precisions; vfp_dp names the SOURCE kind     */
 
     /* Advanced SIMD on D registers (neon.h). vd/vn/vm are D numbers 0-31,
      * neon_q doubles them up, neon_size is the lane width in bits. */
@@ -100,6 +108,29 @@ typedef enum {
     OP_NEON_SET32,      /* vd[imm] = rt                                     */
     OP_NEON_GET32,      /* rt = vn[imm]                                     */
     OP_NEON_LD1, OP_NEON_ST1,  /* imm registers from/to [rn], rm as ARM has it */
+    OP_NEON_DUP_LANE,   /* every lane from lane imm of vm                   */
+    OP_NEON_EXT,        /* bytes imm.. of the pair vm:vn, vn the low half   */
+    OP_NEON_SWP,
+    OP_NEON_MVN, OP_NEON_CLZ, OP_NEON_CNT,
+    OP_NEON_REV,        /* reverse the lanes within each imm-bit group      */
+    OP_NEON_NEG, OP_NEON_ABS,
+    OP_NEON_CMP0,       /* lane rel 0; imm: 0 gt, 1 ge, 2 eq, 3 le, 4 lt    */
+    OP_NEON_MUL, OP_NEON_MLA, OP_NEON_MLS,
+    OP_NEON_MAX, OP_NEON_MIN, OP_NEON_CGT, OP_NEON_CGE,  /* vfp_unsigned   */
+    /* f32 lanes */
+    OP_NEON_FADD, OP_NEON_FSUB, OP_NEON_FMUL, OP_NEON_FPADD, OP_NEON_FABD,
+    OP_NEON_FMLA, OP_NEON_FMLS, OP_NEON_FMAX, OP_NEON_FMIN,
+    OP_NEON_FCEQ, OP_NEON_FCGE, OP_NEON_FCGT,
+    OP_NEON_FRECPS, OP_NEON_FRSQRTS, OP_NEON_FRECPE, OP_NEON_FRSQRTE,
+    OP_NEON_FNEG, OP_NEON_FABS,
+    OP_NEON_CVT,        /* imm: 0 s32->f32, 1 u32->f32, 2 f32->s32, 3 f32->u32 */
+    /* shifts by an immediate; vfp_unsigned tells the right shifts their fill */
+    OP_NEON_SHR, OP_NEON_SRA, OP_NEON_RSHR, OP_NEON_RSRA,  /* imm bits right  */
+    OP_NEON_SHL, OP_NEON_SLI, OP_NEON_SRI,                  /* SLI/SRI insert */
+    OP_NEON_MOVL, OP_NEON_SHLL, /* vd (Q) = vm (D) widened, SHLL then << imm  */
+    OP_NEON_MOVN, OP_NEON_SHRN, OP_NEON_RSHRN,  /* vd (D) = vm (Q) >> imm, narrowed */
+    /* one operand is lane imm of vm, broadcast; neon_f for the f32 forms     */
+    OP_NEON_MUL_SCALAR, OP_NEON_MLA_SCALAR, OP_NEON_MLS_SCALAR,
 } arm_op;
 
 /* Shift types, in the architecture's encoding order. */
@@ -147,6 +178,7 @@ typedef struct {
     uint8_t    mem_post;        /* P == 0: the access uses the base as it was,
                                    the offset is applied to it afterwards    */
     uint8_t    it_mask;         /* IT: which of the next 4 are conditional */
+    uint8_t    mem_size;        /* LDREX/STREX: the access width in bits  */
 
     /* Bitfield ops. Kept out of `imm`/`shift_amt` because a field named for
      * something else is how a reader ends up trusting the wrong one. */
@@ -157,6 +189,7 @@ typedef struct {
     uint8_t    neon_q;          /* Q form: the operation covers vd and vd+1  */
     uint8_t    neon_size;       /* lane width in bits: 8, 16, 32 or 64       */
     uint64_t   imm64;           /* an expanded modified immediate            */
+    uint8_t    neon_f;          /* the lanes are f32, where an op has both kinds */
 } arm_insn;
 
 const char *arm_cond_name(uint8_t cond);

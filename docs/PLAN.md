@@ -66,23 +66,41 @@ the plan; all six are done.
 Exit criterion: the sample's own pixels on screen, input working, zero
 traps in a one-minute run.
 
-## Milestone B: NEON
+## Milestone B: NEON — the retail census pass done 2026-10-10
 
-The instruction set upstream stopped on. 0.58 % of *Uncharted*'s
-instructions, but the first one is on the boot path.
+The instruction set upstream stopped on. On *Golden Abyss* it was 85 % of
+every trap left, so the order of work came from the title itself: tally the
+raw encodings behind every trap in its emit, disassemble the most frequent
+with the vitasdk `objdump`, and translate families in that order. Two
+passes took the module from 96.23 % to 99.7 % translated.
 
-1. Decoder: classify the Advanced SIMD data-processing, load/store
-   (`VLD1..VLD4`, `VST1..VST4`), and `VMOV`/`VDUP` spaces; fix the A32 media
-   space currently classed `A_UNDEF`.
-2. Runtime: a 16 x 128-bit register file aliased with the existing
-   single/double VFP file (`d0..d31`, `q0..q15`), and helpers per lane type.
-   Portable C first; SSE intrinsics later only where a profile shows it.
-3. Emitter: integer and single-precision lanes first, which is what game code
-   uses; polynomial, saturating and fixed-point forms as named traps until a
-   module needs them.
+Done, in census order: `VDUP` by lane (the single most frequent trap; every
+vector-by-scalar multiply starts with one), the f32 three-register set
+(`VADD/VSUB/VMUL/VPADD/VABD/VMLA/VMLS/VMAX/VMIN/VCEQ/VCGE/VCGT/VRECPS/
+VRSQRTS`), VFP `VMOV` immediate (45,000 of them), `LDREX/STREX` and the
+barriers, `VRECPE/VRSQRTE`, the two-register miscellaneous group (`VREV`,
+`VCLZ`, `VCNT`, `VMVN`, compares with zero, `VABS/VNEG`, `VSWP`, `VMOVN`,
+`VCVT`), `VEXT`, shifts by an immediate (`VSHR/VSRA/VRSHR/VRSRA/VSHL/VSLI/
+VSRI`, `VMOVL/VSHLL`, `VSHRN/VRSHRN`), multiply by a scalar, the integer
+`VMUL/VMLA/VMLS/VMAX/VMIN/VCGT/VCGE`, the 64-bit core-VFP transfers, `VLDM`
+without write-back, general `LDM/STM`, the TLS-pointer `MRC`, and scalar
+`VNMLA/VNMLS` and `VCVT` between precisions. All lane-by-lane in portable C
+(`neon.h`), with `ctest` cases from the ARM ARM.
+
+Left, as named traps until a module needs them: the saturating forms
+(`VQADD`, `VQSHL`, `VQMOVN`, `VQDMULH`), the long multiplies, `VLD2`-`VLD4`
+and the lane loads, `VTRN/VUZP/VZIP`, `VTBL`, polynomial and fixed-point
+forms, the integer estimates. What the census shows now is not instructions
+but data: tables the function walker ran into, which is discovery's problem
+(housekeeping below).
+
+Still open from the original plan:
+
 4. Verification: differential runs of individual functions against Vita3K or
-   the touchHLE interpreter core from identical state (the UMK3 iOS method),
-   plus synthetic `ctest` cases with expected values from the ARM ARM.
+   the touchHLE interpreter core from identical state (the UMK3 iOS method).
+   Two deliberate differences to keep in mind when reading a diff: NEON on
+   the console runs flush-to-zero with default NaNs, and `VRECPE/VRSQRTE`
+   are eight-bit estimates where the helpers compute exactly.
 
 Exit criterion: *Uncharted* QA (if available) or any NEON-using homebrew
 proceeds past its first SIMD instruction with lane results matching the
@@ -124,8 +142,9 @@ What the measurement says about a flagship launch title:
 | Discovery | 70,967 functions (60,093 from seeds, 10,874 from shape), 75.0 % covered, 416 jump tables, 30,291 unresolved indirect sites |
 | Imports | 618 functions across 42 libraries, 585 named (94.7 %) |
 | Largest libraries | SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34, SceCommonDialog 27, SceNet 22, SceMp4 19, SceUlt 18 |
-| Emit, whole module | 13.07 M emitted instructions, **96.23 % translated**, 72,260 firmware calls bound, 1.12 GB of C |
-| What traps | NEON/VFP 3.19 % (417,237 instructions: 85 % of everything left), general LDM/STM 0.20 %, unknown encodings 0.19 %, saturating ops 0.03 % |
+| Emit, whole module | 13.07 M emitted instructions, **99.7 % translated** (96.23 % before milestone B's census pass), 72,260 firmware calls bound, 1.12 GB of C |
+| What traps | 0.3 %: NEON/VFP 0.11 % (was 3.19 %), unresolved branch targets 0.09 %, and the rest is data decoded as code: runs of `0xFFFF`, `bkpt`, `svc`, undefined words, which means functions seeded into tables |
+| Thread-local image | 84 bytes initialised of 1,140 per thread; the runtime builds each thread's block as the console does (0x800 bytes of kernel slots, then the image) |
 
 So the shape is the one upstream predicted for the launch window: no
 relocation stream, so a seventh of the functions rest on the shape
@@ -167,6 +186,16 @@ host executable, game-specific HLE overrides, patches, packaging. The toolkit
 stays game-agnostic.
 
 ## Housekeeping, ongoing
+
+- Discovery walks into data. After milestone B's pass the trap census of
+  both VitaShell and *Golden Abyss* is dominated by words that are not
+  instructions: one undefined word 15,739 times in VitaShell, runs of
+  `0xFFFF`, `bkpt`, `svc` and `alu.w pc` patterns in the retail title. They
+  are functions seeded into tables (relocation and tail-call seeds that
+  point at data) and walked until something looked like a return. Harmless
+  at run time, since nothing calls them, but they are a quarter of the
+  emitted C and most of the compile time. A seed whose first instruction is
+  undefined, or whose body is a run of one word, should be dropped.
 
 - CI on Windows and Linux: build, `ctest`, and the smoke run on the VitaShell
   fixture.

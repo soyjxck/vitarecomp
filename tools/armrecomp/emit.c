@@ -1,4 +1,4 @@
-﻿/* emit.c â€” ARM to C.
+﻿/* emit.c — ARM to C.
  *
  * The output is meant to be read. Every instruction carries its address and
  * disassembly as a comment above the C it became, because the first thing
@@ -68,7 +68,7 @@ static int fb_has_label(const fbody *b, uint32_t addr) {
  *
  * The distinction is the difference between a usable output and a 2.4 GB one.
  * `fn->end` is the highest address the discovery walk reached, and because a
- * tail call is a branch, that walk follows branches into other functions â€” so
+ * tail call is a branch, that walk follows branches into other functions — so
  * an extent routinely spans code and data belonging to many functions. Sweeping
  * it linearly re-emits all of that under every function whose extent covers it,
  * and the same instruction lands in the output dozens of times.
@@ -296,7 +296,7 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
 /* A register operand, with r15 resolved.
  *
  * A recompiled program has no PC, so `pc` is not a variable and emitting it
- * produces C that does not compile â€” which is the good failure. The value is
+ * produces C that does not compile — which is the good failure. The value is
  * known at translation time: reading PC in Thumb yields the instruction's own
  * address plus 4. The high-register ADD/MOV/CMP forms are where this actually
  * shows up, and they are common enough (position-independent address
@@ -747,6 +747,215 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        case OP_NEON_DUP_LANE:
+            /* The source lane is one D register whichever form this is; only
+             * the destination doubles up. */
+            for (int q = 0; q <= in->neon_q; q++)
+                fprintf(f, "    vita_d_set(%d, vita_neon_dup((uint32_t)vita_neon_lane(vita_d_get(%d), %u, %u), %u));\n",
+                        in->vd + q, in->vm, in->imm, in->neon_size, in->neon_size);
+            break;
+
+        case OP_NEON_EXT:
+            if (in->neon_q) fprintf(f, "    vita_neon_ext_q(%d, %d, %d, %u);\n", in->vd, in->vn, in->vm, in->imm);
+            else            fprintf(f, "    vita_d_set(%d, vita_neon_ext(vita_d_get(%d), vita_d_get(%d), %u));\n",
+                                    in->vd, in->vn, in->vm, in->imm);
+            break;
+
+        case OP_NEON_SWP:
+            for (int q = 0; q <= in->neon_q; q++)
+                fprintf(f, "    { uint64_t _t = vita_d_get(%d); vita_d_set(%d, vita_d_get(%d)); vita_d_set(%d, _t); }\n",
+                        in->vd + q, in->vd + q, in->vm + q, in->vm + q);
+            break;
+
+        case OP_NEON_MVN: case OP_NEON_CLZ: case OP_NEON_CNT: case OP_NEON_REV:
+        case OP_NEON_NEG: case OP_NEON_ABS: case OP_NEON_CMP0:
+        case OP_NEON_FNEG: case OP_NEON_FABS: case OP_NEON_FRECPE: case OP_NEON_FRSQRTE:
+        case OP_NEON_CVT:
+            for (int q = 0; q <= in->neon_q; q++) {
+                int d = in->vd + q, m = in->vm + q;
+                switch (in->op) {
+                case OP_NEON_MVN:  fprintf(f, "    vita_d_set(%d, ~vita_d_get(%d));\n", d, m); break;
+                case OP_NEON_CLZ:  fprintf(f, "    vita_d_set(%d, vita_neon_clz(vita_d_get(%d), %u));\n", d, m, in->neon_size); break;
+                case OP_NEON_CNT:  fprintf(f, "    vita_d_set(%d, vita_neon_cnt(vita_d_get(%d)));\n", d, m); break;
+                case OP_NEON_REV:  fprintf(f, "    vita_d_set(%d, vita_neon_rev(vita_d_get(%d), %u, %u));\n", d, m, in->neon_size, in->imm); break;
+                case OP_NEON_NEG:  fprintf(f, "    vita_d_set(%d, vita_neon_sub(0, vita_d_get(%d), %u));\n", d, m, in->neon_size); break;
+                case OP_NEON_ABS:  fprintf(f, "    vita_d_set(%d, vita_neon_abs(vita_d_get(%d), %u));\n", d, m, in->neon_size); break;
+                case OP_NEON_CMP0:
+                    if (in->neon_f) fprintf(f, "    vita_d_set(%d, vita_neon_fcmp0(vita_d_get(%d), %u));\n", d, m, in->imm);
+                    else            fprintf(f, "    vita_d_set(%d, vita_neon_cmp0(vita_d_get(%d), %u, %u));\n", d, m, in->neon_size, in->imm);
+                    break;
+                case OP_NEON_FNEG:    fprintf(f, "    vita_d_set(%d, vita_d_get(%d) ^ 0x8000000080000000ull);\n", d, m); break;
+                case OP_NEON_FABS:    fprintf(f, "    vita_d_set(%d, vita_d_get(%d) & 0x7FFFFFFF7FFFFFFFull);\n", d, m); break;
+                case OP_NEON_FRECPE:  fprintf(f, "    vita_d_set(%d, vita_neon_frecpe(vita_d_get(%d)));\n", d, m); break;
+                case OP_NEON_FRSQRTE: fprintf(f, "    vita_d_set(%d, vita_neon_frsqrte(vita_d_get(%d)));\n", d, m); break;
+                default:              fprintf(f, "    vita_d_set(%d, vita_neon_cvt(vita_d_get(%d), %u));\n", d, m, in->imm); break;
+                }
+            }
+            break;
+
+        case OP_NEON_MUL: case OP_NEON_MLA: case OP_NEON_MLS:
+            for (int q = 0; q <= in->neon_q; q++) {
+                int d = in->vd + q, n = in->vn + q, m = in->vm + q;
+                if (in->op == OP_NEON_MUL)
+                    fprintf(f, "    vita_d_set(%d, vita_neon_mul(vita_d_get(%d), vita_d_get(%d), %u));\n", d, n, m, in->neon_size);
+                else
+                    fprintf(f, "    vita_d_set(%d, vita_neon_%s(vita_d_get(%d), vita_d_get(%d), vita_d_get(%d), %u));\n",
+                            d, in->op == OP_NEON_MLA ? "mla" : "mls", d, n, m, in->neon_size);
+            }
+            break;
+
+        case OP_NEON_MAX: case OP_NEON_MIN: case OP_NEON_CGT: case OP_NEON_CGE: {
+            const char *fn3 = in->op == OP_NEON_MAX ? "vita_neon_max" : in->op == OP_NEON_MIN ? "vita_neon_min"
+                            : in->op == OP_NEON_CGT ? "vita_neon_cgt" : "vita_neon_cge";
+            for (int q = 0; q <= in->neon_q; q++)
+                fprintf(f, "    vita_d_set(%d, %s(vita_d_get(%d), vita_d_get(%d), %u, %d));\n",
+                        in->vd + q, fn3, in->vn + q, in->vm + q, in->neon_size, in->vfp_unsigned ? 1 : 0);
+            break;
+        }
+
+        /* f32 lanes. A Q form is still two independent halves: none of these
+         * crosses the middle, and VPADD has no Q form at all. */
+        case OP_NEON_FADD: case OP_NEON_FSUB: case OP_NEON_FMUL: case OP_NEON_FPADD: case OP_NEON_FABD:
+        case OP_NEON_FMAX: case OP_NEON_FMIN: case OP_NEON_FCEQ: case OP_NEON_FCGE: case OP_NEON_FCGT:
+        case OP_NEON_FRECPS: case OP_NEON_FRSQRTS: {
+            const char *fn2 = in->op == OP_NEON_FADD ? "fadd" : in->op == OP_NEON_FSUB ? "fsub"
+                            : in->op == OP_NEON_FMUL ? "fmul" : in->op == OP_NEON_FPADD ? "fpadd"
+                            : in->op == OP_NEON_FABD ? "fabd" : in->op == OP_NEON_FMAX ? "fmax"
+                            : in->op == OP_NEON_FMIN ? "fmin" : in->op == OP_NEON_FCEQ ? "fceq"
+                            : in->op == OP_NEON_FCGE ? "fcge" : in->op == OP_NEON_FCGT ? "fcgt"
+                            : in->op == OP_NEON_FRECPS ? "frecps" : "frsqrts";
+            for (int q = 0; q <= in->neon_q; q++)
+                fprintf(f, "    vita_d_set(%d, vita_neon_%s(vita_d_get(%d), vita_d_get(%d)));\n",
+                        in->vd + q, fn2, in->vn + q, in->vm + q);
+            break;
+        }
+
+        case OP_NEON_FMLA: case OP_NEON_FMLS:
+            for (int q = 0; q <= in->neon_q; q++)
+                fprintf(f, "    vita_d_set(%d, vita_neon_%s(vita_d_get(%d), vita_d_get(%d), vita_d_get(%d)));\n",
+                        in->vd + q, in->op == OP_NEON_FMLA ? "fmla" : "fmls", in->vd + q, in->vn + q, in->vm + q);
+            break;
+
+        case OP_NEON_SHR: case OP_NEON_SRA: case OP_NEON_RSHR: case OP_NEON_RSRA:
+        case OP_NEON_SHL: case OP_NEON_SLI: case OP_NEON_SRI:
+            for (int q = 0; q <= in->neon_q; q++) {
+                int d = in->vd + q, m = in->vm + q;
+                unsigned u = in->vfp_unsigned ? 1u : 0u;
+                switch (in->op) {
+                case OP_NEON_SHR:  fprintf(f, "    vita_d_set(%d, vita_neon_shr(vita_d_get(%d), %u, %u, %u));\n", d, m, in->neon_size, in->imm, u); break;
+                case OP_NEON_RSHR: fprintf(f, "    vita_d_set(%d, vita_neon_rshr(vita_d_get(%d), %u, %u, %u));\n", d, m, in->neon_size, in->imm, u); break;
+                case OP_NEON_SRA:  fprintf(f, "    vita_d_set(%d, vita_neon_add(vita_d_get(%d), vita_neon_shr(vita_d_get(%d), %u, %u, %u), %u));\n", d, d, m, in->neon_size, in->imm, u, in->neon_size); break;
+                case OP_NEON_RSRA: fprintf(f, "    vita_d_set(%d, vita_neon_add(vita_d_get(%d), vita_neon_rshr(vita_d_get(%d), %u, %u, %u), %u));\n", d, d, m, in->neon_size, in->imm, u, in->neon_size); break;
+                case OP_NEON_SHL:  fprintf(f, "    vita_d_set(%d, vita_neon_shl(vita_d_get(%d), %u, %u));\n", d, m, in->neon_size, in->imm); break;
+                case OP_NEON_SLI:  fprintf(f, "    vita_d_set(%d, vita_neon_sli(vita_d_get(%d), vita_d_get(%d), %u, %u));\n", d, d, m, in->neon_size, in->imm); break;
+                default:           fprintf(f, "    vita_d_set(%d, vita_neon_sri(vita_d_get(%d), vita_d_get(%d), %u, %u));\n", d, d, m, in->neon_size, in->imm); break;
+                }
+            }
+            break;
+
+        case OP_NEON_MOVL: case OP_NEON_SHLL:
+            /* The source is read once: the Q destination may contain it. */
+            fprintf(f, "    { uint64_t _m = vita_d_get(%d);\n", in->vm);
+            fprintf(f, "      vita_d_set(%d, vita_neon_shl(vita_neon_widen((uint32_t)_m, %u, %u), %u, %u));\n",
+                    in->vd, in->neon_size, in->vfp_unsigned ? 1u : 0u, in->neon_size * 2, in->imm);
+            fprintf(f, "      vita_d_set(%d, vita_neon_shl(vita_neon_widen((uint32_t)(_m >> 32), %u, %u), %u, %u)); }\n",
+                    in->vd + 1, in->neon_size, in->vfp_unsigned ? 1u : 0u, in->neon_size * 2, in->imm);
+            break;
+
+        case OP_NEON_MOVN: case OP_NEON_SHRN: case OP_NEON_RSHRN:
+            fprintf(f, "    vita_d_set(%d, vita_neon_narrow(vita_d_get(%d), vita_d_get(%d), %u, %u, %d));\n",
+                    in->vd, in->vm, in->vm + 1, in->neon_size, in->imm, in->op == OP_NEON_RSHRN ? 1 : 0);
+            break;
+
+        case OP_NEON_MUL_SCALAR: case OP_NEON_MLA_SCALAR: case OP_NEON_MLS_SCALAR:
+            /* The lane is broadcast once, then it is the vector operation. */
+            fprintf(f, "    { uint64_t _s = vita_neon_dup((uint32_t)vita_neon_lane(vita_d_get(%d), %u, %u), %u);\n",
+                    in->vm, in->imm, in->neon_size, in->neon_size);
+            for (int q = 0; q <= in->neon_q; q++) {
+                int d = in->vd + q, n = in->vn + q;
+                if (in->neon_f) {
+                    if (in->op == OP_NEON_MUL_SCALAR)
+                        fprintf(f, "      vita_d_set(%d, vita_neon_fmul(vita_d_get(%d), _s));\n", d, n);
+                    else
+                        fprintf(f, "      vita_d_set(%d, vita_neon_%s(vita_d_get(%d), vita_d_get(%d), _s));\n",
+                                d, in->op == OP_NEON_MLA_SCALAR ? "fmla" : "fmls", d, n);
+                } else {
+                    if (in->op == OP_NEON_MUL_SCALAR)
+                        fprintf(f, "      vita_d_set(%d, vita_neon_mul(vita_d_get(%d), _s, %u));\n", d, n, in->neon_size);
+                    else
+                        fprintf(f, "      vita_d_set(%d, vita_neon_%s(vita_d_get(%d), vita_d_get(%d), _s, %u));\n",
+                                d, in->op == OP_NEON_MLA_SCALAR ? "mla" : "mls", d, n, in->neon_size);
+                }
+            }
+            fprintf(f, "    }\n");
+            break;
+
+        case OP_MRC_TLS:
+            if (in->rt == ARM_NO_REG || in->rt == 15) { ok = 0; break; }
+            fprintf(f, "    %s = vita_tls_base();\n", reg_name(in->rt));
+            break;
+
+        case OP_VNMLA: case OP_VNMLS: {
+            if (in->vd == ARM_NO_REG || in->vn == ARM_NO_REG || in->vm == ARM_NO_REG) { ok = 0; break; }
+            char c = (in->op == OP_VNMLS) ? '+' : '-';
+            if (in->vfp_dp)
+                fprintf(f, "    vfp_setd(%d, -vfp_getd(%d) %c (vfp_getd(%d) * vfp_getd(%d)));\n",
+                        in->vd, in->vd, c, in->vn, in->vm);
+            else
+                fprintf(f, "    vfp_setf(%d, -vfp_getf(%d) %c (vfp_getf(%d) * vfp_getf(%d)));\n",
+                        in->vd, in->vd, c, in->vn, in->vm);
+            break;
+        }
+
+        case OP_LDREX: case OP_STREX: {
+            if (in->rn == ARM_NO_REG || in->rn == 15 || in->rt == ARM_NO_REG || in->rt == 15) { ok = 0; break; }
+            /* One guest thread at a time: nothing can touch the location
+             * between the pair, so the store always succeeds. When threads
+             * arrive they will be scheduled cooperatively on this same host
+             * thread, and the property holds as long as no switch happens
+             * between an LDREX and its STREX, which no switch point does. */
+            if (in->op == OP_LDREX) {
+                fprintf(f, "    %s = vita_read%u(%s + %u);\n",
+                        reg_name(in->rt), in->mem_size, reg_name(in->rn), in->imm);
+            } else {
+                if (in->rd == ARM_NO_REG || in->rd == 15) { ok = 0; break; }
+                fprintf(f, "    vita_write%u(%s + %u, (uint%u_t)%s);\n",
+                        in->mem_size, reg_name(in->rn), in->imm, in->mem_size, reg_name(in->rt));
+                fprintf(f, "    %s = 0;\n", reg_name(in->rd));
+            }
+            break;
+        }
+
+        case OP_VMOV_IMM:
+            if (in->vd == ARM_NO_REG) { ok = 0; break; }
+            if (in->vfp_dp) fprintf(f, "    vita_d_set(%d, 0x%016llXull);\n", in->vd, (unsigned long long)in->imm64);
+            else            fprintf(f, "    vfp_setu(%d, 0x%08Xu);\n", in->vd, in->imm);
+            break;
+
+        case OP_VMOV_D_TO_C: case OP_VMOV_C_TO_D: {
+            if (in->vm == ARM_NO_REG || in->rt == ARM_NO_REG || in->rt2 == ARM_NO_REG) { ok = 0; break; }
+            if (in->rt == 15 || in->rt2 == 15) { ok = 0; break; }
+            const char *lo = reg_name(in->rt), *hi = reg_name(in->rt2);
+            if (in->op == OP_VMOV_D_TO_C) {
+                if (in->vfp_dp)
+                    fprintf(f, "    %s = (uint32_t)vita_d_get(%d); %s = (uint32_t)(vita_d_get(%d) >> 32);\n", lo, in->vm, hi, in->vm);
+                else
+                    fprintf(f, "    %s = vfp_getu(%d); %s = vfp_getu(%d);\n", lo, in->vm, hi, in->vm + 1);
+            } else {
+                if (in->vfp_dp)
+                    fprintf(f, "    vita_d_set(%d, ((uint64_t)%s << 32) | %s);\n", in->vm, hi, lo);
+                else
+                    fprintf(f, "    vfp_setu(%d, %s); vfp_setu(%d, %s);\n", in->vm, lo, in->vm + 1, hi);
+            }
+            break;
+        }
+
+        case OP_VCVT_FF:
+            if (in->vd == ARM_NO_REG || in->vm == ARM_NO_REG) { ok = 0; break; }
+            if (in->vfp_dp) fprintf(f, "    vfp_setf(%d, (float)vfp_getd(%d));\n", in->vd, in->vm);
+            else            fprintf(f, "    vfp_setd(%d, (double)vfp_getf(%d));\n", in->vd, in->vm);
+            break;
+
         case OP_CMP: case OP_CMN:
             operand2(o2, sizeof(o2), in);
             fprintf(f, "    { uint32_t _a = %s, _b = %s;\n",
@@ -851,6 +1060,39 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
                   fprintf(f, "    vita_write32(sp + %d, %s);\n", slot * 4, rv); }
                 slot++;
             }
+            break;
+        }
+
+        /* General LDM/STM: n registers, ascending, at base (increment-after)
+         * or at base - 4n (decrement-before); write-back moves the base by
+         * 4n either way. A load that includes the PC is a jump, left as a
+         * trap so it is counted rather than mistranslated. */
+        case OP_LDM: case OP_STM: {
+            if (in->rn == ARM_NO_REG || in->rn == 15) { ok = 0; break; }
+            if (in->op == OP_LDM && (in->reglist & 0x8000)) { ok = 0; trap(f, in, "ldm with pc"); break; }
+            int count = 0;
+            for (int i = 0; i < 16; i++) if (in->reglist & (1u << i)) count++;
+            const char *rn = reg_name(in->rn);
+            /* The base is read once, before any register in the list is
+             * loaded over it, and the loads may include it. For the
+             * decrement-before forms the block starts 4n below the base. */
+            fprintf(f, "    { uint32_t _b = %s;\n", rn);
+            if (!in->mem_add) fprintf(f, "      _b -= %d;\n", count * 4);
+            int slot = 0;
+            for (int i = 0; i < 16; i++) {
+                if (!(in->reglist & (1u << i))) continue;
+                if (in->op == OP_LDM)
+                    fprintf(f, "      %s = vita_read32(_b + %d);\n", reg_name(i), slot * 4);
+                else
+                    fprintf(f, "      vita_write32(_b + %d, %s);\n", slot * 4, reg_name(i));
+                slot++;
+            }
+            /* Write-back lands the base after the block (IA) or at its
+             * start (DB), which is _b + 4n and _b respectively. */
+            if (in->writeback)
+                fprintf(f, "      %s = _b + %d; }\n", rn, in->mem_add ? count * 4 : 0);
+            else
+                fprintf(f, "    }\n");
             break;
         }
 
@@ -1140,16 +1382,24 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
 
         case OP_VCVT_I2F:
             if (in->vd == ARM_NO_REG || in->vm == ARM_NO_REG) { ok = 0; break; }
-            fprintf(f, "    vfp_setf(%d, (float)(%s)vfp_getu(%d));\n",
-                    in->vd, in->vfp_unsigned ? "uint32_t" : "int32_t", in->vm);
+            if (in->vfp_dp)
+                fprintf(f, "    vfp_setd(%d, (double)(%s)vfp_getu(%d));\n",
+                        in->vd, in->vfp_unsigned ? "uint32_t" : "int32_t", in->vm);
+            else
+                fprintf(f, "    vfp_setf(%d, (float)(%s)vfp_getu(%d));\n",
+                        in->vd, in->vfp_unsigned ? "uint32_t" : "int32_t", in->vm);
             break;
 
         case OP_VCVT_F2I:
             if (in->vd == ARM_NO_REG || in->vm == ARM_NO_REG) { ok = 0; break; }
             /* Toward zero, which is what a C cast does — the only rounding
              * mode claimed by the decoder for exactly that reason. */
-            fprintf(f, "    vfp_setu(%d, (uint32_t)(%s)vfp_getf(%d));\n",
-                    in->vd, in->vfp_unsigned ? "uint32_t" : "int32_t", in->vm);
+            /* The cast alone is not enough, though: out of range it is
+             * undefined in C and 0x80000000 on x86, where the architecture
+             * saturates, and NaN converts to zero. */
+            fprintf(f, "    vfp_setu(%d, (uint32_t)vita_%s_to_%s(vfp_get%s(%d)));\n",
+                    in->vd, in->vfp_dp ? "f64" : "f32", in->vfp_unsigned ? "u32" : "s32",
+                    in->vfp_dp ? "d" : "f", in->vm);
             break;
 
         case OP_NOP:
@@ -1424,6 +1674,27 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
         fprintf(f, "\n/* module_start */\n");
         fprintf(f, "const uint32_t vita_module_start_addr = 0x%08Xu;\n", ms);
         fprintf(f, "void vita_module_start(void) { vita_func_%08X(); }\n", ms);
+    }
+
+    /* The thread-local image: where it is, how much of it is initialised,
+     * and how much a thread needs. The thread manager builds every thread's
+     * TLS block from it once the host has passed these to vita_tls_init.
+     * tls_start carries a segment index in its top two bits, as module_start
+     * does. Always written, zeros when the module has none, so a host links
+     * without reading .sce_module_info. */
+    {
+        uint32_t taddr = 0, tfile = 0, tmem = 0;
+        if (mod->have_info && mod->info.tls_memsz) {
+            uint32_t seg = mod->info.tls_start >> 30, off = mod->info.tls_start & 0x3FFFFFFF;
+            uint32_t base = 0;
+            if (seg == 0)                           base = img->seg_vaddr;
+            else if (seg - 1 < img->data_seg_count) base = img->data_segs[seg - 1].vaddr;
+            if (base) { taddr = base + off; tfile = mod->info.tls_filesz; tmem = mod->info.tls_memsz; }
+        }
+        fprintf(f, "\n/* thread-local image */\n");
+        fprintf(f, "const uint32_t vita_module_tls_addr = 0x%08Xu;\n", taddr);
+        fprintf(f, "const uint32_t vita_module_tls_filesz = %uu;\n", tfile);
+        fprintf(f, "const uint32_t vita_module_tls_memsz = %uu;\n", tmem);
     }
 
     free(fs.v);

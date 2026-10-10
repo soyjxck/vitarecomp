@@ -342,6 +342,82 @@ rarely or never on the paths that had been compiled, and each was a
 percentage went from 95.53% to 95.53%. The frame went from wrong to right.
 Which is why `tools/e2e.sh` hashes a frame rather than counting traps.
 
+## Let the title order the work (2026-10-10)
+
+Milestone B was planned as "classify the SIMD spaces, then translate integer
+and single-precision lanes". What was done instead: emit the retail module,
+tally the raw encoding behind every trap, turn the top 160 into mnemonics
+with the vitasdk `objdump` (`tools/trap-census.py` does both steps now:
+it writes the encodings to a binary and joins the disassembly back to the
+counts), and implement families in count order. The first list was
+unambiguous: `vdup.32` by lane 35,000 times, `vmul.f32` 30,000, `vmov.f32
+#imm` 45,000 across its constants, `ldrex/strex` 17,000, then the
+reciprocal estimates and their refinement steps. Nothing in the original
+plan's order would have put `VMOV` immediate or `LDREX` near the top, and
+they were a fifth of the traps. Two passes, 96.23 % to 99.7 %.
+
+The census also found eight decoder bugs that no sample had reached:
+
+1. **`VLDM`/`VSTM` without write-back were never claimed.** The list forms
+   are P=0 U=1 whatever W is, and P=1 U=0 W=1; the decoder took W alone,
+   so `vldmia r0, {d0-d1}` trapped 4,000 times while `vpush`/`vpop`
+   worked. The comment above the test recorded an earlier wrong guess at
+   the same condition.
+
+2. **`LDMIA.W` and `LDMDB.W` were told apart by the wrong sense of the
+   bit.** Bit 7 of the first halfword set is increment-after. The first
+   version of the general `LDM/STM` emitter had it backwards; the unit test
+   written alongside it caught that before any module did.
+
+3. **The two-register miscellaneous group's opcode column is five bits in
+   the architecture's table, `opc2` then `Q`.** Reading the column as the
+   four-bit `opc2` and halving it again put `VMVN` where `VCNT` should be.
+
+4. **`VNMLA` decoded as `VNMUL`, and `VNMUL` as `VMUL`.** The VFP group
+   with opc1 = 01 is the pair of negated accumulates, and the op bit in the
+   multiply group is the negated product. Found by reading the group while
+   adding to it, not by a test: a wrong sign on a multiply-accumulate is the
+   kind of error that survives a frame hash on a program that never uses one.
+
+5. **Scalar `VCVT` between f64 and an integer numbered the integer side as a
+   D register.** The integer side of a conversion is always an S register,
+   whatever the float side is.
+
+6. **The 16-bit `REVSH` was read as `REV`, and `REV16` was not read.** The
+   op field has four values; the decoder excluded one and named the rest.
+
+7. **Float to integer was a C cast.** Undefined out of range, and on x86
+   0x80000000 for every such input, signed or not, where the architecture
+   saturates and sends NaN to zero. Four saturating helpers now, used by
+   the scalar and the lane conversions alike.
+
+8. **Two test anchors would not match because the test file held
+   double-encoded em dashes** from an earlier heredoc. The file looked right
+   in an editor and had the wrong bytes. Fixed in four files; the patch
+   scripts now read and write bytes with the encoding stated.
+
+Two design choices worth stating, since both are deliberate departures from
+the hardware. `LDREX`/`STREX` translate as a plain load and a store that
+always succeeds, because one guest thread runs at a time on this host;
+when threads arrive they will be scheduled cooperatively on that same
+thread, and no switch point falls between an exclusive pair. And
+`VRECPE`/`VRSQRTE` compute `1/x` and `1/sqrt(x)` exactly where the console
+returns eight-bit estimates; compiled code always follows the estimate with
+the Newton-Raphson step, which converges from either, and code that depends
+on the exact estimate bits would be the first thing a differential run
+against Vita3K shows.
+
+The TLS pointer is the one piece of this pass that needed the emulator as
+reference rather than the architecture manual. `mrc p15, 0, rt, c13, c0, 3`
+reads TPIDRURO, 600 sites in the retail title; what it points at is the
+kernel's decision. Vita3K's `thread.cpp` has it: 0x800 bytes of kernel
+slots, which is where `sceKernelGetTLSAddr(key)` hands out its 0x101 words,
+then a copy of the module's thread-local image, and TPIDRURO points at the
+image. The runtime builds one block the same way, from three constants the
+emitter now writes (`vita_module_tls_addr/filesz/memsz`), because a program
+that keeps its reent pointer in a slot and its errno in the image is
+reading one block through two doors.
+
 ## Nine more from the first newlib program (2026-10-10)
 
 `samples/hello` is 179 instructions of its own and some 13,000 of newlib's,

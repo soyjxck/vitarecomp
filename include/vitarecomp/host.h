@@ -35,6 +35,12 @@ void vita_memblock_init(uint32_t base, uint32_t size);
  * to vita_mem_init, and not where the program will look for anything. */
 void vita_kernel_init(uint32_t base, uint32_t size);
 
+/* The module's thread-local image, as the generated C publishes it in
+ * vita_module_tls_addr/filesz/memsz. Every thread's TLS block is built from
+ * it: 0x800 bytes of kernel slots, then a copy of the image, which is what
+ * TPIDRURO points at. Zeros for a module without one. */
+void vita_tls_init(uint32_t image, uint32_t filesz, uint32_t memsz);
+
 typedef struct {
     uint32_t base;         /* guest address of the pixels                 */
     uint32_t pitch;        /* in pixels                                    */
