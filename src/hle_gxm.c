@@ -48,6 +48,8 @@ static uint32_t object(uint32_t size) {
     return at;
 }
 
+static void frame_end(void);
+
 /* --- initialisation and memory ------------------------------------------------- */
 
 static uint32_t g_display_cb, g_display_cb_size, g_display_cb_buf;
@@ -208,6 +210,7 @@ void vita_hle_sceGxmDepthStencilSurfaceSetBackgroundMask(void)    { r0 = 0; }
 /* int sceGxmDisplayQueueAddEntry(SceGxmSyncObject *oldBuffer, SceGxmSyncObject *newBuffer, const void *callbackData) */
 void vita_hle_sceGxmDisplayQueueAddEntry(void) {
     uint32_t data = r2;
+    frame_end();
     if (g_display_cb && g_display_cb_buf && g_display_cb_size) {
         void *dst = vita_mem_ptr(g_display_cb_buf, g_display_cb_size);
         const void *src = vita_mem_ptr(data, g_display_cb_size);
@@ -227,7 +230,26 @@ void vita_hle_sceGxmPadTriggerGpuPaTrace(void) { r0 = 0; }
 
 /* --- scenes and draws: accepted ----------------------------------------------------- */
 
-void vita_hle_sceGxmBeginScene(void) { r0 = 0; }
+/* What a frame asked for. Nothing is drawn, but the shape of a frame is the
+ * first thing to know about a title that has reached its loop: whether it
+ * draws at all, how much, and when that changes. The census is reported at
+ * each flip whose numbers differ from the flip before, so a thousand
+ * identical frames are one line. */
+static struct { uint32_t scenes, draws, indices, instanced, precomputed, programs; } g_frame, g_last;
+static uint32_t g_frames;
+
+static void frame_end(void) {
+    g_frames++;
+    if (memcmp(&g_frame, &g_last, sizeof(g_frame)) != 0) {
+        vita_hle_trace("gxm frame %u: %u scenes, %u draws (%u instanced, %u precomputed), %u indices, %u program changes",
+                       g_frames, g_frame.scenes, g_frame.draws, g_frame.instanced, g_frame.precomputed,
+                       g_frame.indices, g_frame.programs);
+        g_last = g_frame;
+    }
+    memset(&g_frame, 0, sizeof(g_frame));
+}
+
+void vita_hle_sceGxmBeginScene(void) { g_frame.scenes++; r0 = 0; }
 void vita_hle_sceGxmEndScene(void) {
     /* The notifications the title asked for are its own words; the GPU
      * writes them when the scene is done, which is now. */
@@ -242,14 +264,16 @@ void vita_hle_sceGxmEndScene(void) {
 }
 void vita_hle_sceGxmMidSceneFlush(void) { r0 = 0; }
 void vita_hle_sceGxmFinish(void) { }
-void vita_hle_sceGxmDraw(void) { r0 = 0; }
-void vita_hle_sceGxmDrawInstanced(void) { r0 = 0; }
-void vita_hle_sceGxmDrawPrecomputed(void) { r0 = 0; }
+/* int sceGxmDraw(context, primitive type, index format, const void *indices, unsigned int count) */
+void vita_hle_sceGxmDraw(void) { g_frame.draws++; g_frame.indices += arg(4); r0 = 0; }
+/* int sceGxmDrawInstanced(context, primitive type, index format, indices, count, index wrap) */
+void vita_hle_sceGxmDrawInstanced(void) { g_frame.draws++; g_frame.instanced++; g_frame.indices += arg(4); r0 = 0; }
+void vita_hle_sceGxmDrawPrecomputed(void) { g_frame.draws++; g_frame.precomputed++; r0 = 0; }
 void vita_hle_sceGxmSetVisibilityBuffer(void) { r0 = 0; }
 
 /* Render state: void setters, every one of them. */
-void vita_hle_sceGxmSetVertexProgram(void) { }
-void vita_hle_sceGxmSetFragmentProgram(void) { }
+void vita_hle_sceGxmSetVertexProgram(void) { g_frame.programs++; }
+void vita_hle_sceGxmSetFragmentProgram(void) { g_frame.programs++; }
 void vita_hle_sceGxmSetVertexStream(void) { r0 = 0; }
 void vita_hle_sceGxmSetVertexTexture(void) { r0 = 0; }
 void vita_hle_sceGxmSetFragmentTexture(void) { r0 = 0; }

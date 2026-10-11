@@ -151,9 +151,24 @@ What a retail title needs before its first frame, learned by running
 
 Where it stands: the title starts, loads its front end
 (`LOAD LEVEL( /frontend.bsp )`, `LEVEL START` in its own log) and runs its
-frame loop against the null GPU, a flip every second vertical blank. What
-it reaches next is what is not there yet: SceMp4 and the video decoder for
-its opening movie, and a `sceGxm` that draws.
+frame loop against the null GPU, a flip every second vertical blank. The
+null driver counts what each frame asks for and reports the count when it
+changes, and the counts are the front end's sequence:
+
+| Stage | A frame asks for (indices: of its immediate draws) |
+|---|---|
+| Loading screen, while the front end loads | 7 scenes, 19 draws, 66 indices |
+| Front end | 8 scenes, 282 draws (255 of them precomputed), 1,290 indices |
+| The same, some seconds on | 8 scenes, 270 draws, 90 indices |
+| The opening movie's screen | 1 scene, 2 draws, 12 indices |
+
+The stages begin at different frames from run to run with the same input,
+so the title times them by the clock and not by frames. It stays on the
+last one: the movie is opened through SceMp4, which is not implemented, and
+neither a failed open nor a button press moves it on. What comes next is
+therefore two things that are not there yet: the movie path (SceMp4's
+demuxer, the H.264 and AAC decoders behind `sceAvcdec` and `sceAudiodec`),
+and a `sceGxm` that draws, which is milestone D and needs neither.
 
 1. Accept FAGDec-decrypted `eboot.bin` and `*.suprx` (plain SCE ELF, the
    Vita3K input format) in `armrecomp info/extract`, in addition to fself.
