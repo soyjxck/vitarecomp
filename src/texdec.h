@@ -27,4 +27,13 @@ void tex_decode_bc3(const uint8_t block[16], uint32_t out[16]);
 void tex_decode_bc4(const uint8_t block[8], uint32_t out[16]);
 void tex_decode_bc5(const uint8_t block[16], uint32_t out[16]);
 
+/* PVRTC, of either generation (`version` 1 or 2) and either rate (`bits` 4
+ * or 2 a texel). `words` is a whole level: `nx` by `ny` 64-bit words in
+ * Morton order, each owning a block four texels high and four wide, or
+ * eight at two bits. The texels of block (bx, by) come out row by row. A
+ * block cannot be decoded alone: its colours are interpolated from the
+ * words around it, and the edges of the level are each other's neighbours. */
+void tex_decode_pvrtc(const uint8_t *words, uint32_t nx, uint32_t ny, uint32_t bx, uint32_t by,
+                      int version, int bits, uint32_t out[32]);
+
 #endif /* VITARECOMP_TEXDEC_H */

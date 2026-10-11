@@ -599,6 +599,15 @@ And the frames themselves: `vita_host --window` shows them as they are
 flipped, `--dump out.ppm@N` writes one, `--dump-dir DIR@N` one every N
 vertical blanks.
 
+None of that compares from one run to the next while the title reads the
+host's clock: its animations are at a different place in every run, and it
+moves between screens after so many seconds however few frames it drew in
+them. `vita_host --virtual-clock` makes time a count of what the program
+did (`src/clock.c`): a sixtieth of a second at each vertical blank, the
+length of a wait when every thread is waiting, a microsecond for each
+reading. Two runs then write the same frames, byte for byte, and a change
+to the renderer can be judged by a hash.
+
 The first scrambled picture went through all four in that order. The
 census said every program ran. The textures were right. The geometry
 buffer, dumped as the texture the light pass reads, was right. The draw

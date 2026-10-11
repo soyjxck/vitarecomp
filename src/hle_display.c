@@ -6,6 +6,7 @@
  * in 64-pixel steps — so a program that passes here passes there.
  */
 
+#include "clock.h"
 #include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
 #include "sched.h"
@@ -62,6 +63,7 @@ void vita_hle_sceDisplaySetFrameBuf(void) {
 /* int sceDisplayWaitVblankStart(void): the frame ends, and the other
  * threads get their turn before the next one starts. */
 void vita_hle_sceDisplayWaitVblankStart(void) {
+    vita_clock_vblank();
     vita_host_vblank();
     vita_sched_yield();
     r0 = 0;

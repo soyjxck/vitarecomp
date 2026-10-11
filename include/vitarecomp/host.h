@@ -71,6 +71,12 @@ int vita_display_current(vita_framebuf *out);
 /* sceDisplaySetFrameBuf calls so far. */
 uint32_t vita_display_flips(void);
 
+/* Time that moves only with what the program does, so that a run repeats
+ * exactly: a sixtieth of a second at each vertical blank, the length of a
+ * wait when every thread waits. Called before the program starts; without
+ * it the clock is the host's. */
+void vita_clock_virtual(void);
+
 /* --- bring-up aids ------------------------------------------------------------ */
 
 /* Names for addresses, from an `nm -n` listing (symbols.c). Optional: a

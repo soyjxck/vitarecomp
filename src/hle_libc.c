@@ -11,6 +11,7 @@
  * See hle.h for the calling convention and the link-order requirement.
  */
 
+#include "clock.h"
 #include "vitarecomp/dispatch.h"
 #include "vitarecomp/hle.h"
 #include "vitarecomp/host.h"
@@ -504,7 +505,7 @@ void vita_hle_rand(void) {
 
 /* time_t time(time_t *t): seconds since 1970, 32 bits on this platform */
 void vita_hle_time(void) {
-    uint32_t now = (uint32_t)time(NULL);
+    uint32_t now = (uint32_t)(vita_clock_unix_us() / 1000000ull);
     if (r0 && vita_mem_ptr(r0, 4)) vita_write32(r0, now);
     r0 = now;
 }

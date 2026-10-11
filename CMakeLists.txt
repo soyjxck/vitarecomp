@@ -62,9 +62,11 @@ add_library(vitarecomp STATIC
     src/hle_scanf.c
     src/hle_rtc.c
     src/sched.c
+    src/clock.c
     src/profile.c
     src/raster.c
     src/texdec.c
+    src/pvrtc.c
     src/usse.c
     src/gxp.c
     src/pixfmt.c

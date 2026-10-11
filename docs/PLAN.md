@@ -228,7 +228,7 @@ interpretation, so that the first picture is already the title's own:
 | Programs | `src/gxp.c` | the GXP container: where every input of a program arrives, where its outputs leave |
 | Bytecode | `src/usse.c`, `src/usse_fields.h` | the GPU's instruction set, decoded, printed and run |
 | Triangles | `src/raster.c` | clipping, the fill rule, perspective, derivatives |
-| Textures | `src/gxm_tex.c`, `src/texdec.c` | the control words, the layouts, the block formats, filtering |
+| Textures | `src/gxm_tex.c`, `src/texdec.c`, `src/pvrtc.c` | the control words, the layouts, the block formats and both generations of PVRTC, filtering |
 | Pixels | `src/pixfmt.c` | every texel and surface format, between bytes and colours |
 | A draw | `src/gxm_draw.c` | vertex fetch to stored pixel: the tests, the fragment program, the blend |
 
@@ -240,12 +240,10 @@ frame's draws, the textures they sampled and the programs they ran.
 
 Not there yet, in the order the title will want them:
 
-1. PVRTC textures, both generations: the title's normal maps. They read
-   as one flat colour for now.
-2. Speed. One pixel at a time through an interpreter is a second a
+1. Speed. One pixel at a time through an interpreter is a second a
    frame. The bytecode is already decoded once per program; what is left
    is to stop interpreting it per pixel (milestone E).
-3. Lines and points, depth bias, the mask-update program, multisampled
+2. Lines and points, depth bias, the mask-update program, multisampled
    targets, the YUV textures a movie arrives in, the transfer calls.
    Each is counted or named where it is skipped, none is silent.
 

@@ -59,6 +59,12 @@ int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
     case 0x89000000u: t->kind = GXM_TEX_BC4; t->unit_bytes = 8;  pixfmt_texture(0x00000000u | swizzle, &t->pf); break;
     case 0x8A000000u:
     case 0x8B000000u: t->kind = GXM_TEX_BC5; t->unit_bytes = 16; pixfmt_texture(0x07000000u | swizzle, &t->pf); break;
+    case 0x80000000u: case 0x81000000u: case 0x82000000u: case 0x83000000u:
+        t->kind = GXM_TEX_PVRTC; t->unit_bytes = 8;
+        t->pvrtc_version = (t->format & 0x02000000u) ? 2 : 1;
+        t->pvrtc_bits = (t->format & 0x01000000u) ? 4 : 2;
+        pixfmt_texture(0x0C000000u | swizzle, &t->pf);
+        break;
     case 0x94000000u: t->kind = GXM_TEX_PALETTE4; t->unit_bytes = 1; pixfmt_texture(0x0C000000u | swizzle, &t->pf); break;
     case 0x95000000u: t->kind = GXM_TEX_PALETTE8; t->unit_bytes = 1; pixfmt_texture(0x0C000000u | swizzle, &t->pf); break;
     default:
@@ -67,6 +73,7 @@ int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
         break;
     }
     if (t->kind >= GXM_TEX_BC1 && t->kind <= GXM_TEX_BC5) t->unit_w = t->unit_h = 4;
+    if (t->kind == GXM_TEX_PVRTC) { t->unit_w = t->pvrtc_bits == 2 ? 8 : 4; t->unit_h = 4; }
 
     /* no more levels than the shorter side can be halved */
     uint32_t shorter = t->width < t->height ? t->width : t->height, most = 1;
@@ -86,6 +93,12 @@ int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
         uint32_t lw = at_least_1(layout_w >> n), lh = at_least_1(layout_h >> n);
         uint32_t size = align_up(lw, aw) * align_up(lh, ah) / unit_texels * t->unit_bytes;
         if (t->kind == GXM_TEX_PALETTE4) size = (size + 1) / 2;
+        /* a PVRTC level is a grid of words, never fewer than two each way in the first generation */
+        uint32_t least = t->pvrtc_version == 1 ? 2 : 1;
+        uint32_t gx = (lw + t->unit_w - 1) / t->unit_w, gy = (lh + t->unit_h - 1) / t->unit_h;
+        if (gx < least) gx = least;
+        if (gy < least) gy = least;
+        if (t->kind == GXM_TEX_PVRTC) size = gx * gy * 8;
         if (n < t->levels) {
             t->level_w[n] = at_least_1(t->width >> n);
             t->level_h[n] = at_least_1(t->height >> n);
@@ -93,6 +106,7 @@ int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
             if (rows)       { t->store_w[n] = align_up(t->level_w[n], 8) / t->unit_w; t->store_h[n] = align_up(t->level_h[n], t->unit_h) / t->unit_h; }
             else if (tiles) { t->store_w[n] = align_up(t->level_w[n], 32) / t->unit_w; t->store_h[n] = align_up(t->level_h[n], 32) / t->unit_h; }
             else            { t->store_w[n] = at_least_1(lw / t->unit_w); t->store_h[n] = at_least_1(lh / t->unit_h); }
+            if (t->kind == GXM_TEX_PVRTC) { t->store_w[n] = gx; t->store_h[n] = gy; }
             offset += size;
         }
         /* a cube's faces are a whole chain apart, down to a side of one */
@@ -132,6 +146,21 @@ void gxm_tex_texel(gxm_tex *t, unsigned face, unsigned level, int x, int y, floa
 
     uint32_t ux = (uint32_t)x / t->unit_w, uy = (uint32_t)y / t->unit_h, index;
     uint64_t at = (uint64_t)face * t->face_bytes + t->level_at[level];
+    if (t->kind == GXM_TEX_PVRTC) {
+        /* a block is decoded from its level as a whole, which must all be there */
+        uint32_t nx = t->store_w[level], ny = t->store_h[level], texel;
+        uint64_t word = at + 8ull * tex_morton_index(ux, uy, nx, ny);
+        if (at + 8ull * nx * ny > t->avail) return;
+        uint32_t slot = (uint32_t)((word / 8) * 2654435761u) >> 26;
+        if (t->cache_key[slot] != (uint32_t)word) {
+            tex_decode_pvrtc(t->base + at, nx, ny, ux, uy, t->pvrtc_version, t->pvrtc_bits, t->cache[slot]);
+            t->cache_key[slot] = (uint32_t)word;
+        }
+        texel = t->cache[slot][((uint32_t)y & 3) * t->unit_w + ((uint32_t)x & (t->unit_w - 1u))];
+        pixfmt_decode(&t->pf, (const uint8_t *)&texel, rgba);
+        if (t->gamma) for (int i = 0; i < 3; i++) rgba[i] = pix_srgb_to_linear(rgba[i]);
+        return;
+    }
     switch (t->type) {
     case GXM_TEX_LINEAR:
         index = uy * t->store_w[level] + ux;

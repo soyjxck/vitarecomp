@@ -69,7 +69,7 @@ if(NOT MSVC)
 endif()
 add_test(NAME raster COMMAND test_raster)
 
-add_executable(test_texdec test_texdec.c ${CMAKE_SOURCE_DIR}/src/texdec.c)
+add_executable(test_texdec test_texdec.c ${CMAKE_SOURCE_DIR}/src/texdec.c ${CMAKE_SOURCE_DIR}/src/pvrtc.c)
 target_compile_options(test_texdec PRIVATE -UNDEBUG)
 add_test(NAME texdec COMMAND test_texdec)
 
@@ -90,7 +90,7 @@ endif()
 add_test(NAME pixfmt COMMAND test_pixfmt)
 
 add_executable(test_gxm_tex test_gxm_tex.c ${CMAKE_SOURCE_DIR}/src/gxm_tex.c ${CMAKE_SOURCE_DIR}/src/pixfmt.c
-               ${CMAKE_SOURCE_DIR}/src/texdec.c)
+               ${CMAKE_SOURCE_DIR}/src/texdec.c ${CMAKE_SOURCE_DIR}/src/pvrtc.c)
 target_include_directories(test_gxm_tex PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_options(test_gxm_tex PRIVATE -UNDEBUG)
 if(NOT MSVC)

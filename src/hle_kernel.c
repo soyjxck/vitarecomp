@@ -4,6 +4,7 @@
  * here as the milestone needs them (docs/PLAN.md, milestone A).
  */
 
+#include "clock.h"
 #include "vitarecomp/hle.h"
 #include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
@@ -17,28 +18,20 @@ void vita_hle_sceKernelExitProcess(void) {
 
 /* --- the process clock ---------------------------------------------------------
  *
- * Microseconds since the process started, from the host's clock. The host's
- * and not the frame counter, because a program that spins on this clock
- * until it moves must see it move. */
-
-static uint64_t now_us(void) {
-    static int started;
-    static struct timespec t0;
-    struct timespec t;
-    timespec_get(&t, TIME_UTC);
-    if (!started) { t0 = t; started = 1; }
-    return (uint64_t)(t.tv_sec - t0.tv_sec) * 1000000ull + (uint64_t)(t.tv_nsec - t0.tv_nsec) / 1000ull;
-}
+ * Microseconds since the process started, from the runtime's clock
+ * (clock.h): the host's unless the host asked for a virtual one, and never
+ * the frame counter alone, because a program that spins on this clock until
+ * it moves must see it move. */
 
 /* SceUInt64 sceKernelGetProcessTimeWide(void): a 64-bit result, in r0:r1 */
 void vita_hle_sceKernelGetProcessTimeWide(void) {
-    uint64_t t = now_us();
+    uint64_t t = vita_clock_us();
     r0 = (uint32_t)t;
     r1 = (uint32_t)(t >> 32);
 }
 
 /* SceUInt32 sceKernelGetProcessTimeLow(void) */
-void vita_hle_sceKernelGetProcessTimeLow(void) { r0 = (uint32_t)now_us(); }
+void vita_hle_sceKernelGetProcessTimeLow(void) { r0 = (uint32_t)vita_clock_us(); }
 
 /* int sceKernelPowerTick(int type): keeps the console awake; nothing to keep. */
 void vita_hle_sceKernelPowerTick(void) { r0 = 0; }

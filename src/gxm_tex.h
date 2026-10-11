@@ -27,7 +27,7 @@ enum {
 
 /* How the texels of a level are stored. */
 enum { GXM_TEX_PLAIN = 0, GXM_TEX_BC1, GXM_TEX_BC2, GXM_TEX_BC3, GXM_TEX_BC4, GXM_TEX_BC5,
-       GXM_TEX_PALETTE4, GXM_TEX_PALETTE8, GXM_TEX_UNKNOWN };
+       GXM_TEX_PALETTE4, GXM_TEX_PALETTE8, GXM_TEX_PVRTC, GXM_TEX_UNKNOWN };
 
 typedef struct {
     /* read from the control words */
@@ -44,6 +44,7 @@ typedef struct {
     uint8_t  kind;                          /* GXM_TEX_PLAIN .. */
     uint8_t  unit_w, unit_h, unit_bytes;    /* a unit is a texel, or a compressed block */
     uint8_t  no_chain;                      /* declared without a mip chain */
+    uint8_t  pvrtc_version, pvrtc_bits;     /* which PVRTC: generation 1 or 2, 2 or 4 bits a texel */
     pixfmt   pf;                            /* a texel; for blocks and palettes, what they decode to */
     uint32_t level_w[GXM_TEX_LEVELS], level_h[GXM_TEX_LEVELS];      /* texels */
     uint32_t store_w[GXM_TEX_LEVELS], store_h[GXM_TEX_LEVELS];      /* units, as laid out */
@@ -58,7 +59,7 @@ typedef struct {
 
     /* the compressed block decoded last, per slot */
     uint32_t cache_key[64];
-    uint32_t cache[64][16];
+    uint32_t cache[64][32];
 } gxm_tex;
 
 /* Read the control words. Returns 0 when they do not describe a texture

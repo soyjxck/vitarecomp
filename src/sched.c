@@ -6,6 +6,7 @@
  * touching the register globals or guest memory.
  */
 
+#include "clock.h"
 #include "sched.h"
 #include "hle_sysmem.h"
 #include "vitarecomp/cpu.h"
@@ -63,11 +64,7 @@ static int      g_init;
 
 int32_t vita_slice = VITA_SLICE;
 
-static uint64_t now_us(void) {
-    struct timespec t;
-    timespec_get(&t, TIME_UTC);
-    return (uint64_t)t.tv_sec * 1000000ull + (uint64_t)t.tv_nsec / 1000ull;
-}
+static uint64_t now_us(void) { return vita_clock_us(); }
 
 static void save_regs(vthread *t) {
     uint32_t *rr = t->regs.r;
@@ -187,9 +184,8 @@ static vthread *pick_next(vthread *cur) {
         uint64_t now = now_us();
         if (earliest > now) {
             uint64_t d = earliest - now;
-            struct timespec ts = { (time_t)(d / 1000000ull), (long)((d % 1000000ull) * 1000ull) };
             mtx_unlock(&g_mtx);
-            thrd_sleep(&ts, NULL);
+            vita_clock_wait(d);
             mtx_lock(&g_mtx);
         }
     }
@@ -447,10 +443,7 @@ void vita_spin_wait(uint32_t addr) {
     mtx_unlock(&g_mtx);
     uint64_t d = earliest > now ? earliest - now : 0;
     if (d > 1000) d = 1000;
-    if (d) {
-        struct timespec ts = { 0, (long)(d * 1000ull) };
-        thrd_sleep(&ts, NULL);
-    }
+    if (d) vita_clock_wait(d);
 }
 
 void vita_sched_delay(uint32_t us) {

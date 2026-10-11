@@ -90,11 +90,97 @@ static void test_bc2_bc3(void) {
     printf("  bc2, bc3, bc4, bc5             ok\n");
 }
 
+/* PVRTC. A level whose words are all the same has nothing to interpolate, so
+ * its texels can be worked out by hand; and words from a fixed generator,
+ * decoded whole, must give the image the format's definition gives, held
+ * here as a hash of it. */
+static uint32_t pvrtc_image_hash(int version, int bits, uint32_t w, uint32_t h, const uint8_t *words, uint32_t nx, uint32_t ny) {
+    static uint8_t image[64 * 64 * 4];
+    uint32_t bw = bits == 2 ? 8 : 4, block[32], hash = 2166136261u;
+    for (uint32_t by = 0; by < ny; by++)
+        for (uint32_t bx = 0; bx < nx; bx++) {
+            tex_decode_pvrtc(words, nx, ny, bx, by, version, bits, block);
+            for (uint32_t j = 0; j < 4; j++)
+                for (uint32_t i = 0; i < bw; i++) {
+                    uint32_t x = bx * bw + i, y = by * 4 + j;
+                    if (x < w && y < h) memcpy(&image[(y * w + x) * 4], &block[j * bw + i], 4);
+                }
+        }
+    for (uint32_t i = 0; i < w * h * 4; i++) hash = (hash ^ image[i]) * 16777619u;
+    return hash;
+}
+
+static void test_pvrtc(void) {
+    static uint8_t words[64 * 8];
+    uint32_t px[32];
+
+    /* first generation, four bits: opaque red and opaque blue; modulation
+     * all first colour, then all second, then the two steps between */
+    static const uint8_t red_blue[4] = { 0x00, 0xFC, 0x1F, 0x80 };
+    for (int i = 0; i < 4; i++) { memset(words + 8 * i, 0, 4); memcpy(words + 8 * i + 4, red_blue, 4); }
+    tex_decode_pvrtc(words, 2, 2, 0, 0, 1, 4, px);
+    assert(px[0] == 0xFF0000FFu && px[15] == 0xFF0000FFu);
+    for (int i = 0; i < 4; i++) memset(words + 8 * i, 0xFF, 4);
+    tex_decode_pvrtc(words, 2, 2, 1, 1, 1, 4, px);
+    assert(px[0] == 0xFFFF0000u && px[15] == 0xFFFF0000u);
+    for (int i = 0; i < 4; i++) { memset(words + 8 * i, 0, 4); words[8 * i] = 0x09; }   /* texel 0: three eighths, texel 1: five */
+    tex_decode_pvrtc(words, 2, 2, 0, 0, 1, 4, px);
+    assert(px[0] == 0xFF5F009Fu && px[1] == 0xFF9F005Fu && px[2] == 0xFF0000FFu);
+
+    /* with the modulation flag set, the third code is a hole: no alpha in
+     * the first generation, nothing at all in the second */
+    for (int i = 0; i < 4; i++) { words[8 * i] = 0x02; words[8 * i + 4] |= 1; }
+    tex_decode_pvrtc(words, 2, 2, 0, 0, 1, 4, px);
+    assert(px[0] == 0x007F007Fu);
+    for (int i = 0; i < 4; i++) words[8 * i + 5] &= 0x7F;        /* the second generation's hard flag off */
+    tex_decode_pvrtc(words, 2, 2, 0, 0, 2, 4, px);
+    assert(px[0] == 0x00000000u);
+
+    /* second generation, translucent colours: its second colour's alpha has
+     * a low bit the first generation's has not */
+    static const uint8_t word[8] = { 0xDA, 0x7E, 0x4F, 0xD2, 0x8E, 0x18, 0x7F, 0x28 };
+    for (int i = 0; i < 4; i++) memcpy(words + 8 * i, word, 8);
+    tex_decode_pvrtc(words, 2, 2, 0, 0, 2, 4, px);
+    assert(px[0] == 0x41FF7C8Cu);                               /* five eighths of the way from (140,140,255,34) to (140,115,255,85) */
+
+    /* two bits: one bit a texel picks a colour outright */
+    for (int i = 0; i < 4; i++) { memset(words + 8 * i, 0, 4); words[8 * i] = 0x02; memcpy(words + 8 * i + 4, red_blue, 4); }
+    tex_decode_pvrtc(words, 2, 2, 0, 0, 1, 2, px);
+    assert(px[0] == 0xFF0000FFu && px[1] == 0xFFFF0000u && px[8] == 0xFF0000FFu);
+
+    static const struct { int version, bits; uint32_t w, h, hash; } CASES[] = {
+        { 1, 4, 32, 32, 0xCF63DBF5u }, { 1, 4, 64, 16, 0xA89F0504u }, { 1, 4, 16, 64, 0x30E391A7u },
+        { 1, 2, 32, 32, 0xF35CE18Bu }, { 1, 2, 64, 16, 0x9DDDB0D2u }, { 1, 2, 16, 64, 0x7C25D0CDu },
+        { 2, 4, 32, 32, 0x6171EB5Cu }, { 2, 4, 64, 16, 0x949188F1u }, { 2, 4, 16, 64, 0x4ADE8CEFu },
+        { 2, 2, 32, 32, 0x96871FFFu }, { 2, 2, 64, 16, 0x6B3E6C4Cu }, { 2, 2, 16, 64, 0x99D3EDB0u },
+    };
+    for (size_t c = 0; c < sizeof(CASES) / sizeof(CASES[0]); c++) {
+        uint32_t bw = CASES[c].bits == 2 ? 8 : 4, least = CASES[c].version == 1 ? 2 : 1;
+        uint32_t nx = CASES[c].w / bw, ny = CASES[c].h / 4;
+        if (nx < least) nx = least;
+        if (ny < least) ny = least;
+        uint32_t x = (uint32_t)(CASES[c].version * 1000 + CASES[c].bits * 100) + CASES[c].w;
+        assert(nx * ny * 8 <= sizeof(words));
+        for (uint32_t i = 0; i < nx * ny * 8; i++) {
+            x = x * 1664525u + 1013904223u;
+            words[i] = (uint8_t)(x >> 24);
+        }
+        uint32_t got = pvrtc_image_hash(CASES[c].version, CASES[c].bits, CASES[c].w, CASES[c].h, words, nx, ny);
+        if (got != CASES[c].hash) {
+            fprintf(stderr, "pvrtc generation %d, %d bits, %ux%u: 0x%08X, wanted 0x%08X\n",
+                    CASES[c].version, CASES[c].bits, CASES[c].w, CASES[c].h, got, CASES[c].hash);
+            assert(0);
+        }
+    }
+    printf("  pvrtc, both generations        ok\n");
+}
+
 int main(void) {
     printf("texdec:\n");
     test_morton();
     test_bc1();
     test_bc2_bc3();
+    test_pvrtc();
     printf("all texdec tests passed\n");
     return 0;
 }

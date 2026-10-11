@@ -11,6 +11,8 @@
  *
  *   --frames N      stop after N vertical blanks (0: run until the program exits)
  *   --dump-dir D[@N] write it into directory D every N vblanks (60 if not given)
+ *   --virtual-clock  time passes a sixtieth of a second per vblank, not by the
+ *                   host's clock: the same run every time, however long it takes
  *   --dump P[@F]    write the framebuffer as a binary PPM at vblank F, or at
  *                   exit when no frame is given
  *   --press B@F-T   hold button B (START, CROSS, UP, ...) from vblank F to T
@@ -204,7 +206,7 @@ void vita_host_exit(int status) {
 
 static int usage(void) {
     fputs("usage: vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--dump-dir DIR[@EVERY]]\n"
-          "                 [--press BUTTON@FROM[-TO]]...\n"
+          "                 [--press BUTTON@FROM[-TO]]... [--virtual-clock]\n"
           "                 [--syms module.sym] [--trace-fns] [--window]\n"
           "  --window       show each frame in a window at sixty a second; arrows, Z X A S for\n"
           "                 cross circle square triangle, Enter for START, Backspace for SELECT,\n"
@@ -250,6 +252,8 @@ int main(int argc, char **argv) {
             vita_io_mount(spec, eq + 1);
         } else if (strcmp(argv[i], "--trace-fns") == 0) {
             vita_trace_fns = 1;
+        } else if (strcmp(argv[i], "--virtual-clock") == 0) {
+            vita_clock_virtual();
         } else if (strcmp(argv[i], "--window") == 0) {
             g.window = 1;
         } else if (strcmp(argv[i], "--trace-insns") == 0 && i + 1 < argc) {
