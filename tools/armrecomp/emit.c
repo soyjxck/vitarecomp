@@ -323,14 +323,15 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
                 fb_label(b, in.target);
                 if (sp_ < (int)(sizeof(stack) / sizeof(stack[0])))
                     stack[sp_++] = in.target;
-                if (in.conditional && nguard < 256 && b->n > walk0) {
+                if (nguard < 256 && b->n > walk0) {
                     /* The instructions of this walk before the branch,
                      * which is already pushed. */
                     uint32_t np = b->n - 1 - walk0;
                     const arm_insn *pv = b->v + walk0;
                     if (np > 16) { pv += np - 16; np = 16; }
                     int8_t greg; uint32_t gmax;
-                    if (arm_table_guard(pv, np, &in, &greg, &gmax)) {
+                    if (in.conditional ? arm_table_guard(pv, np, &in, &greg, &gmax)
+                                       : arm_table_guard_jump(pv, np, &in, &greg, &gmax)) {
                         guard[nguard].addr = in.target;
                         guard[nguard].reg  = greg;
                         guard[nguard].max  = gmax;

@@ -204,7 +204,11 @@ with the compare that guarded it. A fifth, from a tree of compares over a
 dense range: the branch to the table is taken on "greater" and bounds
 nothing from above (`cmp r0, #103; bgt elsewhere; cmp r0, #62; bgt
 table`), and the seed is then the earlier compare of the same register,
-whose own branch had already sent everything larger elsewhere. Without a
+whose own branch had already sent everything larger elsewhere. And a
+sixth, from a state machine with its table at the top of a loop: the next
+state is checked at the bottom and the table reached by a plain jump
+(`cmp r0, #31; bhi out; b table`), so an unconditional branch carries to
+its target the bound the flow before it had settled. Without a
 count the table is a computed transfer like any other, and traps by
 address; with one that is too small, the cases beyond it trap by address
 too, so a wrong reading is loud.
@@ -600,12 +604,13 @@ a title's patch sits over its data on the console.
 
 ### The contract
 
-`include/vitarecomp/host.h` is the whole interface. The HLE calls four
+`include/vitarecomp/host.h` is the whole interface. The HLE calls five
 functions a host supplies:
 
 ```c
 void     vita_host_vblank(void);    /* sceDisplayWaitVblankStart: present, poll, pace */
 uint32_t vita_host_buttons(void);   /* the VITA_CTRL_* mask held right now            */
+void     vita_host_sticks(uint8_t xy[4]);   /* the two sticks, 128 at rest            */
 int      vita_host_touch(int *x, int *y);   /* a finger on the front panel, and where */
 void     vita_host_exit(int);       /* sceKernelExitProcess: never returns             */
 ```
@@ -632,19 +637,22 @@ vita_host fbdemo.elf --frames 240 --press RIGHT@10-70 --press DOWN@30-60 \
 ```
 
 Input is a list of buttons held between two vertical blanks, and of
-touches the same way (`--touch 480,340@900-910`: a finger at that pixel of
-the display for ten vertical blanks); a frame is
+touches and stick positions the same way (`--touch 480,340@900-910`: a
+finger at that pixel of the display for ten vertical blanks;
+`--stick L,0,-100@950-1100`: the left stick pushed forward); a frame is
 written at the vblank asked for, or at exit. That makes a run reproducible
 to the byte, which is what lets `tools/e2e.sh` compare a SHA-256 of the frame
 and lets CI prove the chain on both platforms without a display. The sample's
 frame — a gradient whose blue channel is the frame counter, and a square
 where sixty frames of RIGHT and thirty of DOWN put it — is the fixture.
 
-`--window` is the same four functions with a window behind them
+`--window` is the same five functions with a window behind them
 (`host/window_win32.c`, GDI and nothing else): the frame shown at each
-vertical blank, the keyboard added to the scripted buttons, and the left
-mouse button as a finger, wherever on the picture it is held. The core
-keeps its no-dependency promise.
+vertical blank, the keyboard added to the scripted buttons and sticks
+(arrows for the pad, W A S D and I J K L for the sticks, X C Z V for
+cross, circle, square and triangle, Q and E for the shoulders, Enter for
+START, Shift for SELECT), and the left mouse button as a finger, wherever
+on the picture it is held. The core keeps its no-dependency promise.
 
 ### Bring-up: seeing what the program did
 

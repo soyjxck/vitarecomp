@@ -1105,6 +1105,33 @@ static void test_exclusive(void) {
         assert(arm_table_count(win + 1, 3, &tb) == 0);              /* not seeded: only the lower bound */
     }
 
+    /* A table at the top of a loop, jumped back to once the next state has
+     * been checked: ldrsb.w r0, [r6] / mov r7, r9 / cmp r0, #31 / bhi out /
+     * b.w table. The jump takes the bound with it, 32 states. And with the
+     * range checked in two steps before a jump, cmp r4, #19 / bgt far /
+     * cmp r4, #0 / blt.w out / b table: the top is the first compare's. */
+    {
+        arm_insn prev[5], br;
+        int8_t reg = -1; uint32_t max = 0;
+        put16(0, 0xF996); put16(2, 0x0000); prev[0] = dec(ARM_T32, BASE);
+        put16(0, 0x464F); prev[1] = dec(ARM_T32, BASE);
+        put16(0, 0x281F); prev[2] = dec(ARM_T32, BASE);
+        put16(0, 0xD8F6); prev[3] = dec(ARM_T32, BASE);
+        put16(0, 0xF7FE); put16(2, 0xBFF9); br = dec(ARM_T32, BASE);
+        assert(br.cls == A_BRANCH && !br.conditional && br.has_target);
+        assert(arm_table_guard_jump(prev, 4, &br, &reg, &max) && reg == 0 && max == 31);
+        assert(!arm_table_guard_jump(prev, 3, &br, &reg, &max));       /* compared, but nothing sent away yet */
+        assert(!arm_table_guard(prev, 4, &br, &reg, &max));            /* and this is not the conditional kind */
+
+        put16(0, 0x2C13); prev[0] = dec(ARM_T32, BASE);
+        put16(0, 0xDC03); prev[1] = dec(ARM_T32, BASE);
+        put16(0, 0x2C00); prev[2] = dec(ARM_T32, BASE);
+        put16(0, 0xF2C0); put16(2, 0x8324); prev[3] = dec(ARM_T32, BASE);
+        put16(0, 0xE006); br = dec(ARM_T32, BASE);
+        assert(prev[3].cond == ARM_COND_LT && !br.conditional);
+        assert(arm_table_guard_jump(prev, 4, &br, &reg, &max) && reg == 4 && max == 19);
+    }
+
     /* The index moved between registers and offset on the way.
      * cmp r7, #13 / bgt / adds r0, r7, #1 / tbh [pc, r0]: 15.
      * adds r5, r1, #0 / cmp r1, #4 / bhi / tbh [pc, r5]: the compare comes

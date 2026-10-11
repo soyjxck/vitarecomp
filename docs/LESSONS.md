@@ -940,3 +940,14 @@ pass that wrote the depth, 1,984 in the pass that tested against it.
     is the title's to pack as it likes; a call may write the bytes the
     SDK gives the structure and no others, and there is now a test that
     looks at the bytes either side.
+
+13. **The first playable level began at a jump table.** Forty-three
+    seconds of cinematic later the title loaded the level a player moves
+    in, and its first frame took a computed transfer to nowhere: one of
+    the three tables still left unsized. All three were of one shape, a
+    state machine's. The table sits at the top of a loop; the next state
+    is range-checked at the bottom, `cmp r0, #31; bhi out`, and the
+    table is reached by an unconditional jump back up. The rule for
+    guards that branch to their table only looked at conditional
+    branches. An unconditional one now carries what the flow before it
+    had settled, and seven more tables are followed.

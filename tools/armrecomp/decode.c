@@ -2370,6 +2370,27 @@ int arm_table_guard(const arm_insn *prev, uint32_t nprev, const arm_insn *br,
     return 0;
 }
 
+int arm_table_guard_jump(const arm_insn *prev, uint32_t nprev, const arm_insn *br,
+                         int8_t *reg, uint32_t *max) {
+    if (br->cls != A_BRANCH || br->conditional || !br->has_target) return 0;
+    uint32_t seen = 0;
+    for (uint32_t i = nprev; i-- > 0 && seen < 8; seen++) {
+        const arm_insn *p = &prev[i];
+        if (p->op == OP_CMP) {
+            /* the register last compared before the branch: the one a state
+             * machine is about to index with, if it is going to a table */
+            int8_t r = p->rn != ARM_NO_REG ? p->rn : p->rd;
+            if (r == ARM_NO_REG) return 0;
+            for (uint32_t j = i + 1; j < nprev; j++)
+                if (writes_reg(&prev[j], 0) == r || writes_reg(&prev[j], 1) == r || writes_reg(&prev[j], 2) == r) return 0;
+            *reg = r;
+            return bound_before(prev, nprev, r, max);
+        }
+        if (p->cls == A_CALL) return 0;
+    }
+    return 0;
+}
+
 void arm_table_seed(arm_insn *out, int8_t reg, uint32_t max) {
     memset(out, 0, sizeof(*out));
     out->op = OP_CMP;

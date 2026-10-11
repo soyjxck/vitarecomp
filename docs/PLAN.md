@@ -180,6 +180,8 @@ first level:
 | "Start New Campaign?" | 1 scene, 28 draws |
 | Loading `igc_snake_temple_room_start` | the loading screen again, 7 scenes |
 | The level: the opening cinematic | 13 scenes, 255 draws (227 precomputed), 38,000 triangles, 5.3 million pixels, 320 ms |
+| The first playable level, its first frame | 12 scenes, 544 draws (516 precomputed), 50,000 triangles, 6 million pixels, 630 ms |
+| Its tutorial card, the level held behind it | 1 scene, 16 draws, 2.3 million pixels |
 
 The level's picture was black, and the first reason was the ARM
 instruction set: the title carries some 8,500 instructions of hand-written
@@ -194,12 +196,19 @@ cleared a condition variable's work area at twice its size and with it
 the thread's id (docs/LESSONS.md). With that thread running the level is
 what it is meant to be, the cinematic that opens the game.
 
-What comes next: the cinematic at more than three frames a second
-(milestone E); sound that can be heard, since the title now streams it and
-the synthesiser plays it in silence; the end of the cinematic and the
-first level a player moves in; and the logo movie, which wants SceMp4's
-demultiplexer and the H.264 and AAC decoders behind `sceAvcdec` and
-`sceAudiodec`.
+The cinematic runs for some forty seconds of the title's time, with the
+next level loading behind it, and then the title saves a checkpoint and
+switches: `LOAD LEVEL( /snake_temple_intro.bsp, /mov_min_game_intro.bsp )`,
+the first level a player moves in. Its first frame took the last jump
+tables discovery had not sized (LESSONS.md); with those followed it comes
+up and stops, as it should, on a tutorial card.
+
+What comes next: play, which wants the card dismissed and the sticks,
+which the host now has (`--stick`, and W A S D on the window); the levels
+at more than two or three frames a second (milestone E); sound that can be
+heard, since the title streams it and the synthesiser plays it in silence;
+and the movies, which want SceMp4's demultiplexer and the H.264 and AAC
+decoders behind `sceAvcdec` and `sceAudiodec`.
 
 1. Accept FAGDec-decrypted `eboot.bin` and `*.suprx` (plain SCE ELF, the
    Vita3K input format) in `armrecomp info/extract`, in addition to fself.

@@ -421,9 +421,10 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                 continue;
             }
 
-            if (in.cls == A_BRANCH && in.has_target && in.conditional && nguard < 256) {
+            if (in.cls == A_BRANCH && in.has_target && nguard < 256) {
                 int8_t greg; uint32_t gmax;
-                if (arm_table_guard(prev, nprev, &in, &greg, &gmax)) {
+                if (in.conditional ? arm_table_guard(prev, nprev, &in, &greg, &gmax)
+                                   : arm_table_guard_jump(prev, nprev, &in, &greg, &gmax)) {
                     guard[nguard].addr = in.target;
                     guard[nguard].reg  = greg;
                     guard[nguard].max  = gmax;

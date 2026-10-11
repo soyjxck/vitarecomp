@@ -18,6 +18,7 @@
  *                   exit when no frame is given
  *   --press B@F-T   hold button B (START, CROSS, UP, ...) from vblank F to T
  *   --touch X,Y@F-T a finger on the front panel at display pixel X,Y, likewise
+ *   --stick S,X,Y@F-T the left (L) or right (R) stick held at X,Y, -100 to 100
  *
  * Guest memory is one flat region: the module where it was linked, then an
  * arena for memory blocks, a heap for SceLibc, and a stack at the top.
@@ -64,6 +65,7 @@ extern const uint32_t vita_module_tls_addr, vita_module_tls_filesz, vita_module_
 
 typedef struct { uint32_t mask, from, to; } press;
 typedef struct { int x, y; uint32_t from, to; } touch;
+typedef struct { int right; uint8_t x, y; uint32_t from, to; } tilt;
 
 static struct {
     const char *elf;
@@ -76,6 +78,8 @@ static struct {
     int         press_count;
     touch       touches[16];
     int         touch_count;
+    tilt        tilts[16];
+    int         tilt_count;
     uint32_t    frame;
     int         window;          /* --window: show frames and read the keyboard */
     uint32_t    shown_flips;     /* at the last title update */
@@ -178,6 +182,25 @@ static int parse_touch(const char *s) {
     return 0;
 }
 
+/* --stick L|R,X,Y@FROM[-TO]: the left or right stick held at X,Y, each from
+ * -100 (left, up) to 100 (right, down). */
+static int parse_stick(const char *s) {
+    char which;
+    int x, y;
+    unsigned from, to;
+    if (sscanf(s, "%c,%d,%d@%u-%u", &which, &x, &y, &from, &to) == 5) {}
+    else if (sscanf(s, "%c,%d,%d@%u", &which, &x, &y, &from) == 4) to = from + 1;
+    else return 1;
+    if (g.tilt_count == 16 || (which != 'L' && which != 'R') || x < -100 || x > 100 || y < -100 || y > 100) return 1;
+    g.tilts[g.tilt_count].right = which == 'R';
+    g.tilts[g.tilt_count].x = (uint8_t)(128 + x * 127 / 100);
+    g.tilts[g.tilt_count].y = (uint8_t)(128 + y * 127 / 100);
+    g.tilts[g.tilt_count].from = from;
+    g.tilts[g.tilt_count].to = to;
+    g.tilt_count++;
+    return 0;
+}
+
 /* The window's turn at a vertical blank: the frame the program is showing,
  * a title that says how fast it is flipping, and the wait for the next
  * sixtieth of a second. Closing the window ends the run. */
@@ -225,6 +248,16 @@ uint32_t vita_host_buttons(void) {
     return m;
 }
 
+void vita_host_sticks(uint8_t xy[4]) {
+    xy[0] = xy[1] = xy[2] = xy[3] = 128;
+    if (g.window) vita_window_sticks(xy);
+    for (int i = 0; i < g.tilt_count; i++)
+        if (g.frame >= g.tilts[i].from && g.frame < g.tilts[i].to) {
+            xy[g.tilts[i].right ? 2 : 0] = g.tilts[i].x;
+            xy[g.tilts[i].right ? 3 : 1] = g.tilts[i].y;
+        }
+}
+
 int vita_host_touch(int *x, int *y) {
     for (int i = 0; i < g.touch_count; i++)
         if (g.frame >= g.touches[i].from && g.frame < g.touches[i].to) {
@@ -245,12 +278,15 @@ void vita_host_exit(int status) {
 static int usage(void) {
     fputs("usage: vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--dump-dir DIR[@EVERY]]\n"
           "                 [--press BUTTON@FROM[-TO]]... [--touch X,Y@FROM[-TO]]... [--virtual-clock]\n"
+          "                 [--stick L|R,X,Y@FROM[-TO]]...\n"
           "                 [--syms module.sym] [--trace-fns] [--window]\n"
           "  --touch X,Y@F-T a finger on the front panel at display pixel X,Y (of 960 by 544)\n"
           "                 from vblank F to T\n"
-          "  --window       show each frame in a window at sixty a second; arrows, Z X A S for\n"
-          "                 cross circle square triangle, Enter for START, Backspace for SELECT,\n"
-          "                 Q W for the triggers; the left mouse button is a finger on the screen\n"
+          "  --stick S,X,Y@F-T the left (L) or right (R) stick at X,Y, each -100 to 100\n"
+          "  --window       show each frame in a window at sixty a second. Arrows: the pad;\n"
+          "                 W A S D and I J K L: the sticks; X C Z V: cross circle square\n"
+          "                 triangle; Q E: the shoulders; Enter: START; Shift: SELECT;\n"
+          "                 the left mouse button is a finger on the screen\n"
           "  --mount P=DIR  where the guest mount P (app0, ux0, ...) lives on the host\n"
           "  --syms F       names from an `nm -n` listing, for traces\n"
           "  --trace-fns    log every function entry (VITARECOMP_TRACE=1 logs traps and bad accesses;\n"
@@ -281,6 +317,8 @@ int main(int argc, char **argv) {
             g.dump_dir = spec;
         } else if (strcmp(argv[i], "--press") == 0 && i + 1 < argc) {
             if (parse_press(argv[++i])) { fprintf(stderr, "vita_host: bad --press %s\n", argv[i]); return 2; }
+        } else if (strcmp(argv[i], "--stick") == 0 && i + 1 < argc) {
+            if (parse_stick(argv[++i])) { fprintf(stderr, "vita_host: bad --stick %s\n", argv[i]); return 2; }
         } else if (strcmp(argv[i], "--touch") == 0 && i + 1 < argc) {
             if (parse_touch(argv[++i])) { fprintf(stderr, "vita_host: bad --touch %s\n", argv[i]); return 2; }
         } else if (strcmp(argv[i], "--syms") == 0 && i + 1 < argc) {

@@ -248,6 +248,12 @@ uint32_t arm_table_targets(const uint8_t *code, uint32_t code_addr, uint32_t cod
  * compare that walk puts at the head of its window. */
 int  arm_table_guard(const arm_insn *prev, uint32_t nprev, const arm_insn *br,
                      int8_t *reg, uint32_t *max);
+
+/* The same for a table reached by an unconditional branch, the range having
+ * been checked just before it: `cmp r0, #31; bhi out; b table`. What the
+ * branch's target knows is what the flow before the branch had settled. */
+int  arm_table_guard_jump(const arm_insn *prev, uint32_t nprev, const arm_insn *br,
+                          int8_t *reg, uint32_t *max);
 void arm_table_seed(arm_insn *out, int8_t reg, uint32_t max);
 
 #endif /* ARMRECOMP_DECODE_H */

@@ -1,6 +1,7 @@
 /* hle_ctrl.c — SceCtrl: the buttons and sticks.
  *
- * The program asks for a snapshot of the pad; the host says what is held.
+ * The program asks for a snapshot of the pad; the host says what is held
+ * and where the sticks are.
  * SceCtrlData is 32 bytes: { u64 timeStamp; u32 buttons; u8 lx, ly, rx, ry;
  * u8 up, right, down, left, ltrigger, rtrigger, l1, r1, l3, r3, square,
  * cross, circle, triangle; u8 reserved[2] }. The per-button bytes are the
@@ -44,6 +45,8 @@ void vita_hle_sceCtrlPeekBufferPositive(void) {
     }
 
     uint32_t buttons = vita_host_buttons();
+    uint8_t sticks[4] = { 128, 128, 128, 128 };
+    if (g_mode) vita_host_sticks(sticks);       /* a pad in its digital mode reports them at rest */
     g_stamp += FRAME_US;
 
     for (uint32_t i = 0; i < count; i++) {
@@ -52,7 +55,7 @@ void vita_hle_sceCtrlPeekBufferPositive(void) {
         vita_write32(rec + 0, (uint32_t)g_stamp);
         vita_write32(rec + 4, (uint32_t)(g_stamp >> 32));
         vita_write32(rec + 8, buttons);
-        vita_write32(rec + 12, 0x80808080u);   /* sticks centred: lx ly rx ry */
+        for (uint32_t k = 0; k < 4; k++) vita_write8(rec + 12 + k, sticks[k]);      /* lx ly rx ry */
     }
     r0 = count;
 }

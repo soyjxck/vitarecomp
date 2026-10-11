@@ -25,6 +25,7 @@
 static int g_finger, g_finger_x, g_finger_y;
 void vita_host_vblank(void) { }
 uint32_t vita_host_buttons(void) { return 0; }
+void vita_host_sticks(uint8_t xy[4]) { xy[0] = 200; xy[1] = 10; xy[2] = 128; xy[3] = 128; }
 int vita_host_touch(int *x, int *y) {
     if (!g_finger) return 0;
     *x = g_finger_x; *y = g_finger_y;
@@ -931,6 +932,25 @@ static void test_neon_shifts(void) {
     printf("  neon shifts, widen, narrow      ok\n");
 }
 
+void vita_hle_sceCtrlSetSamplingMode(void);
+void vita_hle_sceCtrlPeekBufferPositive(void);
+
+/* The sticks are read only when the title has asked for them: a pad left in
+ * its digital mode reports both at rest. */
+static void test_sticks(void) {
+    assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
+    uint32_t pad = 0x81001000u;
+    r0 = 0; r1 = pad; r2 = 1; vita_hle_sceCtrlPeekBufferPositive();
+    assert(r0 == 1 && vita_read32(pad + 12) == 0x80808080u);
+    r0 = 1; vita_hle_sceCtrlSetSamplingMode();                  /* analog */
+    r0 = 0; r1 = pad; r2 = 1; vita_hle_sceCtrlPeekBufferPositive();
+    assert(r0 == 1 && vita_read8(pad + 12) == 200 && vita_read8(pad + 13) == 10);
+    assert(vita_read8(pad + 14) == 128 && vita_read8(pad + 15) == 128);
+    r0 = 0; vita_hle_sceCtrlSetSamplingMode();
+    vita_mem_free();
+    printf("  sticks, when asked for         ok\n");
+}
+
 void vita_hle_sceKernelCreateLwCond(void);
 void vita_hle_sceKernelCreateLwMutex(void);
 
@@ -1164,6 +1184,7 @@ int main(void) {
     test_time_slice();
     test_ngs();
     test_touch();
+    test_sticks();
     test_work_areas();
     test_save_dialog();
     printf("all runtime tests passed\n");

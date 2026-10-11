@@ -2,7 +2,7 @@
  *
  * The HLE bodies in src/hle_*.c implement firmware semantics against guest
  * memory and know nothing about windows, gamepads or clocks. Those are the
- * host's, and the HLE reaches them through the four functions below. A host
+ * host's, and the HLE reaches them through the five functions below. A host
  * is therefore small: a headless one that scripts its input and writes frames
  * to files is a hundred lines, and is what CI runs.
  */
@@ -24,6 +24,10 @@ uint32_t vita_host_buttons(void);
 /* Whether something touches the front panel right now, and where, in the
  * panel's own units: 1920 across and 1088 down, two to a display pixel. */
 int vita_host_touch(int *x, int *y);
+
+/* Where the two sticks are: left x, left y, right x, right y, each 0 to 255
+ * with 128 at rest, x growing to the right and y downwards. */
+void vita_host_sticks(uint8_t xy[4]);
 
 /* sceKernelExitProcess. Must not return. */
 void vita_host_exit(int status);

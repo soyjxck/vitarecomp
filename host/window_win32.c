@@ -6,6 +6,11 @@
  * window's own key messages, so it reads nothing while another window has
  * the focus. The left mouse button is a finger on the front panel: where it
  * is held on the picture is where the panel is touched.
+ *
+ * The keys are where a player of this console's games on a keyboard looks
+ * for them: the arrows are the directional pad, W A S D the left stick and
+ * I J K L the right, X cross, C circle, Z square, V triangle, Q and E the
+ * shoulder buttons, Enter START and Shift (or Backspace) SELECT.
  */
 
 #include "window.h"
@@ -26,22 +31,32 @@ static struct {
     int              ww, wh;            /* the client size asked for */
     volatile LONG    buttons, closed;
     volatile LONG    finger;            /* bit 31 while the button is held; y above x, eleven bits each */
+    volatile LONG    tilt;              /* the eight stick keys held, a bit each */
     char             title[256];
     LARGE_INTEGER    freq, next;
 } W;
 
 static const struct { WPARAM key; uint32_t bit; } KEYS[] = {
     { VK_UP, VITA_CTRL_UP },       { VK_DOWN, VITA_CTRL_DOWN },   { VK_LEFT, VITA_CTRL_LEFT },
-    { VK_RIGHT, VITA_CTRL_RIGHT }, { 'Z', VITA_CTRL_CROSS },      { 'X', VITA_CTRL_CIRCLE },
-    { 'A', VITA_CTRL_SQUARE },     { 'S', VITA_CTRL_TRIANGLE },   { VK_RETURN, VITA_CTRL_START },
-    { VK_BACK, VITA_CTRL_SELECT }, { 'Q', VITA_CTRL_LTRIGGER },   { 'W', VITA_CTRL_RTRIGGER },
+    { VK_RIGHT, VITA_CTRL_RIGHT }, { 'X', VITA_CTRL_CROSS },      { 'C', VITA_CTRL_CIRCLE },
+    { 'Z', VITA_CTRL_SQUARE },     { 'V', VITA_CTRL_TRIANGLE },   { VK_RETURN, VITA_CTRL_START },
+    { VK_BACK, VITA_CTRL_SELECT }, { VK_SHIFT, VITA_CTRL_SELECT },
+    { 'Q', VITA_CTRL_LTRIGGER },   { 'E', VITA_CTRL_RTRIGGER },
 };
+
+/* The stick keys: left, right, up, down of the left stick, then of the right. */
+static const WPARAM TILTS[8] = { 'A', 'D', 'W', 'S', 'J', 'L', 'I', 'K' };
 
 static void key(WPARAM k, int down) {
     for (size_t i = 0; i < sizeof(KEYS) / sizeof(KEYS[0]); i++) {
         if (KEYS[i].key != k) continue;
         if (down) InterlockedOr(&W.buttons, (LONG)KEYS[i].bit);
         else      InterlockedAnd(&W.buttons, ~(LONG)KEYS[i].bit);
+    }
+    for (int i = 0; i < 8; i++) {
+        if (TILTS[i] != k) continue;
+        if (down) InterlockedOr(&W.tilt, 1L << i);
+        else      InterlockedAnd(&W.tilt, ~(1L << i));
     }
 }
 
@@ -62,7 +77,7 @@ static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_KEYDOWN: key(wp, 1); return 0;
     case WM_KEYUP:   key(wp, 0); return 0;
-    case WM_KILLFOCUS: InterlockedExchange(&W.buttons, 0); return 0;
+    case WM_KILLFOCUS: InterlockedExchange(&W.buttons, 0); InterlockedExchange(&W.tilt, 0); return 0;
     case WM_LBUTTONDOWN: SetCapture(h); finger(h, lp); return 0;
     case WM_MOUSEMOVE: if (W.finger < 0) finger(h, lp); return 0;
     case WM_LBUTTONUP: ReleaseCapture(); return 0;
@@ -168,6 +183,14 @@ void vita_window_present(const uint8_t *pixels, int width, int height, int pitch
 }
 
 uint32_t vita_window_buttons(void) { return (uint32_t)W.buttons; }
+
+void vita_window_sticks(uint8_t xy[4]) {
+    LONG held = W.tilt;
+    for (int axis = 0; axis < 4; axis++) {
+        int low = (held >> (2 * axis)) & 1, high = (held >> (2 * axis + 1)) & 1;
+        xy[axis] = (uint8_t)(low == high ? 128 : low ? 0 : 255);
+    }
+}
 
 int vita_window_touch(int *x, int *y) {
     uint32_t f = (uint32_t)W.finger;

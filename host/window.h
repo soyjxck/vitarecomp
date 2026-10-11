@@ -22,6 +22,10 @@ void vita_window_present(const uint8_t *pixels, int width, int height, int pitch
 /* The buttons the keyboard is holding, as a VITA_CTRL_* mask. */
 uint32_t vita_window_buttons(void);
 
+/* The sticks as the keyboard holds them: W A S D the left one, I J K L the
+ * right, each all the way over or at rest. In host.h's form. */
+void vita_window_sticks(uint8_t xy[4]);
+
 /* Whether the left mouse button is held on the picture, and where: as a
  * finger on a panel 1920 across and 1088 down, whatever size the window is. */
 int vita_window_touch(int *x, int *y);
