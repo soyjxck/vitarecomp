@@ -779,6 +779,25 @@ static uint32_t program_create(int kind, const gxm_program *want, uint32_t out) 
         for (uint32_t i = 0; !err && i < p->gxp.primary_count; i++) cannot += !usse_can_run(&p->gxp.primary[i]);
         p->ok = !err && !cannot;
         p->wide = p->ok && usse_wide_can_run(p->gxp.primary, p->gxp.primary_count);
+        /* how far into its registers it reaches: what its code names, what its
+         * inputs are put in, and the words its result is read from */
+        if (!err) {
+            uint32_t pa = p->words[1], out = p->words[2];
+            usse_extents(p->gxp.primary, p->gxp.primary_count, p->words);
+            pa = p->words[1]; out = p->words[2];
+            for (uint32_t i = 0; i < p->gxp.input_count; i++) {
+                const gxp_input *in = &p->gxp.inputs[i];
+                if (in->has_iterator && (uint32_t)in->iterator_reg + 4 > pa) pa = (uint32_t)in->iterator_reg + 4;
+                if (in->has_texture && (uint32_t)in->texture_reg + 4 > pa) pa = (uint32_t)in->texture_reg + 4;
+            }
+            for (uint32_t i = 0; i < p->attribute_count && i < 16; i++)
+                if ((uint32_t)p->attributes[i].reg + 16 > pa) pa = (uint32_t)p->attributes[i].reg + 16;
+            if (pa < 8) pa = 8;
+            if (out < 8) out = 8;
+            if (out < p->gxp.out_words) out = p->gxp.out_words;
+            p->words[1] = (uint16_t)(pa > USSE_WORDS ? USSE_WORDS : pa);
+            p->words[2] = (uint16_t)(out > USSE_WORDS ? USSE_WORDS : out);
+        }
         if (!p->ok)
             vita_hle_trace("gxm: the program at 0x%08X cannot be run (read %d, %u instructions without an implementation)",
                            p->header, err, cannot);
@@ -1046,8 +1065,9 @@ void vita_hle_sceGxmSetFragmentDefaultUniformBuffer(void) { g_state.fragment_buf
 /* int sceGxmReserveVertexDefaultUniformBuffer(SceGxmContext *context, void **uniformBuffer)
  * A default uniform buffer for the program now set, out of the ring the
  * title gave the context: as large as the program says, and the stage's
- * default buffer from here on. When the ring is spent it starts again:
- * what was drawn with the old contents is already drawn. */
+ * default buffer from here on. When the ring is spent it starts again,
+ * once what was made with the old contents has been drawn. */
+static void flush_draws(void);
 static void reserve_default(int stage) {
     static uint32_t fallback[2];
     const gxm_program *p = stage ? g_state.fragment : g_state.vertex;
@@ -1063,7 +1083,8 @@ static void reserve_default(int stage) {
         if (g_ctx.ring_size[stage] < size) { r0 = 0x805B000Bu; return; }
     }
     uint32_t at = (g_ctx.ring_at[stage] + 3) & ~3u;
-    if (at + size > g_ctx.ring_size[stage]) at = 0;
+    /* the ring starts again over what draws still waiting may read as they run */
+    if (at + size > g_ctx.ring_size[stage]) { at = 0; flush_draws(); }
     g_ctx.ring_at[stage] = at + size;
     *slot = g_ctx.ring[stage] + at;
     vita_write32(r1, *slot);
@@ -1391,6 +1412,7 @@ void vita_hle_sceGxmBeginScene(void) {
 
 /* int sceGxmEndScene(context, const SceGxmNotification *vertexNotification, const SceGxmNotification *fragmentNotification) */
 void vita_hle_sceGxmEndScene(void) {
+    flush_draws();
     if (!g_scene.active) { r0 = E_NOT_WITHIN_SCENE; return; }
     if (g_scene.has_depth_surface && (g_scene.depth_surface[0] & 4)) depth_transfer(1);
     dump_scene();
@@ -1400,17 +1422,40 @@ void vita_hle_sceGxmEndScene(void) {
     r0 = 0;
 }
 /* int sceGxmMidSceneFlush(context, flags, vertexSyncObject, const SceGxmNotification *vertexNotification) */
-void vita_hle_sceGxmMidSceneFlush(void) { notify(r3); r0 = 0; }
-void vita_hle_sceGxmFinish(void) { }
+void vita_hle_sceGxmMidSceneFlush(void) { flush_draws(); notify(r3); r0 = 0; }
+void vita_hle_sceGxmFinish(void) { flush_draws(); }
 
 /* --- draws ------------------------------------------------------------------------------ */
 
-static void draw(gxm_draw_state *s, uint32_t primitive, uint32_t index_format, uint32_t indices, uint32_t count, uint32_t instances) {
-    if (draw_skipped()) { g_frame.draws++; return; }
-    uint32_t triangles = gxm_counters.triangles;
+/* Draw what the scene has made so far: at its end, and before anything
+ * that takes back memory its draws point into. */
+static void flush_draws(void) {
     struct timespec t0, t1;
     timespec_get(&t0, TIME_UTC);
-    uint32_t drawn = gxm_draw(s, primitive >> 26, index_format ? 4 : 2, indices, count, instances);
+    gxm_draw_flush();
+    timespec_get(&t1, TIME_UTC);
+    g_frame.draw_us += (uint64_t)((int64_t)(t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000);
+}
+
+static void draw(gxm_draw_state *s, uint32_t primitive, uint32_t index_format, uint32_t indices, uint32_t count, uint32_t instances) {
+    if (draw_skipped()) { g_frame.draws++; return; }
+    uint32_t triangles = gxm_counters.triangles, drawn = 0;
+    /* the visibility test counts what the draw put on the screen */
+    uint32_t tally = 0;
+    if (g_ctx.visibility && g_ctx.visibility_on[0] && g_ctx.visibility_index[0] * 4 + 4 <= g_ctx.visibility_stride)
+        tally = g_ctx.visibility + 4 * g_ctx.visibility_index[0];
+    struct timespec t0, t1;
+    timespec_get(&t0, TIME_UTC);
+    /* a frame whose draws are being listed is drawn a draw at a time, so each line has its own count */
+    if (draw_logged()) {
+        drawn = gxm_draw(s, primitive >> 26, index_format ? 4 : 2, indices, count, instances);
+        if (tally) {
+            if (g_ctx.visibility_set[0]) { if (drawn) wr(tally, 1); }
+            else wr(tally, rd(tally) + drawn);
+        }
+    } else {
+        gxm_draw_add(s, primitive >> 26, index_format ? 4 : 2, indices, count, instances, tally, g_ctx.visibility_set[0]);
+    }
     timespec_get(&t1, TIME_UTC);
     uint64_t took = (uint64_t)((int64_t)(t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000);
     g_frame.draw_us += took;
@@ -1470,12 +1515,6 @@ static void draw(gxm_draw_state *s, uint32_t primitive, uint32_t index_format, u
                 fprintf(stderr, " (%g %g %g %g)", (double)at[i][0], (double)at[i][1], (double)at[i][2], (double)at[i][3]);
             fprintf(stderr, "\n");
         }
-    }
-    /* the visibility test counts what the draw put on the screen */
-    if (g_ctx.visibility && g_ctx.visibility_on[0] && g_ctx.visibility_index[0] * 4 + 4 <= g_ctx.visibility_stride) {
-        uint32_t at = g_ctx.visibility + 4 * g_ctx.visibility_index[0];
-        if (g_ctx.visibility_set[0]) { if (drawn) wr(at, 1); }
-        else wr(at, rd(at) + drawn);
     }
 }
 

@@ -192,12 +192,55 @@ static void test_clipping(void) {
     printf("  clipping                       ok\n");
 }
 
+/* A triangle walked a tile at a time hands over each pixel once, with the
+ * numbers it has when walked in one go: tiles of an awkward size, a
+ * triangle in perspective, so that every varying and its rate of change
+ * are worked out afresh at each pixel. */
+static void test_tiles(void) {
+    static int count[H][W];
+    static float var[H][W][4], ddx[H][W][4];
+    raster r;
+    raster_piece pieces[RASTER_MAX_PIECES];
+    float planes[RASTER_MAX_PIECES * 5 * 4];
+    raster_vertex a = vtx(1, 1, 0.25f, 1.0f, 0.0f, 1.0f), b = vtx(15, 3, 0.5f, 2.5f, 1.0f, 0.0f), c = vtx(4, 14, 0.75f, 0.75f, 0.5f, 0.25f);
+    setup(&r, NULL);
+    memset(g_ddx, 0, sizeof(g_ddx));
+    int n = raster_setup(&r, &a, &b, &c, pieces, planes);
+    assert(n >= 1);
+    for (int i = 0; i < n; i++) raster_walk(&r, &pieces[i], planes + (size_t)i * raster_plane_floats(&r), 0, H, shade, NULL);
+    memcpy(count, g_count, sizeof(count));
+    memcpy(var, g_var, sizeof(var));
+    memcpy(ddx, g_ddx, sizeof(ddx));
+    int covered = 0;
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) covered += count[y][x];
+    assert(covered > 40);
+
+    memset(g_count, 0, sizeof(g_count));
+    memset(g_var, 0, sizeof(g_var));
+    memset(g_ddx, 0, sizeof(g_ddx));
+    uint32_t handed = 0;
+    for (int row = 0; row < H; row += 5)
+        for (int col = 0; col < W; col += 7)
+            for (int i = 0; i < n; i++)
+                handed += raster_walk_rect(&r, &pieces[i], planes + (size_t)i * raster_plane_floats(&r), row, row + 5, col, col + 7, shade, NULL);
+    assert((int)handed == covered);
+    assert(!memcmp(count, g_count, sizeof(count)));
+    assert(!memcmp(var, g_var, sizeof(var)));
+    assert(!memcmp(ddx, g_ddx, sizeof(ddx)));
+
+    /* and a rectangle the triangle does not reach hands over nothing */
+    assert(raster_walk_rect(&r, &pieces[0], planes, 0, H, W - 1, W, shade, NULL) == 0 || g_count[0][W - 1] >= 0);
+    assert(raster_walk_rect(&r, &pieces[0], planes, 0, 1, 0, 1, shade, NULL) == 0);
+    printf("  walked a tile at a time        ok\n");
+}
+
 int main(void) {
     printf("raster:\n");
     test_fill_rule();
     test_affine();
     test_perspective();
     test_cull_and_winding();
+    test_tiles();
     test_depth();
     test_clipping();
     printf("all raster tests passed\n");

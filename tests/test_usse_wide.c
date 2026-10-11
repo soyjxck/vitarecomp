@@ -174,6 +174,41 @@ static void test_programs(void) {
     printf("  programs of twelve             ok\n");
 }
 
+/* A program that reads what nothing wrote, found. Two instructions of a
+ * retail title's tone-mapping program: the first writes three components
+ * of r2 from pa0 and a constant, the second reads all four. With every row
+ * holding the mark and the watch on, the run names the second instruction
+ * and r2.w; the first instruction alone reads nothing unwritten, since its
+ * input was put there; and how far a program reaches into each bank comes
+ * out as at least what it names. */
+static void test_unwritten(void) {
+    static const uint64_t WORDS[2] = { 0x10a40384b0440007ull,      /* VF16MUL  r2.xyz  pa0.xyz  sa14.xxx */
+                                       0x04a02280f00010c3ull };    /* VF16MAD2 r0.xyzw r2.xyzw  sa6.xxxx sa6.yyyy */
+    usse_insn code[2];
+    uint16_t reach[3];
+    for (int i = 0; i < 2; i++) assert(usse_decode(WORDS[i], 0, &code[i]) && usse_wide_can_run(&code[i], 1));
+
+    usse_extents(code, 2, reach);
+    assert(reach[0] >= 6 && reach[0] <= USSE_WORDS);    /* r2's four halves end in r3; r0's in r1 */
+    assert(reach[1] >= 2 && reach[2] == 0);             /* pa0 is read; no output is named */
+
+    for (int which = 0; which < 2; which++) {
+        fill(USSE_LANES);
+        for (int i = 0; i < USSE_WORDS; i++)
+            for (unsigned l = 0; l < USSE_LANES; l++) wide.temp[i][l] = wide.pa[i][l] = wide.out[i][l] = USSE_UNWRITTEN;
+        for (int i = 0; i < 16; i++) for (unsigned l = 0; l < USSE_LANES; l++) wide.internal[i][l] = USSE_UNWRITTEN;
+        memset(wide.pred, USSE_UNWRITTEN_PREDICATE, sizeof(wide.pred));
+        for (unsigned l = 0; l < USSE_LANES; l++) { wide.pa[0][l] = word(); wide.pa[1][l] = word(); }
+        usse_wide_watch = 1;
+        usse_run_wide(code, which ? 2 : 1, &wide);
+        usse_wide_watch = 0;
+        const usse_unwritten *u = usse_wide_unwritten();
+        if (!which) { assert(u->hits == 0); continue; }
+        assert(u->hits >= 1 && u->instruction == 1 && u->bank == USSE_TEMP && u->num == 2 && u->channel == 3);
+    }
+    printf("  a register read unwritten      ok\n");
+}
+
 static void test_half_rows(void) {
     static uint32_t words[65536];
     static float out[65536], back[65536];
@@ -216,6 +251,7 @@ int main(void) {
     test_half_rows();
     test_single();
     test_programs();
+    test_unwritten();
     printf("all batched tests passed\n");
     return 0;
 }

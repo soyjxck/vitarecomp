@@ -146,8 +146,14 @@ static int setup(raster *r, const screen_vertex *a, const screen_vertex *b, cons
 
 uint32_t raster_walk(const raster *r, const raster_piece *t, const float *planes, int row0, int row1,
                      raster_shade shade, void *user) {
-    int64_t px0 = t->x0, px1 = t->x1, py0 = t->y0 > row0 ? t->y0 : row0, py1 = t->y1 < row1 - 1 ? t->y1 : row1 - 1;
-    if (py0 > py1) return 0;
+    return raster_walk_rect(r, t, planes, row0, row1, t->x0, t->x1 + 1, shade, user);
+}
+
+uint32_t raster_walk_rect(const raster *r, const raster_piece *t, const float *planes, int row0, int row1,
+                          int col0, int col1, raster_shade shade, void *user) {
+    int64_t px0 = t->x0 > col0 ? t->x0 : col0, px1 = t->x1 < col1 - 1 ? t->x1 : col1 - 1;
+    int64_t py0 = t->y0 > row0 ? t->y0 : row0, py1 = t->y1 < row1 - 1 ? t->y1 : row1 - 1;
+    if (py0 > py1 || px0 > px1) return 0;
     int64_t ax = t->ax, ay = t->ay, bx = t->bx, by = t->by, cx = t->cx, cy = t->cy;
     int64_t bias_ab = t->bias_ab, bias_bc = t->bias_bc, bias_ca = t->bias_ca;
 

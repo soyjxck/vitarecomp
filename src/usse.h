@@ -122,6 +122,12 @@ int usse_decode(uint64_t word, int secondary, usse_insn *out);
 /* Put the repeat increments back to their start: at the top of a program. */
 void usse_reset(usse_state *s);
 
+/* How much of each bank a program can touch: for the temporaries, the
+ * primary attributes and the outputs, in that order, one past the highest
+ * word any operand of it can reach. A generous bound, not an exact one:
+ * what it is for is clearing them before a run. */
+void usse_extents(const usse_insn *code, uint32_t count, uint16_t words[3]);
+
 /* Whether usse_run has the means to execute an instruction. */
 int usse_can_run(const usse_insn *in);
 
@@ -149,6 +155,24 @@ typedef struct {
     unsigned  lanes;                        /* how many are in use */
     const usse_env *env;
 } usse_wide;
+
+/* A program that reads a register nothing wrote gets whatever the last
+ * program left there, which on the console is as undefined as it is here
+ * and, here, changes with which thread ran what before. To find one: fill
+ * the rows with USSE_UNWRITTEN before the inputs go in, set usse_wide_watch,
+ * and after the run ask usse_wide_unwritten() what this thread's run read
+ * that still held it in every lane. A predicate row is filled with
+ * USSE_UNWRITTEN_PREDICATE. */
+#define USSE_UNWRITTEN            0xDEADBEEFu
+#define USSE_UNWRITTEN_PREDICATE  2
+typedef struct {
+    uint32_t hits;                          /* reads of this run that found a row unwritten; 0 for none */
+    uint32_t instruction;                   /* the first: which instruction, from 0, */
+    uint8_t  bank, channel, type;           /* and which register and component of it it read, as what */
+    uint16_t num;
+} usse_unwritten;
+extern int usse_wide_watch;
+const usse_unwritten *usse_wide_unwritten(void);
 
 /* Whether a program is one usse_run_wide executes: every instruction of it
  * and every operand. One that is not is run a lane at a time by usse_run. */

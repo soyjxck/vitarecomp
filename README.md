@@ -43,12 +43,12 @@ thing the game has to teach.
 Every pixel comes out of the
 title's own shader programs, run by an interpreter of the GPU's bytecode
 that is written here; nothing of the title's is replaced. It is a reference
-renderer, right before fast: with a draw's rows shared out over the host's
-cores and each fragment program run for sixty-four pixels at a time, a frame
-of the loading screen takes about 30 ms on sixteen threads, the title screen
-and the menu about 20, and the scene behind the health warning, 45,000
-triangles and five million pixels, about 350, as does a frame of the
-opening cinematic: three frames a second, where the console shows thirty.
+renderer, right before fast: with a scene's draws drawn together at its
+end, a tile of the target to a thread, and each fragment program run for
+sixty-four pixels at a time, a frame of the title screen or the menu takes
+about 20 ms and a frame of the opening cinematic or of play, 50,000
+triangles and five million pixels, 110 to 120 on twenty-four threads:
+eight frames a second, where the console shows thirty.
 The logo movie that comes before the
 title screen is not played: the runtime has no movie library, says so when
 the title asks for it, and the title carries on as it does when a movie

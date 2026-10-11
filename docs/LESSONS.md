@@ -976,3 +976,51 @@ pass that wrote the depth, 1,984 in the pass that tested against it.
     A screen that does not answer is first a screen to be read as the
     title's designer meant it, and a picture of a console with arrows on
     it was the manual; the half day bought two tools that stay.
+
+15. **Most of the threads were waiting.** A sampler of the host's own
+    threads (`VITARECOMP_HOST_PROFILE`) put the first number on what the
+    stage profile could not show: of the samples that found a thread at
+    work, a third found it turning in the pool's short wait for the next
+    job. A draw was drawn as it arrived, its rows shared out, and a scene
+    of this title is five hundred draws of which most cover little; the
+    vertices of every draw were one thread's, 92 ms of a frame. The
+    console does none of that as it goes: it keeps a scene's draws and
+    draws them when the scene ends, tile by tile. Doing the same, a draw
+    to a thread for the vertices and then a tile to a thread for the
+    pixels, took a frame from 350 ms to 110, and the summed work of the
+    threads did not change at all. The work had never been the problem.
+
+16. **Six frames in seventy-five were not the same, and no two runs
+    agreed which.** The new order was held against the old on frames
+    spread over two minutes of the title. Sixty-nine were identical. The
+    six differed in soft round patches, and differently on every run,
+    which is a race; and a run on one thread differed from drawing at
+    once, which is not. Two causes were found and one was real. Programs
+    read registers they never wrote, seventeen of them, and one lets what
+    it reads through to its result: a row of pixels run twice on two
+    fills says which (`VITARECOMP_GXM_UNWRITTEN`). Registers now start
+    at zero, as they should have from the first, and the six frames
+    still differed. The real cause was a scene that reads what it has
+    just drawn: a chain of ever smaller copies of the picture kept side
+    by side in one surface, each made from the one before by a draw
+    that samples the surface it draws to. Drawn a draw at a time that
+    is in order by construction; drawn a tile at a time, a tile can
+    read a part of the surface that another thread has not filled yet.
+    The console finishes its tiles in order and the title leans on it.
+    A draw that samples its own target now waits for everything before
+    it and is waited for, and one thread, thirty, a pixel at a time and
+    a draw at a time give the same seventy-five frames as before.
+
+17. **The other timeline was a save file.** In the middle of that, some
+    runs came out at a different shot of the cinematic altogether, the
+    title's own code having run a different number of instructions, and
+    it tracked whichever experiment was being tried: filling registers
+    with zero did it, filling them with a mark did not. An afternoon's
+    theory of pixels feeding back into the title's timing was built on
+    that. The runs that differed were the ones whose names had been
+    used before: each run kept its save data in a directory named for
+    it, and a title that finds a save takes another path through its
+    menus and arrives at the cinematic some frames later. Every run now
+    gets a directory nothing has written to. Before two runs are
+    compared they have to be known to start in the same place, and "the
+    same command" is not that.

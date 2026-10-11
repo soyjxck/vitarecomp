@@ -179,10 +179,10 @@ first level:
 | New Game: chapter and difficulty | 1 scene, 17 draws |
 | "Start New Campaign?" | 1 scene, 28 draws |
 | Loading `igc_snake_temple_room_start` | the loading screen again, 7 scenes |
-| The level: the opening cinematic | 13 scenes, 255 draws (227 precomputed), 38,000 triangles, 5.3 million pixels, 320 ms |
-| The first playable level, its first frame | 12 scenes, 544 draws (516 precomputed), 50,000 triangles, 6 million pixels, 630 ms |
+| The level: the opening cinematic | 13 scenes, 255 draws (227 precomputed), 38,000 triangles, 5.3 million pixels, 110 ms |
+| The first playable level, its first frame | 12 scenes, 544 draws (516 precomputed), 50,000 triangles, 6 million pixels |
 | The journal, opened on that level's first frame at a tutorial page | 1 scene, 16 draws, 2.3 million pixels |
-| Play: the level, the character run through it | 13 scenes, 546 draws (516 precomputed), 50,000 triangles, 5.4 million pixels, 350 ms |
+| Play: the level, the character run through it | 13 scenes, 546 draws (516 precomputed), 50,000 triangles, 5.4 million pixels, 120 ms |
 
 The level's picture was black, and the first reason was the ARM
 instruction set: the title carries some 8,500 instructions of hand-written
@@ -209,7 +209,7 @@ corner closes it, the chapter's title fades in over the level, and the
 left stick runs the character forward until the game opens the journal
 again, at jumping and climbing.
 
-What comes next: the levels at more than three frames a second (milestone
+What comes next: the levels at more than eight frames a second (milestone
 E), which is now the whole of the distance between this and playing; sound
 that can be
 heard, since the title streams it and the synthesiser plays it in silence;
@@ -279,7 +279,8 @@ interpretation, so that the first picture is already the title's own:
 | Textures | `src/gxm_tex.c`, `src/texdec.c`, `src/pvrtc.c` | the control words, the layouts, the block formats and both generations of PVRTC, filtering |
 | Pixels | `src/pixfmt.c` | every texel and surface format, between bytes and colours |
 | A draw | `src/gxm_draw.c` | vertex fetch to stored pixel: the tests, the fragment program, the blend |
-| Threads | `src/pool.c` | a draw's vertices in runs and its pixels in bands of rows, on the host's other cores |
+| A scene | `src/gxm_draw.c` | its draws kept until it ends, then drawn together: each draw's vertices and triangles, the triangles sorted into tiles of the target, the tiles filled |
+| Threads | `src/pool.c` | a draw to a thread for the vertices, a tile to a thread for the pixels, on three quarters of the host's processors |
 | Rows | `src/usse.c`, `src/half_rows.c` | the same bytecode run for sixty-four pixels at a time, each instruction taken apart once for all of them |
 
 How it was kept honest: the decoder's listing is compared line for line
@@ -302,8 +303,17 @@ Not there yet, in the order the title will want them:
    field's value looked up where it has few values (a half, a small
    float, a byte) in place of a division or a scaling each time, and a
    level read as rows of words where it is rows of words, which took a
-   quarter off them. `VITARECOMP_GXM_PROFILE` says where a frame's time
-   goes now: samples still first, then the programs, the walk over the
+   quarter off them. Then the threads: a draw at a time with its rows
+   shared out left most of them waiting through most draws, since a
+   scene is hundreds of draws and most are small, and the vertices were
+   one thread's. A scene's draws are now kept and drawn together when it
+   ends, as the console draws them: a draw to a thread for vertices and
+   triangles, then a tile of the target to a thread, the fullest tiles
+   first. A frame of the cinematic went from 350 ms and more to about
+   110 on twenty-four threads, and two minutes of the title that took
+   twenty-seven minutes to draw took six. `VITARECOMP_GXM_PROFILE` says
+   where a frame's time goes now: the threads are busy, and what they
+   are busy with is samples first, then the programs, the walk over the
    triangles, the store. What is left is in milestone E.
 2. Lines and points, depth bias, the mask-update program, multisampled
    targets, the YUV textures a movie arrives in, the transfer calls.

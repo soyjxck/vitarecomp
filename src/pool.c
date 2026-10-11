@@ -63,10 +63,13 @@ unsigned vita_pool_size(void) {
         const char *e = getenv("VITARECOMP_THREADS");
         unsigned n = e ? (unsigned)strtoul(e, NULL, 0) : 0;
         if (!n) {
-            /* leave the guest's own threads and the host's window a core or two */
+            /* Three quarters of the processors. The rest are for the guest's
+             * own threads and the host's window, and on a machine whose
+             * processors are two to a core, or fast ones and slow ones, the
+             * last quarter adds little: thirty threads on thirty-two
+             * processors drew a frame slower than twenty-four. */
             n = processors();
-            n = n > 4 ? n - 2 : n > 1 ? n - 1 : 1;
-            if (n > 16) n = 16;
+            n = n > 2 ? n * 3 / 4 : 1;
         }
         g.size = n > POOL_MAX ? POOL_MAX : n;
     }

@@ -692,7 +692,7 @@ function for; the last row is how to ask why.
 ### Seeing what was drawn
 
 A renderer that is wrong is wrong in a picture, and a picture does not say
-which of two hundred draws spoiled it. Five more ways of looking, for
+which of two hundred draws spoiled it. Six more ways of looking, for
 frames:
 
 | Tool | Switch | What it shows |
@@ -702,14 +702,16 @@ frames:
 | Textures | `VITARECOMP_GXM_TEXTURES=<dir>` | each texture a draw samples, once, as an image, with its layout on stderr; a format not decoded yet as its bytes |
 | One frame's scenes | `VITARECOMP_GXM_SCENES=<dir>`, with the frame switch above | what each scene of that frame left in its colour surface, as an image: the geometry buffer, the lit scene, each pass of the chain that ends on the display |
 | Programs | `VITARECOMP_GXP_DUMP=<dir>`, then `armrecomp gxp <file>` | the shader programs a title registers, and each one's tables and code as text |
+| Registers read unwritten | `VITARECOMP_GXM_UNWRITTEN=1` | each fragment program that reads a register nothing wrote, with the instruction and the register, and whether any of it reaches the program's result or its verdict on a pixel: every row of pixels is run twice on two fills and the two compared. The frames drawn in this mode are not pictures |
 
 Three switches are for time, not for looking. `VITARECOMP_GXM_PROFILE=<n>`
 prints, every n frames, what a frame cost by stage: the drawing thread's
-own time in setting a draw up, shading its vertices, setting up its
-triangles and filling them, and, summed over the threads that fill, the
-fragment programs' inputs, their texture samples, the programs, the tests
-and the store, with how many pixels went through a program in rows and how
-many one at a time. `VITARECOMP_GXM_SKIP=<first>-<last>`
+own time in making the draws and in the three steps of drawing a scene's
+list of them (vertices and triangles, sorting into tiles, the fill), and,
+summed over the threads that take part, the vertices and triangles again
+and, in the fill, the fragment programs' inputs, their texture samples,
+the programs, the tests and the store, with how many pixels went through a
+program in rows and how many one at a time. `VITARECOMP_GXM_SKIP=<first>-<last>`
 counts the draws of those frames and draws none of them, which takes a
 title past a screen it holds for a fixed time, a health warning over a
 costly scene, in seconds. What those frames would have left in any
@@ -735,13 +737,20 @@ did (`src/clock.c`): a sixtieth of a second at each vertical blank, the
 length of a wait when every thread is waiting, a microsecond for each
 reading. Two runs then write the same frames, byte for byte, and a change
 to the renderer can be judged by a hash. That is how the renderer was put
-on several threads (`VITARECOMP_THREADS` says how many; one is the
-renderer as it was): twenty frames of a run, the same before and after.
-The same twenty stood behind keeping compressed textures decoded and
-behind running fragment programs for a row of pixels at a time; for the
-last there is a switch that stays, `VITARECOMP_GXM_SCALAR=1`, which shades
-every pixel by itself, so the two can be compared on any frame of any
-title.
+on several threads (`VITARECOMP_THREADS` says how many; left alone it is
+three quarters of the host's processors): twenty frames of a run, the same
+before and after. The same twenty stood behind keeping compressed textures
+decoded and behind running fragment programs for a row of pixels at a
+time; for the last there is a switch that stays, `VITARECOMP_GXM_SCALAR=1`,
+which shades every pixel by itself, so the two can be compared on any
+frame of any title. Drawing a scene's draws together at its end, a tile of
+the target to a thread, has its switch too: `VITARECOMP_GXM_AT_ONCE=1`
+draws each draw as it is made. One thread, thirty, a pixel at a time, a
+draw at a time: the same frame, and seventy-five frames spread over two
+minutes of a title were the same as before the change. A run compared
+that way has to start where the other started: a title that finds a save
+from the last run goes another way through its menus, and its frames are
+then some other frames.
 
 The first scrambled picture went through all four in that order. The
 census said every program ran. The textures were right. The geometry

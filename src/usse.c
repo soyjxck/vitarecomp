@@ -1749,6 +1749,59 @@ static void wide_modifiers(wvalue *v, uint8_t flags, unsigned n) {
     }
 }
 
+void usse_extents(const usse_insn *code, uint32_t count, uint16_t words[3]) {
+    words[0] = words[1] = words[2] = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const usse_insn *in = &code[i];
+        const usse_operand *ops[4] = { &in->dest, &in->src0, &in->src1, &in->src2 };
+        for (int k = 0; k < 4; k++) {
+            int bank = ops[k]->bank == USSE_TEMP ? 0 : ops[k]->bank == USSE_PA ? 1 : ops[k]->bank == USSE_OUT ? 2 : -1;
+            if (bank < 0) continue;
+            /* a vector of four words, twice over for a pair packed from two registers,
+             * and as far again for each time the instruction repeats */
+            uint32_t reach = (uint32_t)ops[k]->num + 8u + 16u * in->repeat;
+            if (reach > USSE_WORDS) reach = USSE_WORDS;
+            if (reach > words[bank]) words[bank] = (uint16_t)reach;
+        }
+    }
+}
+
+/* --- reads of what nothing wrote (usse.h) ------------------------------------------------ */
+
+int usse_wide_watch;
+static _Thread_local usse_unwritten t_unwritten;
+static _Thread_local uint32_t t_wide_pc;
+
+const usse_unwritten *usse_wide_unwritten(void) { return &t_unwritten; }
+
+static void note_unwritten(const usse_operand *op, uint8_t type, uint8_t channel, int64_t num) {
+    if (!t_unwritten.hits++) {
+        t_unwritten.instruction = t_wide_pc;
+        t_unwritten.bank = op->bank;
+        t_unwritten.channel = channel;
+        t_unwritten.type = type;
+        t_unwritten.num = (uint16_t)num;
+    }
+}
+
+/* Whether every lane of the field a load is about to read still holds the
+ * mark. A row of one lane is not asked: one pixel can hold any value. */
+static void watch_load(const usse_operand *op, uint8_t type, uint8_t ch, const uint32_t *rows, unsigned n, int64_t num) {
+    const uint32_t *row;
+    uint32_t mark = USSE_UNWRITTEN, field = 0xFFFFFFFFu;
+    unsigned at = 0;
+    if (n < 2) return;
+    switch (type) {
+    case USSE_F32: case USSE_U32: case USSE_S32: row = rows + (size_t)ch * LANES; break;
+    case USSE_F16: case USSE_U16: case USSE_S16: row = rows + (size_t)(ch >> 1) * LANES; at = 16u * (ch & 1u); field = 0xFFFFu; break;
+    case USSE_U8: case USSE_S8: row = rows; at = 8u * ch; field = 0xFFu; break;
+    default: return;
+    }
+    for (unsigned l = 0; l < n; l++)
+        if (((row[l] >> at) & field) != ((mark >> at) & field)) return;
+    note_unwritten(op, type, ch, num);
+}
+
 static void wide_load(usse_wide *w, const usse_operand *op, uint8_t mask, int32_t shift, wvalue *out) {
     unsigned n = w->lanes;
     out->n = 0;
@@ -1783,6 +1836,7 @@ static void wide_load(usse_wide *w, const usse_operand *op, uint8_t mask, int32_
         } else {
             const uint32_t *half = rows + (size_t)(ch >> 1) * LANES;
             unsigned at = 16u * (ch & 1u), byte = 8u * ch;
+            if (usse_wide_watch) watch_load(op, type, ch, rows, n, (int64_t)op->num + shift);
             switch (type) {
             case USSE_F32: case USSE_U32: case USSE_S32: memcpy(u, rows + (size_t)ch * LANES, (size_t)n * 4); break;
             case USSE_F16: vita_halves_to_floats(half, ch & 1, out->v.f[out->n], n); break;
@@ -2176,13 +2230,21 @@ void usse_run_wide(const usse_insn *code, uint32_t count, usse_wide *w) {
     for (int role = 0; role < 4; role++)
         for (int j = 0; j < 17; j++) w->inc[role][j] = j;
     memset(w->killed, 0, n);
+    if (usse_wide_watch) memset(&t_unwritten, 0, sizeof(t_unwritten));
     for (uint32_t pc = 0; pc < count; pc++) {
         const usse_insn *in = &code[pc];
         const uint8_t *exec = NULL;
+        if (usse_wide_watch) t_wide_pc = pc;
         if (in->pred != USSE_PRED_NONE && in->pred != USSE_PRED_PN) {
             /* a lane whose predicate is false is left exactly as it was */
             const uint8_t *p = w->pred[in->pred == USSE_PRED_NOT_P0 ? 0 : in->pred == USSE_PRED_NOT_P1 ? 1 : in->pred - USSE_PRED_P0];
             int negate = in->pred == USSE_PRED_NOT_P0 || in->pred == USSE_PRED_NOT_P1, any = 0;
+            if (usse_wide_watch && n > 1) {
+                unsigned l = 0;
+                usse_operand which = { USSE_PREDICATE, 0, 0, 0, (uint16_t)(p - w->pred[0]) / LANES, { 0, 0, 0, 0 } };
+                while (l < n && p[l] == USSE_UNWRITTEN_PREDICATE) l++;
+                if (l == n) note_unwritten(&which, 0, 0, which.num);
+            }
             for (unsigned l = 0; l < n; l++) { mask[l] = (uint8_t)((p[l] != 0) != negate); any |= mask[l]; }
             if (!any) continue;
             exec = mask;

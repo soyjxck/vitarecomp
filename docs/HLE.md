@@ -154,11 +154,35 @@ in a few places. What it took, now that it draws:
   depth surface, the precomputed structures with their arrays in the
   block the title supplies. Programs are read in place from the title's
   GXP data. Only what a title cannot see is kept on the host side.
-- **A scene is finished when it ends.** The console renders a scene
-  after the call returns and signals the title through notification
-  words; here the scene is drawn as its draws arrive, into the colour
-  surface's own memory, so every notification is already true and the
-  display queue's callback runs at once.
+- **A scene is drawn when it ends.** The console renders a scene after
+  the call that ends it returns, and signals the title through
+  notification words. Here a draw is put on a list as it is made, its
+  state copied and its uniforms read, and the list is drawn inside the
+  call that ends the scene, into the colour surface's own memory: every
+  notification is true by the time the title can look, and the display
+  queue's callback runs at once. A title leaves a draw's vertices,
+  indices and textures alone until its scene is over, because the
+  console reads them then, and so they are read then here. The list is
+  also drawn early where waiting would be wrong: when the ring that
+  default uniform buffers come from starts again, and before a draw that
+  samples the surface its own scene draws to, which the next point is
+  about.
+- **A scene can read what it has just drawn.** One title keeps a chain
+  of smaller and smaller copies of its picture side by side in one
+  surface, and makes each from the last in a single scene: every draw
+  samples a rectangle of the surface it is drawing to. On the console
+  that works because tiles are finished in order. Here everything before
+  such a draw is drawn first and the draw itself before anything after
+  it, which is the same picture.
+- **A program starts on registers that hold nothing.** Programs read
+  registers they never wrote: a compiler that has three components to
+  multiply multiplies four. Of seventeen programs of one title that do
+  so, one lets the fourth through to its result. The console gives such
+  a read whatever the last program left on that pipeline. Here every
+  register a program can reach is zero when it starts, in both
+  interpreters, or the picture would change with which thread drew what;
+  `VITARECOMP_GXM_UNWRITTEN=1` names the programs and says whether what
+  they read reaches what they write.
 - **Depth lives beside the scene.** The console keeps depth, stencil and
   the mask bit in tile memory, and touches the title's depth surface
   only when asked to load or store. The title relies on that: it points

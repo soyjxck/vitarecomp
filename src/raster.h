@@ -99,4 +99,10 @@ int raster_setup(raster *r, const raster_vertex *a, const raster_vertex *b, cons
 uint32_t raster_walk(const raster *r, const raster_piece *piece, const float *planes, int row0, int row1,
                      raster_shade shade, void *user);
 
+/* The same kept to columns col0 <= x < col1 as well: a piece walked tile by
+ * tile hands over each of its pixels once, with the values it would have
+ * had in one walk. */
+uint32_t raster_walk_rect(const raster *r, const raster_piece *piece, const float *planes, int row0, int row1,
+                          int col0, int col1, raster_shade shade, void *user);
+
 #endif /* VITARECOMP_RASTER_H */

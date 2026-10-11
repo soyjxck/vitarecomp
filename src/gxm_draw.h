@@ -7,9 +7,9 @@
  * fragment program and the blend, and store the result in the colour
  * surface's own format. It is a reference renderer: one sample a pixel,
  * every program interpreted. It is meant to be right before it is fast, and
- * what it does for speed changes no pixel: a draw's rows are shared out
- * among threads, and a fragment program is run for a row of pixels at a
- * time where it is one that can be.
+ * what it does for speed changes no pixel: a scene's draws are kept and
+ * drawn together, a tile of the target to a thread, and a fragment program
+ * is run for a row of pixels at a time where it is one that can be.
  */
 
 #ifndef VITARECOMP_GXM_DRAW_H
@@ -30,6 +30,7 @@ typedef struct {
     uint64_t      name;                     /* a hash of its bytes: what a dump of it is called */
     int           ok;                       /* read, and all of its code can be run */
     int           wide;                     /* and its main part for a row of pixels at once (usse.h) */
+    uint16_t      words[3];                 /* how far into its temporaries, inputs and outputs it can reach */
     gxp_program   gxp;
     gxm_attribute attributes[16];           /* a vertex program's inputs */
     uint32_t      attribute_count;
@@ -94,9 +95,26 @@ extern gxm_draw_counters gxm_counters;
 
 enum { GXM_TRIANGLES = 0, GXM_LINES, GXM_POINTS, GXM_TRIANGLE_STRIP, GXM_TRIANGLE_FAN, GXM_TRIANGLE_EDGES };
 
-/* Draw. `index_size` is 2 or 4; `count` indices are used for each of
- * `instances` instances. Returns how many pixels passed the depth and
- * stencil tests. The pixels are shaded on the threads of pool.h. */
+/* A draw is made in two steps. gxm_draw_add puts it on the list of the
+ * scene in progress: the state is copied, the uniforms and the texture
+ * words are read, and nothing is drawn. `index_size` is 2 or 4; `count`
+ * indices are used for each of `instances` instances. `tally`, when not
+ * zero, is a word of the title's that learns what the draw put on the
+ * screen: set to 1 if any pixel passed the tests when `tally_set`,
+ * otherwise the number that passed added to it.
+ *
+ * gxm_draw_flush draws the list, on the threads of pool.h, and empties it:
+ * at the end of the scene, and before anything that needs the pixels or
+ * that takes back memory the draws still point into. The vertices, the
+ * indices and the textures are read then. It returns how many pixels
+ * passed the depth and stencil tests.
+ *
+ * gxm_draw is one draw made and drawn at once, for a caller that wants a
+ * draw's own count. */
+void gxm_draw_add(const gxm_draw_state *s, unsigned primitive, unsigned index_size, uint32_t indices,
+                  uint32_t count, uint32_t instances, uint32_t tally, int tally_set);
+uint32_t gxm_draw_flush(void);
+
 /* Where the first vertices of the last draw came out of the vertex program,
  * in the order the indices first name them: x, y, z, w before the divide.
  * For the log of a frame's draws. Returns how many were written. */

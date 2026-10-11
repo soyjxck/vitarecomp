@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <threads.h>
 #include <time.h>
 
 gxm_draw_counters gxm_counters;
@@ -21,12 +22,13 @@ gxm_draw_counters gxm_counters;
 /* --- where the time went -------------------------------------------------------------
  * VITARECOMP_GXM_PROFILE=<n>: every n frames, a line on stderr saying what
  * a frame of them cost, by stage. The first four are the drawing thread's
- * own time, one after another; the rest are summed over every thread that
- * shaded, so on sixteen threads they add up to many times the fill they
- * are part of. Clocks are read once a batch of pixels, not once a pixel,
- * and not at all when this is off. */
+ * own time, one after another: making the draws, and the three steps of
+ * drawing a scene's list of them. The rest are summed over every thread
+ * that took part, so on sixteen threads they add up to many times the step
+ * they are part of. Clocks are read once a batch of pixels, not once a
+ * pixel, and not at all when this is off. */
 enum { T_BEGIN, T_VERTICES, T_SETUP, T_FILL, T_MAIN };                  /* the drawing thread */
-enum { T_INPUTS, T_SAMPLES, T_PROGRAM, T_STORE, T_BAND, T_WORKER };     /* each shading thread */
+enum { T_INPUTS, T_SAMPLES, T_PROGRAM, T_STORE, T_BAND, T_PREPARE, T_WORKER };     /* each thread */
 static uint32_t g_profile;
 static uint64_t g_main_ns[T_MAIN];
 
@@ -61,9 +63,8 @@ typedef struct {
     usse_state st;
 } stage;
 
-/* The textures of both stages of the draw in progress. A draw is never
- * entered twice; its threads read these and write none of them. */
-static gxm_tex g_textures[2][GXP_TEXTURE_UNITS];
+/* What a vertex stage's secondary program decodes blocks into, while a draw
+ * is being made. */
 static gxm_tex_cache g_vertex_cache[GXP_TEXTURE_UNITS];
 
 static uint32_t env_read32(void *user, uint32_t address) {
@@ -274,7 +275,7 @@ static void dump_texture(const gxm_tex *t, unsigned unit, int fragment) {
  * registers, the addresses of those it reads from memory, its literals;
  * then run its secondary program, once for the whole draw. */
 static void stage_begin(stage *g, const gxp_program *p, const uint32_t buffers[GXP_BUFFERS],
-                        uint32_t textures[GXP_TEXTURE_UNITS][4], gxm_tex *storage, gxm_tex_cache *cache) {
+                        uint32_t textures[GXP_TEXTURE_UNITS][4], gxm_tex *storage, gxm_tex_cache *cache, int fragment) {
     memset(g, 0, sizeof(*g));
     g->p = p;
     g->cache = cache;
@@ -305,7 +306,7 @@ static void stage_begin(stage *g, const gxp_program *p, const uint32_t buffers[G
         if (gxm_tex_is_packed(t)) attach_unpacked(t);
         g->tex[unit] = t;
         gxm_tex_cache_reset(&cache[unit]);          /* what it held was another draw's texture */
-        dump_texture(t, unit, storage == g_textures[1]);
+        dump_texture(t, unit, fragment);
     }
 
     g->env.user = g;
@@ -342,15 +343,19 @@ typedef struct {
 
 struct batch;
 
-/* What a thread shading part of a draw has to itself: the fragment stage's
- * registers, the blocks it has decoded, its counts. */
+/* What a thread drawing part of a scene has to itself: a copy of the stage
+ * it is running, the blocks it has decoded, its counts, and the vertices of
+ * the draw it is setting up. */
 typedef struct {
     const draw *d;
-    uint32_t serial, vertex_serial;         /* the draws `f` and `v` were last copied for */
+    uint32_t serial;                        /* the draw `f` was last copied for */
     stage    f, v;
     gxm_tex_cache cache[GXP_TEXTURE_UNITS];
     gxm_draw_counters counters;
     uint32_t pixels;
+    uint32_t *draw_pixels, draw_pixels_cap; /* what it has put on the screen, by draw of the list */
+    raster_vertex *vertices;                /* of the draw in hand: each distinct index, shaded */
+    uint32_t *slot, *vertex_index, vertices_cap, slot_cap;
     struct batch *b;                        /* the pixels waiting for the program, when they go in rows */
     uint64_t ns[T_WORKER];                  /* for the profile */
     uint64_t in_rows, alone;                /* program runs: pixels that went in rows, and one at a time */
@@ -422,6 +427,11 @@ static void vertex_inputs(draw *d) {
 static void shade_vertex(const draw *d, stage *g, uint32_t index, uint32_t instance, raster_vertex *out) {
     const gxp_program *p = g->p;
     usse_state *st = &g->st;
+    const uint16_t *words = d->s->vertex->words;
+    memset(st->temp, 0, words[0] * sizeof(uint32_t));
+    memset(st->pa, 0, words[1] * sizeof(uint32_t));
+    memset(st->internal, 0, sizeof(st->internal));
+    memset(st->pred, 0, sizeof(st->pred));
     for (uint32_t i = 0; i < d->inputs; i++) {
         uint32_t size = (uint32_t)ATTRIBUTE_BYTES[d->in[i].format] * d->in[i].components;
         uint32_t at = d->in[i].base + (d->in[i].per_instance ? instance : index) * d->in[i].stride;
@@ -553,6 +563,14 @@ static void run_fragment(worker *wk, int x, int y, float depth, const float *var
     const gxp_program *p = wk->f.p;
     usse_state *st = &wk->f.st;
     float v[4], dx[4], dy[4], rgba[4];
+
+    /* a program starts on registers that hold nothing (flush says why) */
+    const uint16_t *words = d->s->fragment->words;
+    memset(st->temp, 0, words[0] * sizeof(uint32_t));
+    memset(st->pa, 0, words[1] * sizeof(uint32_t));
+    memset(st->out, 0, words[2] * sizeof(uint32_t));
+    memset(st->internal, 0, sizeof(st->internal));
+    memset(st->pred, 0, sizeof(st->pred));
 
     for (uint32_t i = 0; i < p->input_count; i++) {
         const gxp_input *in = &p->inputs[i];
@@ -798,6 +816,61 @@ static void lane_value(const draw *d, const struct batch *b, unsigned slot, unsi
     memcpy(dy, b->ddy[l] + at, 4 * sizeof(float));
 }
 
+/* VITARECOMP_GXM_UNWRITTEN=1: every register is filled with a mark before a
+ * row of pixels goes through its program, and a program that reads one
+ * still marked is named, once for each instruction of it that does. What
+ * such a program draws depends on what ran before it. */
+static mtx_t g_unwritten_lock;
+static void unwritten_lock_init(void) { mtx_init(&g_unwritten_lock, mtx_plain); }
+
+/* VITARECOMP_GXM_UNWRITTEN=1: a row of pixels goes through its program
+ * twice, with every register filled beforehand with one mark and then with
+ * another. A program that reads a register still marked is named, once,
+ * with the first instruction of it that does; and whether anything of the
+ * difference between the two fills reached its result or its verdict on a
+ * pixel, which is whether what it draws depends on what ran before it. */
+static void report_unwritten(const gxm_draw_state *s, const gxp_program *p, const usse_unwritten *u,
+                             uint32_t (*one)[USSE_LANES], const uint8_t *one_killed,
+                             uint32_t (*two)[USSE_LANES], const uint8_t *two_killed, unsigned n) {
+    static const char *const BANK[] = { "r", "pa", "o", "sa", "i" };
+    static struct { uint64_t name; uint32_t reached; } told[256];
+    static uint32_t tellers;
+    static once_flag once = ONCE_FLAG_INIT;
+    const gxm_program *fp = s->fragment;
+    /* which bits of the result the two fills left different, and whether a pixel was discarded on one only */
+    uint32_t differs[4] = { 0, 0, 0, 0 }, reached = 0;
+    unsigned words = p->result_type == GXP_F32 ? 4 : p->result_type == GXP_U8 || p->result_type == GXP_S8 ? 1 : 2;
+    for (unsigned l = 0; l < n; l++) {
+        if (one_killed[l] != two_killed[l]) reached |= 0x100;
+        if (one_killed[l] || two_killed[l]) continue;
+        for (unsigned k = 0; k < words; k++) differs[k] |= one[k][l] ^ two[k][l];
+    }
+    for (unsigned k = 0; k < words; k++) if (differs[k]) reached |= 1u << k;
+
+    call_once(&once, unwritten_lock_init);
+    mtx_lock(&g_unwritten_lock);
+    uint32_t i = 0;
+    while (i < tellers && told[i].name != fp->name) i++;
+    if (i == tellers && tellers < 256) { told[tellers].name = fp->name; told[tellers++].reached = 0xFFFFFFFFu; }
+    if (i < tellers && (told[i].reached == 0xFFFFFFFFu || (reached & ~told[i].reached))) {
+        told[i].reached = told[i].reached == 0xFFFFFFFFu ? reached : told[i].reached | reached;
+        if (u->bank == USSE_PREDICATE)
+            fprintf(stderr, "gxm: f_%016llx, instruction %u, is conditional on p%u, which nothing of it has set",
+                    (unsigned long long)fp->name, u->instruction + 1, u->num);
+        else
+            fprintf(stderr, "gxm: f_%016llx, instruction %u, reads %s%u.%c (type %u), which nothing has written",
+                    (unsigned long long)fp->name, u->instruction + 1, u->bank < 5 ? BANK[u->bank] : "?", u->num,
+                    "xyzw"[u->channel & 3], u->type);
+        if (!reached) fprintf(stderr, "; nothing of it reaches the result\n");
+        else fprintf(stderr, "; it reaches the result: bits %08X %08X %08X %08X of its words%s (result type %u, %u components; "
+                             "blend %02X%02X%02X%02X, output %u, surface of %u bytes)\n",
+                     differs[0], differs[1], differs[2], differs[3], (reached & 0x100) ? ", and whether a pixel is discarded" : "",
+                     p->result_type, p->result_components, fp->blend[0], fp->blend[1], fp->blend[2], fp->blend[3],
+                     fp->output_format, s->colour.bytes);
+    }
+    mtx_unlock(&g_unwritten_lock);
+}
+
 /* Shade the pixels waiting: their inputs into rows of registers, the
  * program once, then each pixel's tests if they come after it, and its
  * colour. */
@@ -814,48 +887,81 @@ static void flush(worker *wk) {
     uint64_t lap = g_profile ? now_ns() : 0, at;
 #define LAP(stage) do { if (g_profile) { at = now_ns(); wk->ns[stage] += at - lap; lap = at; } } while (0)
 
-    for (uint32_t i = 0; i < p->input_count; i++) {
-        const gxp_input *in = &p->inputs[i];
-        if (in->has_iterator && in->iterator_reg < USSE_WORDS - 4) {
-            uint32_t (*row)[USSE_LANES] = &w->pa[in->iterator_reg];
-            for (unsigned k = 0; k < in->components; k++) {
-                const float *from = slot_row(d, b, n, in->source, k, scratch);
-                if (in->type == USSE_F32) memcpy(row[k], from, n * sizeof(float));
-                else if (in->type == USSE_F16) vita_floats_to_halves(from, row[k >> 1], (int)(k & 1), n);
-                else for (unsigned l = 0; l < n; l++) pack(&row[k >> 2][l], GXP_U8, k & 3, roundf(unit_clamp(from[l]) * 255.0f));
-            }
-            LAP(T_INPUTS);
+    uint32_t (*result)[USSE_LANES] = (p->flags & GXP_FLAG_NATIVECOLOR) ? w->out : w->pa;
+    uint32_t first_result[4][USSE_LANES];
+    uint8_t first_killed[USSE_LANES];
+    usse_unwritten first_read = { 0 };
+    for (int pass = usse_wide_watch ? 0 : 1; pass < 2; pass++) {
+        if (usse_wide_watch) {
+            /* twice, on two fills; the picture drawn in this mode is no picture */
+            uint32_t fill = pass ? USSE_UNWRITTEN : ~USSE_UNWRITTEN;
+            for (unsigned r = 0; r < USSE_WORDS; r++)
+                for (unsigned l = 0; l < n; l++) w->temp[r][l] = w->pa[r][l] = w->out[r][l] = fill;
+            for (unsigned r = 0; r < 16; r++) for (unsigned l = 0; l < n; l++) w->internal[r][l] = fill;
+            memset(w->pred, pass ? USSE_UNWRITTEN_PREDICATE : 0, sizeof(w->pred));
+        } else {
+            /* A program starts on registers that hold nothing. On the console
+             * they hold what the last program to run on that pipeline left,
+             * which no title can mean anything by; here that would be what the
+             * last row this thread shaded left, and a picture that changed with
+             * which thread drew which tile. */
+            const uint16_t *words = s->fragment->words;
+            for (unsigned r = 0; r < words[0]; r++) memset(w->temp[r], 0, n * sizeof(uint32_t));
+            for (unsigned r = 0; r < words[1]; r++) memset(w->pa[r], 0, n * sizeof(uint32_t));
+            for (unsigned r = 0; r < words[2]; r++) memset(w->out[r], 0, n * sizeof(uint32_t));
+            for (unsigned r = 0; r < 16; r++) memset(w->internal[r], 0, n * sizeof(uint32_t));
+            memset(w->pred, 0, sizeof(w->pred));
         }
-        if (in->has_texture && in->texture_reg < USSE_WORDS - 4) {
-            uint32_t (*row)[USSE_LANES] = &w->pa[in->texture_reg];
-            const gxm_tex *t = in->unit < GXP_TEXTURE_UNITS ? wk->f.tex[in->unit] : NULL;
-            for (unsigned l = 0; l < n; l++) {
-                if (t) lane_value(d, b, in->coord, l, v, dx, dy);
-                int got = sample_input(wk, in, t, v, dx, dy, rgba);
-                for (int k = 0; k < 4; k++) reg[k] = row[k][l];
-                store_sample(in, t, rgba, got, reg);
-                for (int k = 0; k < 4; k++) row[k][l] = reg[k];
-            }
-            LAP(T_SAMPLES);
-        }
-    }
-    if ((p->flags & GXP_FLAG_FRAGCOLOR) && s->has_colour) {
-        for (unsigned l = 0; l < n; l++) {
-            for (int k = 0; k < 4; k++) reg[k] = w->out[k][l];
-            preload(s, p, b->x[l], b->y[l], reg);
-            for (int k = 0; k < 4; k++) w->out[k][l] = reg[k];
-        }
-    }
 
-    w->sa = wk->f.sa;
-    w->env = &wk->f.env;
-    w->lanes = n;
-    LAP(T_INPUTS);
-    usse_run_wide(p->primary, p->primary_count, w);
-    LAP(T_PROGRAM);
+        for (uint32_t i = 0; i < p->input_count; i++) {
+            const gxp_input *in = &p->inputs[i];
+            if (in->has_iterator && in->iterator_reg < USSE_WORDS - 4) {
+                uint32_t (*row)[USSE_LANES] = &w->pa[in->iterator_reg];
+                for (unsigned k = 0; k < in->components; k++) {
+                    const float *from = slot_row(d, b, n, in->source, k, scratch);
+                    if (in->type == USSE_F32) memcpy(row[k], from, n * sizeof(float));
+                    else if (in->type == USSE_F16) vita_floats_to_halves(from, row[k >> 1], (int)(k & 1), n);
+                    else for (unsigned l = 0; l < n; l++) pack(&row[k >> 2][l], GXP_U8, k & 3, roundf(unit_clamp(from[l]) * 255.0f));
+                }
+                LAP(T_INPUTS);
+            }
+            if (in->has_texture && in->texture_reg < USSE_WORDS - 4) {
+                uint32_t (*row)[USSE_LANES] = &w->pa[in->texture_reg];
+                const gxm_tex *t = in->unit < GXP_TEXTURE_UNITS ? wk->f.tex[in->unit] : NULL;
+                for (unsigned l = 0; l < n; l++) {
+                    if (t) lane_value(d, b, in->coord, l, v, dx, dy);
+                    int got = sample_input(wk, in, t, v, dx, dy, rgba);
+                    for (int k = 0; k < 4; k++) reg[k] = row[k][l];
+                    store_sample(in, t, rgba, got, reg);
+                    for (int k = 0; k < 4; k++) row[k][l] = reg[k];
+                }
+                LAP(T_SAMPLES);
+            }
+        }
+        if ((p->flags & GXP_FLAG_FRAGCOLOR) && s->has_colour) {
+            for (unsigned l = 0; l < n; l++) {
+                for (int k = 0; k < 4; k++) reg[k] = w->out[k][l];
+                preload(s, p, b->x[l], b->y[l], reg);
+                for (int k = 0; k < 4; k++) w->out[k][l] = reg[k];
+            }
+        }
+
+        w->sa = wk->f.sa;
+        w->env = &wk->f.env;
+        w->lanes = n;
+        LAP(T_INPUTS);
+        usse_run_wide(p->primary, p->primary_count, w);
+        LAP(T_PROGRAM);
+        if (usse_wide_watch && !pass) {
+            memcpy(first_result, result, sizeof(first_result));
+            memcpy(first_killed, w->killed, sizeof(first_killed));
+        } else if (usse_wide_watch) {
+            first_read = *usse_wide_unwritten();
+            if (first_read.hits) report_unwritten(s, p, &first_read, first_result, first_killed, result, w->killed, n);
+        }
+    }
     wk->in_rows += n;
 
-    uint32_t (*result)[USSE_LANES] = (p->flags & GXP_FLAG_NATIVECOLOR) ? w->out : w->pa;
     for (unsigned l = 0; l < n; l++) {
         int x = b->x[l], y = b->y[l];
         if (d->late) {
@@ -908,28 +1014,56 @@ static int collect_pixel(void *user, int x, int y, float depth, int clockwise,
     return 1;
 }
 
-/* --- the draw --------------------------------------------------------------------------
- * In two parts. First, on the calling thread: every vertex through the
- * vertex program, every triangle clipped and set up. Then the pixels: the
- * rows the draw covers are cut into bands, and each band is walked by one
- * thread, which takes the draw's triangles in their order and shades what
- * falls in its rows. Bands share no pixel, so the order of the triangles is
- * kept wherever it matters, and nothing is locked. */
+/* --- a scene's draws ---------------------------------------------------------------------
+ * A draw is not drawn when it is made. Its state is copied, its uniforms
+ * and its textures are read, and it is put on a list; the list is drawn
+ * when the scene ends, which is when the console draws it too, and why a
+ * title leaves a draw's vertices and textures alone until then. Drawing
+ * the list has three steps, and the two long ones are shared out whole:
+ *
+ *   every draw's vertices through its vertex program and its triangles
+ *   clipped and set up, a draw to a thread;
+ *   the triangles sorted into the tiles of the target they touch, in the
+ *   order they were drawn;
+ *   every tile filled, a tile to a thread: its triangles in that order,
+ *   the pixels of each that fall in the tile tested and shaded.
+ *
+ * Tiles share no pixel, so the order of the triangles is kept wherever it
+ * matters, and nothing is locked. Drawing a draw at a time, its rows
+ * shared out, left most threads waiting through most draws: a scene is
+ * hundreds of draws and most of them are small. */
 
-#define BAND_ROWS      8
-#define WORTH_SHARING  16384            /* pixels, by the boxes of the triangles: below this, one thread */
+#define TILE 64u                        /* pixels a side: 32 was no faster on sixteen threads or on thirty */
 
-static raster_vertex *g_vertices;
-static uint32_t *g_slot, *g_vertex_index, g_vertices_cap, g_slot_cap;
+typedef struct {
+    gxm_draw_state s;                       /* as it stood when the draw was made */
+    unsigned primitive, index_size;
+    uint32_t indices, count, instances;
+    uint32_t tally;                         /* the title's word that counts what the draw put on the screen, or 0 */
+    int      tally_set;                     /* the word is set to 1 rather than added to */
+    draw     d;
+    gxm_tex  tex[2][GXP_TEXTURE_UNITS];     /* the textures of its two stages */
+    raster   r;
+    raster_piece *pieces;                   /* its triangles, set up: each piece, and its planes at the same place */
+    float   *planes;
+    uint32_t piece_count, pieces_cap;
+    size_t   planes_cap;
+    uint32_t pixels;
+    float    first[4][4];                   /* where its first vertices came out */
+    unsigned first_count;
+} queued;
 
-/* The draw's triangles, set up: each piece, and its planes at the same place
- * in a table of floats. */
-static raster_piece *g_pieces;
-static float *g_planes;
-static uint32_t g_pieces_cap, g_piece_count;
-static size_t g_planes_cap;
+typedef struct { uint32_t draw, piece; } tile_ref;
 
+static queued **g_queue;                    /* kept from scene to scene, with what each has grown to */
+static uint32_t g_queued, g_queue_cap;
+static tile_ref *g_refs;                    /* every tile's triangles, tile after tile */
+static uint32_t *g_tile_first, *g_tile_at;  /* where each tile's begin in that, and a place in each while filling it */
+static uint32_t *g_tile_order;              /* the tiles, those with most triangles first */
+static uint32_t g_refs_cap, g_tiles_cap, g_tiles_x, g_tiles_y;
 static worker *g_workers;
+static float g_first[4][4];
+static unsigned g_first_count;
 
 static void profile_report(void) {
     uint64_t ns[T_WORKER] = { 0 }, in_rows = 0, alone = 0;
@@ -943,55 +1077,347 @@ static void profile_report(void) {
     }
     double per = 1e-6 / (double)g_profile;              /* nanoseconds over the frames, to milliseconds a frame */
     uint64_t batched = ns[T_INPUTS] + ns[T_SAMPLES] + ns[T_PROGRAM] + ns[T_STORE];
-    fprintf(stderr, "gxm time, ms a frame over %u frames to %u: begin %.1f, vertices %.1f, triangles %.1f, fill %.1f; "
-                    "in the fill, over %u threads: inputs %.1f, samples %.1f, programs %.1f, tests and store %.1f, "
+    fprintf(stderr, "gxm time, ms a frame over %u frames to %u: draws begun %.1f, vertices and triangles %.1f, "
+                    "sorting %.1f, fill %.1f; summed over %u threads: vertices and triangles %.1f, and in the fill "
+                    "inputs %.1f, samples %.1f, programs %.1f, tests and store %.1f, "
                     "the walk and pixels shaded alone %.1f; %.0f pixels a frame in rows, %.0f alone\n",
             g_profile, g_frame - 1, (double)g_main_ns[T_BEGIN] * per, (double)g_main_ns[T_VERTICES] * per,
             (double)g_main_ns[T_SETUP] * per, (double)g_main_ns[T_FILL] * per, vita_pool_size(),
+            (double)ns[T_PREPARE] * per,
             (double)ns[T_INPUTS] * per, (double)ns[T_SAMPLES] * per, (double)ns[T_PROGRAM] * per, (double)ns[T_STORE] * per,
             (double)(ns[T_BAND] > batched ? ns[T_BAND] - batched : 0) * per,
             (double)in_rows / (double)g_profile, (double)alone / (double)g_profile);
     memset(g_main_ns, 0, sizeof(g_main_ns));
 }
 
-static int reserve(uint32_t vertices, uint32_t range) {
-    if (vertices > g_vertices_cap) {
-        raster_vertex *v = realloc(g_vertices, (size_t)vertices * sizeof(*v));
-        if (v) g_vertices = v;
-        uint32_t *n = realloc(g_vertex_index, (size_t)vertices * sizeof(*n));
-        if (n) g_vertex_index = n;
-        if (!v || !n) return 0;
-        g_vertices_cap = vertices;
+unsigned gxm_draw_positions(float (*out)[4], unsigned max) {
+    unsigned n = g_first_count < max ? g_first_count : max;
+    for (unsigned i = 0; i < n; i++) memcpy(out[i], g_first[i], 4 * sizeof(float));
+    return n;
+}
+
+/* --- a draw is made ---------------------------------------------------------------------- */
+
+static uint32_t up_to_two(uint32_t n) { uint32_t p = 1; while (p < n) p <<= 1; return p; }
+
+/* Whether a stage of a draw has a texture whose bytes lie among those of
+ * the colour surface the draw is for. */
+static int samples_target(const gxm_draw_state *s, const stage *g) {
+    if (!s->has_colour || !s->colour_data) return 0;
+    size_t pixels = s->colour_layout == GXM_SURFACE_TILED ? (size_t)((s->height + 31) / 32) * (s->colour_stride / 32) * 1024
+                  : s->colour_layout == GXM_SURFACE_SWIZZLED ? (size_t)up_to_two(s->width) * up_to_two(s->height)
+                  : (size_t)s->colour_stride * s->height;
+    const uint8_t *lo = s->colour_data, *hi = lo + pixels * s->colour.bytes;
+    for (unsigned unit = 0; unit < GXP_TEXTURE_UNITS; unit++) {
+        const gxm_tex *t = g->tex[unit];
+        if (t && t->base && t->base < hi && t->base + (t->bytes < t->avail ? t->bytes : t->avail) > lo) return 1;
     }
-    if (range > g_slot_cap) {
-        uint32_t *m = realloc(g_slot, (size_t)range * sizeof(*m));
+    return 0;
+}
+
+static queued *next_queued(void) {
+    if (g_queued == g_queue_cap) {
+        uint32_t cap = g_queue_cap ? g_queue_cap * 2 : 256;
+        queued **grown = realloc(g_queue, (size_t)cap * sizeof(*grown));
+        if (!grown) return NULL;
+        memset(grown + g_queue_cap, 0, (size_t)(cap - g_queue_cap) * sizeof(*grown));
+        g_queue = grown;
+        g_queue_cap = cap;
+    }
+    if (!g_queue[g_queued]) g_queue[g_queued] = calloc(1, sizeof(queued));
+    return g_queue[g_queued];
+}
+
+void gxm_draw_add(const gxm_draw_state *s, unsigned primitive, unsigned index_size, uint32_t indices,
+                  uint32_t count, uint32_t instances, uint32_t tally, int tally_set) {
+    static uint32_t serial;
+    static int asked, scalar, at_once;
+    const gxm_program *vp = s->vertex, *fp = s->fragment;
+    gxm_counters.draws++;
+    if (primitive == GXM_LINES || primitive == GXM_POINTS) { gxm_counters.not_triangles++; return; }
+    if (!vp || !vp->ok || (fp && !fp->ok) || !s->width || !s->height) { gxm_counters.no_program++; return; }
+    if (count < 3 || !instances || s->region_mode == GXM_REGION_ALL) return;
+    if (!g_workers) g_workers = calloc(vita_pool_size(), sizeof(*g_workers));
+    if (!g_workers) return;
+    if (!asked) {
+        const char *e = getenv("VITARECOMP_GXM_PROFILE");
+        g_profile = e ? (uint32_t)strtoul(e, NULL, 0) : 0;
+        /* VITARECOMP_GXM_SCALAR=1 shades every pixel by itself, as the definition
+         * of what the rows must come out as. */
+        e = getenv("VITARECOMP_GXM_SCALAR");
+        scalar = e && *e && *e != '0';
+        /* VITARECOMP_GXM_AT_ONCE=1 draws each draw as it is made: what keeping
+         * them for the end of the scene must not change, and the way to tell
+         * a title that changes a draw's data before its scene has ended. */
+        e = getenv("VITARECOMP_GXM_AT_ONCE");
+        at_once = e && *e && *e != '0';
+        e = getenv("VITARECOMP_GXM_UNWRITTEN");
+        usse_wide_watch = e && *e && *e != '0';
+        asked = 1;
+    }
+    /* a list is of one target: what waits for another is drawn first */
+    if (g_queued) {
+        const gxm_draw_state *was = &g_queue[0]->s;
+        if (was->width != s->width || was->height != s->height || was->colour_data != s->colour_data ||
+            was->depth != s->depth || was->stencil != s->stencil || was->mask != s->mask) gxm_draw_flush();
+    }
+    uint64_t began = g_profile ? now_ns() : 0;
+    queued *q = next_queued();
+    if (!q) return;
+    q->s = *s;
+    q->primitive = primitive; q->index_size = index_size;
+    q->indices = indices; q->count = count; q->instances = instances;
+    q->tally = tally; q->tally_set = tally_set;
+    q->piece_count = 0; q->pixels = 0; q->first_count = 0;
+
+    /* the uniforms and the textures are read now, as the title has just left them */
+    draw *d = &q->d;
+    memset(&d->in, 0, sizeof(d->in));
+    d->s = &q->s;
+    d->serial = ++serial;
+    stage_begin(&d->v, &vp->gxp, q->s.vertex_buffers, q->s.vertex_textures, q->tex[0], g_vertex_cache, 0);
+    if (fp) stage_begin(&d->f, &fp->gxp, q->s.fragment_buffers, q->s.fragment_textures, q->tex[1], g_workers[0].cache, 1);
+    else memset(&d->f, 0, sizeof(d->f));
+    vertex_inputs(d);
+
+    /* A draw that samples the surface its scene draws to reads what the
+     * draws before it left there: a chain of smaller and smaller copies kept
+     * side by side in one surface is made that way, each read from the last.
+     * The console gets the same by finishing its tiles in order. So
+     * everything before such a draw is drawn first, and it is drawn before
+     * anything after it. */
+    int own = fp && samples_target(&q->s, &d->f);
+    if (own && g_queued) {
+        uint32_t k = g_queued;
+        gxm_draw_flush();
+        queued *first = g_queue[0];             /* the record in hand becomes the list's first */
+        g_queue[0] = g_queue[k];
+        g_queue[k] = first;
+    }
+
+    d->wide = fp && fp->wide && !scalar;
+    d->late = fp && (fp->gxp.flags & (GXP_FLAG_DISCARD | GXP_FLAG_DEPTH)) != 0;
+    d->each = fp && (fp->gxp.flags & GXP_FLAG_FRAGCOLOR) && s->has_colour;
+
+    /* What the fragment program reads of the vertex program's outputs is
+     * what gets interpolated; nothing else is carried. */
+    d->varyings = 0;
+    d->w_at = -1;
+    for (unsigned slot = 0; slot < GXP_SLOTS; slot++) {
+        d->slot_at[slot] = -1;
+        if (!fp || slot >= GXP_SLOT_POSITION || !((fp->gxp.slots_used >> slot) & 1) || !vp->gxp.out_count[slot]) continue;
+        if (d->varyings + 4 > RASTER_MAX_VARYINGS) continue;
+        d->slot_at[slot] = d->varyings;
+        d->varyings += 4;
+    }
+    if (fp && ((fp->gxp.slots_used >> GXP_SLOT_POSITION) & 1) && d->varyings < RASTER_MAX_VARYINGS) d->w_at = d->varyings++;
+
+    raster *r = &q->r;
+    memset(r, 0, sizeof(*r));
+    r->width = (int)s->width;
+    r->height = (int)s->height;
+    r->clip_x0 = 0; r->clip_y0 = 0; r->clip_x1 = (int)s->width; r->clip_y1 = (int)s->height;
+    if (s->region_mode == GXM_REGION_OUTSIDE) {
+        /* whole tiles: the region grows to the 32-pixel grid */
+        int x0 = (int)(s->region[0] & ~31u), y0 = (int)(s->region[1] & ~31u);
+        int x1 = (int)((s->region[2] + 32) & ~31u), y1 = (int)((s->region[3] + 32) & ~31u);
+        if (x0 > r->clip_x0) r->clip_x0 = x0;
+        if (y0 > r->clip_y0) r->clip_y0 = y0;
+        if (x1 < r->clip_x1) r->clip_x1 = x1;
+        if (y1 < r->clip_y1) r->clip_y1 = y1;
+    }
+    if (s->viewport_on) {
+        r->x_offset = s->offset[0]; r->x_scale = s->scale[0];
+        r->y_offset = s->offset[1]; r->y_scale = s->scale[1];
+        r->z_offset = s->offset[2]; r->z_scale = s->scale[2];
+    } else {
+        r->x_scale = r->y_scale = r->z_scale = 1.0f;
+    }
+    r->cull = s->cull == 1 ? RASTER_CULL_CW : s->cull == 2 ? RASTER_CULL_CCW : RASTER_CULL_NONE;
+    r->clip_z = RASTER_CLIP_FAR;            /* nearer than the near plane is drawn, at depth 0 */
+    r->clamp_depth = 1;
+    r->depth_func = RASTER_ALWAYS;          /* the tests are made here, with the stencil */
+    r->want_derivatives = 1;
+    r->varyings = d->varyings;
+    g_queued++;
+    if (g_profile) g_main_ns[T_BEGIN] += now_ns() - began;
+    if (at_once || own) gxm_draw_flush();
+}
+
+/* --- the first step: vertices and triangles ------------------------------------------------ */
+
+static int reserve(worker *wk, uint32_t vertices, uint32_t range) {
+    if (vertices > wk->vertices_cap) {
+        raster_vertex *v = realloc(wk->vertices, (size_t)vertices * sizeof(*v));
+        if (v) wk->vertices = v;
+        uint32_t *n = realloc(wk->vertex_index, (size_t)vertices * sizeof(*n));
+        if (n) wk->vertex_index = n;
+        if (!v || !n) return 0;
+        wk->vertices_cap = vertices;
+    }
+    if (range > wk->slot_cap) {
+        uint32_t *m = realloc(wk->slot, (size_t)range * sizeof(*m));
         if (!m) return 0;
-        g_slot = m; g_slot_cap = range;
+        wk->slot = m; wk->slot_cap = range;
     }
     return 1;
 }
 
-/* Set a triangle up after the others. */
-static void triangle(raster *r, const raster_vertex *a, const raster_vertex *b, const raster_vertex *c) {
-    size_t per = raster_plane_floats(r), need = ((size_t)g_piece_count + RASTER_MAX_PIECES) * per;
-    if (g_piece_count + RASTER_MAX_PIECES > g_pieces_cap) {
-        uint32_t cap = g_pieces_cap ? g_pieces_cap * 2 : 1024;
-        raster_piece *p = realloc(g_pieces, (size_t)cap * sizeof(*p));
+/* Set a triangle up after the others of its draw. */
+static void triangle(queued *q, const raster_vertex *a, const raster_vertex *b, const raster_vertex *c) {
+    size_t per = raster_plane_floats(&q->r), need = ((size_t)q->piece_count + RASTER_MAX_PIECES) * per;
+    if (q->piece_count + RASTER_MAX_PIECES > q->pieces_cap) {
+        uint32_t cap = q->pieces_cap ? q->pieces_cap * 2 : 64;
+        raster_piece *p = realloc(q->pieces, (size_t)cap * sizeof(*p));
         if (!p) return;
-        g_pieces = p; g_pieces_cap = cap;
+        q->pieces = p; q->pieces_cap = cap;
     }
-    if (need > g_planes_cap) {
-        size_t cap = g_planes_cap ? g_planes_cap : 65536;
+    if (need > q->planes_cap) {
+        size_t cap = q->planes_cap ? q->planes_cap : 4096;
         while (cap < need) cap *= 2;
-        float *f = realloc(g_planes, cap * sizeof(*f));
+        float *f = realloc(q->planes, cap * sizeof(*f));
         if (!f) return;
-        g_planes = f; g_planes_cap = cap;
+        q->planes = f; q->planes_cap = cap;
     }
-    g_piece_count += (uint32_t)raster_setup(r, a, b, c, &g_pieces[g_piece_count], g_planes + (size_t)g_piece_count * per);
+    q->piece_count += (uint32_t)raster_setup(&q->r, a, b, c, &q->pieces[q->piece_count], q->planes + (size_t)q->piece_count * per);
 }
 
-/* A thread's own copy of the fragment stage, made the first time it takes
- * part in a draw. */
+static uint32_t index_at(const uint8_t *data, unsigned size, uint32_t i) {
+    return size == 2 ? (uint32_t)(data[2 * i] | data[2 * i + 1] << 8)
+                     : (uint32_t)data[4 * i] | (uint32_t)data[4 * i + 1] << 8 |
+                       (uint32_t)data[4 * i + 2] << 16 | (uint32_t)data[4 * i + 3] << 24;
+}
+
+/* One draw, by one thread: each index shaded once an instance, with the
+ * thread's own copy of the vertex stage, and the triangles put together. */
+static void prepare(void *ctx, unsigned item, unsigned index);
+static void prepare(void *ctx, unsigned item, unsigned index) {
+    queued *q = g_queue[item];
+    worker *wk = &g_workers[index];
+    uint64_t began = g_profile ? now_ns() : 0;
+    (void)ctx;
+    const uint8_t *data = vita_mem_ptr(q->indices, q->count * q->index_size);
+    if (!data) return;
+    uint32_t low = 0xFFFFFFFFu, high = 0, count = q->count;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t v = index_at(data, q->index_size, i);
+        if (v < low) low = v;
+        if (v > high) high = v;
+    }
+    uint32_t range = high - low + 1;
+    if (range > 0x1000000u || !reserve(wk, range < count ? range : count, range)) return;
+
+    wk->v = q->d.v;
+    wk->v.cache = NULL;
+    wk->v.counters = &wk->counters;
+    wk->v.env.user = &wk->v;
+    wk->v.st.sa = wk->v.sa;
+    wk->v.st.env = &wk->v.env;
+
+    for (uint32_t instance = 0; instance < q->instances; instance++) {
+        uint32_t used = 0, tri[3];
+        memset(wk->slot, 0xFF, (size_t)range * sizeof(*wk->slot));
+        /* number the distinct vertices, shade them, then put the triangles together */
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t v = index_at(data, q->index_size, i);
+            if (wk->slot[v - low] != 0xFFFFFFFFu) continue;
+            wk->slot[v - low] = used;
+            wk->vertex_index[used++] = v;
+        }
+        for (uint32_t i = 0; i < used; i++) shade_vertex(&q->d, &wk->v, wk->vertex_index[i], instance, &wk->vertices[i]);
+        if (!instance) {
+            q->first_count = used < 4 ? used : 4;
+            for (unsigned i = 0; i < q->first_count; i++) memcpy(q->first[i], wk->vertices[i].pos, 4 * sizeof(float));
+        }
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t at = wk->slot[index_at(data, q->index_size, i) - low];
+            if (q->primitive == GXM_TRIANGLE_STRIP) {
+                if (i < 2) { tri[i] = at; continue; }
+                tri[2] = at;
+                /* every other triangle of a strip is wound the other way: swap its first two */
+                if (i & 1) triangle(q, &wk->vertices[tri[1]], &wk->vertices[tri[0]], &wk->vertices[tri[2]]);
+                else       triangle(q, &wk->vertices[tri[0]], &wk->vertices[tri[1]], &wk->vertices[tri[2]]);
+                tri[0] = tri[1]; tri[1] = tri[2];
+            } else if (q->primitive == GXM_TRIANGLE_FAN) {
+                if (i == 0) { tri[0] = at; continue; }
+                if (i == 1) { tri[1] = at; continue; }
+                triangle(q, &wk->vertices[tri[0]], &wk->vertices[tri[1]], &wk->vertices[at]);
+                tri[1] = at;
+            } else {
+                tri[i % 3] = at;
+                if (i % 3 == 2) triangle(q, &wk->vertices[tri[0]], &wk->vertices[tri[1]], &wk->vertices[tri[2]]);
+            }
+        }
+    }
+    if (g_profile) wk->ns[T_PREPARE] += now_ns() - began;
+}
+
+/* --- the second step: which triangles a tile has -------------------------------------------- */
+
+static int fuller_tile(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    uint32_t in_x = g_tile_first[x + 1] - g_tile_first[x], in_y = g_tile_first[y + 1] - g_tile_first[y];
+    return in_x != in_y ? (in_x < in_y ? 1 : -1) : (x > y) - (x < y);
+}
+
+static int sort_into_tiles(uint32_t width, uint32_t height) {
+    g_tiles_x = (width + TILE - 1) / TILE;
+    g_tiles_y = (height + TILE - 1) / TILE;
+    uint32_t tiles = g_tiles_x * g_tiles_y;
+    if (tiles + 1 > g_tiles_cap) {
+        uint32_t *first = realloc(g_tile_first, (size_t)(tiles + 1) * sizeof(*first));
+        if (first) g_tile_first = first;
+        uint32_t *at = realloc(g_tile_at, (size_t)(tiles + 1) * sizeof(*at));
+        if (at) g_tile_at = at;
+        uint32_t *order = realloc(g_tile_order, (size_t)(tiles + 1) * sizeof(*order));
+        if (order) g_tile_order = order;
+        if (!first || !at || !order) return 0;
+        g_tiles_cap = tiles + 1;
+    }
+    /* count, then place: a tile's triangles end up in the order of the draws and, in a draw, of its triangles */
+    memset(g_tile_first, 0, (size_t)(tiles + 1) * sizeof(*g_tile_first));
+    for (uint32_t i = 0; i < g_queued; i++) {
+        const queued *q = g_queue[i];
+        for (uint32_t k = 0; k < q->piece_count; k++) {
+            const raster_piece *t = &q->pieces[k];
+            for (uint32_t ty = (uint32_t)t->y0 / TILE; ty <= (uint32_t)t->y1 / TILE; ty++)
+                for (uint32_t tx = (uint32_t)t->x0 / TILE; tx <= (uint32_t)t->x1 / TILE; tx++)
+                    g_tile_first[ty * g_tiles_x + tx + 1]++;
+        }
+    }
+    for (uint32_t i = 0; i < tiles; i++) g_tile_first[i + 1] += g_tile_first[i];
+    uint32_t total = g_tile_first[tiles];
+    if (total > g_refs_cap) {
+        uint32_t cap = g_refs_cap ? g_refs_cap : 65536;
+        while (cap < total) cap *= 2;
+        tile_ref *refs = realloc(g_refs, (size_t)cap * sizeof(*refs));
+        if (!refs) return 0;
+        g_refs = refs; g_refs_cap = cap;
+    }
+    memcpy(g_tile_at, g_tile_first, (size_t)tiles * sizeof(*g_tile_at));
+    for (uint32_t i = 0; i < g_queued; i++) {
+        const queued *q = g_queue[i];
+        for (uint32_t k = 0; k < q->piece_count; k++) {
+            const raster_piece *t = &q->pieces[k];
+            for (uint32_t ty = (uint32_t)t->y0 / TILE; ty <= (uint32_t)t->y1 / TILE; ty++)
+                for (uint32_t tx = (uint32_t)t->x0 / TILE; tx <= (uint32_t)t->x1 / TILE; tx++) {
+                    tile_ref *ref = &g_refs[g_tile_at[ty * g_tiles_x + tx]++];
+                    ref->draw = i;
+                    ref->piece = k;
+                }
+        }
+    }
+    /* Threads take tiles in turn. The ones with most in them go first, so
+     * that the last tile anyone is left finishing is a small one. */
+    for (uint32_t i = 0; i < tiles; i++) g_tile_order[i] = i;
+    qsort(g_tile_order, tiles, sizeof(*g_tile_order), fuller_tile);
+    return total != 0;
+}
+
+/* --- the third step: a tile's pixels --------------------------------------------------------- */
+
+/* A thread's own copy of a draw's fragment stage, made each time it comes
+ * to the draw from another. */
 static worker *worker_for(const draw *d, unsigned index) {
     worker *wk = &g_workers[index];
     if (wk->d == d && wk->serial == d->serial) return wk;
@@ -1008,224 +1434,95 @@ static worker *worker_for(const draw *d, unsigned index) {
     return wk;
 }
 
-#define VERTEX_RUN 64                   /* vertices a thread takes at a time */
-
-typedef struct { const draw *d; uint32_t count, instance; } vertex_job;
-
-/* Shade one run of the draw's distinct vertices, with this thread's own
- * copy of the vertex stage. */
-static void shade_run(void *ctx, unsigned item, unsigned index) {
-    const vertex_job *job = ctx;
+static void fill_tile(void *ctx, unsigned item, unsigned index) {
     worker *wk = &g_workers[index];
-    if (wk->vertex_serial != job->d->serial) {
-        wk->vertex_serial = job->d->serial;
-        wk->v = job->d->v;
-        wk->v.cache = NULL;
-        wk->v.counters = &wk->counters;
-        wk->v.env.user = &wk->v;
-        wk->v.st.sa = wk->v.sa;
-        wk->v.st.env = &wk->v.env;
-    }
-    uint32_t first = item * VERTEX_RUN, last = first + VERTEX_RUN;
-    if (last > job->count) last = job->count;
-    for (uint32_t i = first; i < last; i++) shade_vertex(job->d, &wk->v, g_vertex_index[i], job->instance, &g_vertices[i]);
-}
-
-typedef struct { const draw *d; const raster *r; int first_row, last_row, rows; } fill_job;
-
-static void fill_band(void *ctx, unsigned band, unsigned index) {
-    const fill_job *job = ctx;
-    worker *wk = worker_for(job->d, index);
-    int row0 = job->first_row + (int)band * job->rows, row1 = row0 + job->rows;
-    size_t per = raster_plane_floats(job->r);
-    if (row1 > job->last_row + 1) row1 = job->last_row + 1;
+    uint32_t tile = g_tile_order[item];
+    uint32_t at = g_tile_first[tile], end = g_tile_first[tile + 1];
+    (void)ctx;
+    if (at == end) return;
+    int col0 = (int)((tile % g_tiles_x) * TILE), row0 = (int)((tile / g_tiles_x) * TILE), side = (int)TILE;
     uint64_t began = g_profile ? now_ns() : 0;
-    raster_shade shade = shade_pixel;
-    if (job->d->wide) {
-        if (!wk->b) wk->b = calloc(1, sizeof(*wk->b));
-        if (wk->b) shade = collect_pixel;
+    while (at < end) {
+        uint32_t which = g_refs[at].draw;
+        const queued *q = g_queue[which];
+        size_t per = raster_plane_floats(&q->r);
+        raster_shade shade = shade_pixel;
+        worker_for(&q->d, index);
+        if (q->d.wide) {
+            if (!wk->b) wk->b = calloc(1, sizeof(*wk->b));
+            if (wk->b) shade = collect_pixel;
+        }
+        for (; at < end && g_refs[at].draw == which; at++) {
+            uint32_t k = g_refs[at].piece;
+            raster_walk_rect(&q->r, &q->pieces[k], q->planes + (size_t)k * per, row0, row0 + side, col0, col0 + side, shade, wk);
+            if (q->d.each) flush(wk);
+        }
+        flush(wk);                          /* nothing waits beyond its draw, or its tile */
+        wk->draw_pixels[which] += wk->pixels;
+        wk->pixels = 0;
     }
-    for (uint32_t i = 0; i < g_piece_count; i++) {
-        const raster_piece *t = &g_pieces[i];
-        if (t->y1 < row0 || t->y0 >= row1) continue;
-        raster_walk(job->r, t, g_planes + (size_t)i * per, row0, row1, shade, wk);
-        if (job->d->each) flush(wk);
-    }
-    flush(wk);                              /* nothing waits beyond its band */
     if (g_profile) wk->ns[T_BAND] += now_ns() - began;
 }
 
-static uint32_t g_shaded_last;
+/* --- the list is drawn ------------------------------------------------------------------------ */
 
-unsigned gxm_draw_positions(float (*out)[4], unsigned max) {
-    unsigned n = g_shaded_last < max ? g_shaded_last : max;
-    for (unsigned i = 0; i < n; i++) memcpy(out[i], g_vertices[i].pos, 4 * sizeof(float));
-    return n;
+uint32_t gxm_draw_flush(void) {
+    uint32_t pixels = 0, queued_now = g_queued;
+    if (!queued_now) return 0;
+    uint64_t lap = g_profile ? now_ns() : 0, at;
+#define LAP(stage) do { if (g_profile) { at = now_ns(); g_main_ns[stage] += at - lap; lap = at; } } while (0)
+
+    for (unsigned w = 0; w < vita_pool_size(); w++) {
+        worker *wk = &g_workers[w];
+        if (wk->draw_pixels_cap < queued_now) {
+            uint32_t *grown = realloc(wk->draw_pixels, (size_t)queued_now * sizeof(*grown));
+            if (!grown) { g_queued = 0; return 0; }
+            wk->draw_pixels = grown;
+            wk->draw_pixels_cap = queued_now;
+        }
+        memset(wk->draw_pixels, 0, (size_t)queued_now * sizeof(*wk->draw_pixels));
+        wk->pixels = 0;
+    }
+
+    vita_pool_run(queued_now, prepare, NULL);
+    LAP(T_VERTICES);
+    int any = sort_into_tiles(g_queue[0]->s.width, g_queue[0]->s.height);
+    LAP(T_SETUP);
+    if (any) vita_pool_run(g_tiles_x * g_tiles_y, fill_tile, NULL);
+    LAP(T_FILL);
+#undef LAP
+
+    for (uint32_t i = 0; i < queued_now; i++) {
+        queued *q = g_queue[i];
+        for (unsigned w = 0; w < vita_pool_size(); w++) q->pixels += g_workers[w].draw_pixels[i];
+        gxm_counters.triangles += q->r.triangles_drawn;
+        gxm_counters.pixels += q->pixels;
+        pixels += q->pixels;
+        /* the visibility test counts what the draw put on the screen */
+        if (q->tally && vita_mem_ptr(q->tally, 4)) {
+            if (q->tally_set) { if (q->pixels) vita_write32(q->tally, 1); }
+            else vita_write32(q->tally, vita_read32(q->tally) + q->pixels);
+        }
+    }
+    for (unsigned w = 0; w < vita_pool_size(); w++) {
+        worker *wk = &g_workers[w];
+        gxm_counters.stopped += wk->counters.stopped;
+        gxm_counters.no_texture += wk->counters.no_texture;
+        if (wk->counters.stopped_at) gxm_counters.stopped_at = wk->counters.stopped_at;
+        memset(&wk->counters, 0, sizeof(wk->counters));
+        wk->d = NULL;                       /* the list's places are used again by other draws */
+    }
+    const queued *last = g_queue[queued_now - 1];
+    g_first_count = last->first_count;
+    memcpy(g_first, last->first, sizeof(g_first));
+    g_queued = 0;
+    return pixels;
 }
 
 uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, uint32_t indices,
                   uint32_t count, uint32_t instances) {
-    static draw d;                          /* large, and never entered twice */
-    static uint32_t serial;
-    const gxm_program *vp = s->vertex, *fp = s->fragment;
-    gxm_counters.draws++;
-    g_shaded_last = 0;
-    if (primitive == GXM_LINES || primitive == GXM_POINTS) { gxm_counters.not_triangles++; return 0; }
-    if (!vp || !vp->ok || (fp && !fp->ok) || !s->width || !s->height) { gxm_counters.no_program++; return 0; }
-    if (count < 3 || !instances) return 0;
-    const uint8_t *index_data = vita_mem_ptr(indices, count * index_size);
-    if (!index_data) return 0;
-    if (!g_workers) g_workers = calloc(vita_pool_size(), sizeof(*g_workers));
-    if (!g_workers) return 0;
-
-    static int asked;
-    if (!asked) { const char *e = getenv("VITARECOMP_GXM_PROFILE"); asked = 1; g_profile = e ? (uint32_t)strtoul(e, NULL, 0) : 0; }
-    uint64_t lap = g_profile ? now_ns() : 0, at;
-#define LAP(stage) do { if (g_profile) { at = now_ns(); g_main_ns[stage] += at - lap; lap = at; } } while (0)
-
-    memset(&d.in, 0, sizeof(d.in));
-    d.s = s;
-    d.serial = ++serial;
-    stage_begin(&d.v, &vp->gxp, s->vertex_buffers, s->vertex_textures, g_textures[0], g_vertex_cache);
-    if (fp) stage_begin(&d.f, &fp->gxp, s->fragment_buffers, s->fragment_textures, g_textures[1], g_workers[0].cache);
-    else memset(&d.f, 0, sizeof(d.f));
-    vertex_inputs(&d);
-
-    /* VITARECOMP_GXM_SCALAR=1 shades every pixel by itself, as the definition
-     * of what the rows must come out as. */
-    static int scalar = -1;
-    if (scalar < 0) { const char *e = getenv("VITARECOMP_GXM_SCALAR"); scalar = e && *e && *e != '0'; }
-    d.wide = fp && fp->wide && !scalar;
-    d.late = fp && (fp->gxp.flags & (GXP_FLAG_DISCARD | GXP_FLAG_DEPTH)) != 0;
-    d.each = fp && (fp->gxp.flags & GXP_FLAG_FRAGCOLOR) && s->has_colour;
-
-    /* What the fragment program reads of the vertex program's outputs is
-     * what gets interpolated; nothing else is carried. */
-    d.varyings = 0;
-    d.w_at = -1;
-    for (unsigned slot = 0; slot < GXP_SLOTS; slot++) {
-        d.slot_at[slot] = -1;
-        if (!fp || slot >= GXP_SLOT_POSITION || !((fp->gxp.slots_used >> slot) & 1) || !vp->gxp.out_count[slot]) continue;
-        if (d.varyings + 4 > RASTER_MAX_VARYINGS) continue;
-        d.slot_at[slot] = d.varyings;
-        d.varyings += 4;
-    }
-    if (fp && ((fp->gxp.slots_used >> GXP_SLOT_POSITION) & 1) && d.varyings < RASTER_MAX_VARYINGS) d.w_at = d.varyings++;
-
-    raster r;
-    memset(&r, 0, sizeof(r));
-    r.width = (int)s->width;
-    r.height = (int)s->height;
-    r.clip_x0 = 0; r.clip_y0 = 0; r.clip_x1 = (int)s->width; r.clip_y1 = (int)s->height;
-    if (s->region_mode == GXM_REGION_ALL) return 0;
-    if (s->region_mode == GXM_REGION_OUTSIDE) {
-        /* whole tiles: the region grows to the 32-pixel grid */
-        int x0 = (int)(s->region[0] & ~31u), y0 = (int)(s->region[1] & ~31u);
-        int x1 = (int)((s->region[2] + 32) & ~31u), y1 = (int)((s->region[3] + 32) & ~31u);
-        if (x0 > r.clip_x0) r.clip_x0 = x0;
-        if (y0 > r.clip_y0) r.clip_y0 = y0;
-        if (x1 < r.clip_x1) r.clip_x1 = x1;
-        if (y1 < r.clip_y1) r.clip_y1 = y1;
-    }
-    if (s->viewport_on) {
-        r.x_offset = s->offset[0]; r.x_scale = s->scale[0];
-        r.y_offset = s->offset[1]; r.y_scale = s->scale[1];
-        r.z_offset = s->offset[2]; r.z_scale = s->scale[2];
-    } else {
-        r.x_scale = r.y_scale = r.z_scale = 1.0f;
-    }
-    r.cull = s->cull == 1 ? RASTER_CULL_CW : s->cull == 2 ? RASTER_CULL_CCW : RASTER_CULL_NONE;
-    r.clip_z = RASTER_CLIP_FAR;             /* nearer than the near plane is drawn, at depth 0 */
-    r.clamp_depth = 1;
-    r.depth_func = RASTER_ALWAYS;           /* the tests are made here, with the stencil */
-    r.want_derivatives = 1;
-    r.varyings = d.varyings;
-
-    /* each index is shaded once per instance */
-    uint32_t low = 0xFFFFFFFFu, high = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t v = index_size == 2 ? (uint32_t)(index_data[2 * i] | index_data[2 * i + 1] << 8)
-                                     : (uint32_t)index_data[4 * i] | (uint32_t)index_data[4 * i + 1] << 8 |
-                                       (uint32_t)index_data[4 * i + 2] << 16 | (uint32_t)index_data[4 * i + 3] << 24;
-        if (v < low) low = v;
-        if (v > high) high = v;
-    }
-    uint32_t range = high - low + 1, pixels = 0;
-    if (range > 0x1000000u || !reserve(range < count ? range : count, range)) return 0;
-    LAP(T_BEGIN);
-
-    for (uint32_t instance = 0; instance < instances; instance++) {
-        uint32_t used = 0, tri[3];
-        memset(g_slot, 0xFF, (size_t)range * sizeof(*g_slot));
-        g_piece_count = 0;
-        /* number the distinct vertices, shade them, then put the triangles together */
-        for (uint32_t i = 0; i < count; i++) {
-            uint32_t v = index_size == 2 ? (uint32_t)(index_data[2 * i] | index_data[2 * i + 1] << 8)
-                                         : (uint32_t)index_data[4 * i] | (uint32_t)index_data[4 * i + 1] << 8 |
-                                           (uint32_t)index_data[4 * i + 2] << 16 | (uint32_t)index_data[4 * i + 3] << 24;
-            if (g_slot[v - low] != 0xFFFFFFFFu) continue;
-            g_slot[v - low] = used;
-            g_vertex_index[used++] = v;
-        }
-        vertex_job shading = { &d, used, instance };
-        if (used < 4 * VERTEX_RUN) for (unsigned n = 0; n * VERTEX_RUN < used; n++) shade_run(&shading, n, 0);
-        else vita_pool_run((used + VERTEX_RUN - 1) / VERTEX_RUN, shade_run, &shading);
-        g_shaded_last = used;
-        LAP(T_VERTICES);
-        for (uint32_t i = 0; i < count; i++) {
-            uint32_t v = index_size == 2 ? (uint32_t)(index_data[2 * i] | index_data[2 * i + 1] << 8)
-                                         : (uint32_t)index_data[4 * i] | (uint32_t)index_data[4 * i + 1] << 8 |
-                                           (uint32_t)index_data[4 * i + 2] << 16 | (uint32_t)index_data[4 * i + 3] << 24;
-            uint32_t at = g_slot[v - low];
-            if (primitive == GXM_TRIANGLE_STRIP) {
-                if (i < 2) { tri[i] = at; continue; }
-                tri[2] = at;
-                /* every other triangle of a strip is wound the other way: swap its first two */
-                if (i & 1) triangle(&r, &g_vertices[tri[1]], &g_vertices[tri[0]], &g_vertices[tri[2]]);
-                else       triangle(&r, &g_vertices[tri[0]], &g_vertices[tri[1]], &g_vertices[tri[2]]);
-                tri[0] = tri[1]; tri[1] = tri[2];
-            } else if (primitive == GXM_TRIANGLE_FAN) {
-                if (i == 0) { tri[0] = at; continue; }
-                if (i == 1) { tri[1] = at; continue; }
-                triangle(&r, &g_vertices[tri[0]], &g_vertices[tri[1]], &g_vertices[at]);
-                tri[1] = at;
-            } else {
-                tri[i % 3] = at;
-                if (i % 3 == 2) triangle(&r, &g_vertices[tri[0]], &g_vertices[tri[1]], &g_vertices[tri[2]]);
-            }
-        }
-        LAP(T_SETUP);
-        if (!g_piece_count) continue;
-
-        /* the rows the instance covers, and whether there is enough in them to share out */
-        fill_job job = { &d, &r, g_pieces[0].y0, g_pieces[0].y1, BAND_ROWS };
-        uint64_t area = 0;
-        for (uint32_t i = 0; i < g_piece_count; i++) {
-            const raster_piece *t = &g_pieces[i];
-            if (t->y0 < job.first_row) job.first_row = t->y0;
-            if (t->y1 > job.last_row) job.last_row = t->y1;
-            area += (uint64_t)(t->x1 - t->x0 + 1) * (uint64_t)(t->y1 - t->y0 + 1);
-        }
-        int rows = job.last_row - job.first_row + 1;
-        if (area < WORTH_SHARING || vita_pool_size() == 1) {
-            job.rows = rows;
-            fill_band(&job, 0, 0);
-        } else {
-            vita_pool_run((unsigned)((rows + BAND_ROWS - 1) / BAND_ROWS), fill_band, &job);
-        }
-        LAP(T_FILL);
-        for (unsigned w = 0; w < vita_pool_size(); w++) {
-            worker *wk = &g_workers[w];
-            pixels += wk->pixels;
-            gxm_counters.stopped += wk->counters.stopped;
-            gxm_counters.no_texture += wk->counters.no_texture;
-            if (wk->counters.stopped_at) gxm_counters.stopped_at = wk->counters.stopped_at;
-            wk->pixels = 0;
-            memset(&wk->counters, 0, sizeof(wk->counters));
-        }
-    }
-#undef LAP
-    gxm_counters.triangles += r.triangles_drawn;
-    gxm_counters.pixels += pixels;
-    return pixels;
+    gxm_draw_flush();
+    g_first_count = 0;
+    gxm_draw_add(s, primitive, index_size, indices, count, instances, 0, 0);
+    return gxm_draw_flush();
 }
