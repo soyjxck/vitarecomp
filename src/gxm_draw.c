@@ -1,6 +1,8 @@
 /* gxm_draw.c — one draw call, from index buffer to pixels. See gxm_draw.h. */
 
 #include "gxm_draw.h"
+#include "gxm_draw_list.h"
+#include "gxm_gpu.h"
 #include "gxm_tex.h"
 #include "half_rows.h"
 #include "pool.h"
@@ -73,15 +75,6 @@ uint32_t gxm_pixel_offset(uint32_t layout, uint32_t x, uint32_t y, uint32_t widt
 
 /* --- one stage of a draw: a program, its uniforms, its textures ----------------------- */
 
-typedef struct {
-    const gxp_program *p;
-    uint32_t  sa[USSE_WORDS];
-    const gxm_tex *tex[GXP_TEXTURE_UNITS];  /* by unit; NULL where nothing usable is bound */
-    gxm_tex_cache *cache;                   /* one a unit, belonging to whichever thread runs this */
-    gxm_draw_counters *counters;            /* likewise */
-    usse_env  env;
-    usse_state st;
-} stage;
 
 /* What a vertex stage's secondary program decodes blocks into, while a draw
  * is being made. */
@@ -340,28 +333,6 @@ static void stage_begin(stage *g, const gxp_program *p, const uint32_t buffers[G
 
 /* --- the vertex stage ----------------------------------------------------------------- */
 
-typedef struct {
-    gxm_draw_state *s;
-    stage  v, f;                            /* f is the pattern each thread's fragment stage is copied from */
-    uint32_t serial;                        /* which draw this is, counting from the first */
-
-    /* a vertex program's inputs, resolved */
-    struct { uint32_t base, stride; uint16_t reg; uint8_t format, components, per_instance, type, wanted, raw; } in[16];
-    uint32_t inputs;
-
-    /* which of the vertex program's outputs travel to the fragment program,
-     * four floats each, and where in a vertex's row of varyings */
-    int slot_at[GXP_SLOTS];
-    int w_at;                               /* the clip-space w, for programs that ask for the position */
-    int varyings;
-
-    /* how the pixels go through the fragment program */
-    int wide;                               /* a row of them at a time */
-    int wide_vertices;                      /* and the vertices through theirs the same way */
-    int late;                               /* the program can discard: the tests come after it */
-    int each;                               /* the program reads the pixel: no triangle waits on another */
-    const pixfmt_halves *stored;            /* its results go into pixels by lookup (pixfmt.h); NULL: write_colour */
-} draw;
 
 struct batch;
 
@@ -448,19 +419,15 @@ static void vertex_inputs(draw *d) {
     }
 }
 
-static void shade_vertex(const draw *d, stage *g, uint32_t index, uint32_t instance, raster_vertex *out) {
-    const gxp_program *p = g->p;
-    usse_state *st = &g->st;
-    const uint16_t *words = d->s->vertex->words;
-    memset(st->temp, 0, words[0] * sizeof(uint32_t));
-    memset(st->pa, 0, words[1] * sizeof(uint32_t));
-    memset(st->internal, 0, sizeof(st->internal));
-    memset(st->pred, 0, sizeof(st->pred));
+/* A vertex's attributes into the primary attribute registers `pa`, which
+ * hold nothing yet: each read from its stream in the stream's form and
+ * packed as the program's parameter says. */
+void gxm_draw_vertex_words(const draw *d, uint32_t index, uint32_t instance, uint32_t *pa) {
     for (uint32_t i = 0; i < d->inputs; i++) {
         uint32_t size = (uint32_t)ATTRIBUTE_BYTES[d->in[i].format] * d->in[i].components;
         uint32_t at = d->in[i].base + (d->in[i].per_instance ? instance : index) * d->in[i].stride;
         const uint8_t *src = vita_mem_ptr(at, size);
-        uint32_t *reg = &st->pa[d->in[i].reg];
+        uint32_t *reg = &pa[d->in[i].reg];
         if (!src) continue;
         if (d->in[i].raw || d->in[i].format == 10) {            /* the bytes, as they are */
             memcpy(reg, src, size > 64 ? 64 : size);
@@ -471,6 +438,17 @@ static void shade_vertex(const draw *d, stage *g, uint32_t index, uint32_t insta
             v[k] = attribute_value(src + k * ATTRIBUTE_BYTES[d->in[i].format], d->in[i].format);
         for (unsigned k = 0; k < d->in[i].wanted; k++) pack(reg, d->in[i].type, k, v[k]);
     }
+}
+
+static void shade_vertex(const draw *d, stage *g, uint32_t index, uint32_t instance, raster_vertex *out) {
+    const gxp_program *p = g->p;
+    usse_state *st = &g->st;
+    const uint16_t *words = d->s->vertex->words;
+    memset(st->temp, 0, words[0] * sizeof(uint32_t));
+    memset(st->pa, 0, words[1] * sizeof(uint32_t));
+    memset(st->internal, 0, sizeof(st->internal));
+    memset(st->pred, 0, sizeof(st->pred));
+    gxm_draw_vertex_words(d, index, instance, st->pa);
     memset(st->out, 0, sizeof(uint32_t) * (p->out_words < 8 ? 8 : p->out_words));
     run(g, p->primary, p->primary_count);
 
@@ -1239,23 +1217,6 @@ static int collect_passed(void *user, int x, int y, float depth, int clockwise,
  * took 59; at 16 the taking of tiles costs more than the evenness saves, 72. */
 #define TILE 32u
 
-typedef struct {
-    gxm_draw_state s;                       /* as it stood when the draw was made */
-    unsigned primitive, index_size;
-    uint32_t indices, count, instances;
-    uint32_t tally;                         /* the title's word that counts what the draw put on the screen, or 0 */
-    int      tally_set;                     /* the word is set to 1 rather than added to */
-    draw     d;
-    gxm_tex  tex[2][GXP_TEXTURE_UNITS];     /* the textures of its two stages */
-    raster   r;
-    raster_piece *pieces;                   /* its triangles, set up: each piece, and its planes at the same place */
-    float   *planes;
-    uint32_t piece_count, pieces_cap;
-    size_t   planes_cap;
-    uint32_t pixels;
-    float    first[4][4];                   /* where its first vertices came out */
-    unsigned first_count;
-} queued;
 
 typedef struct { uint32_t draw, piece; } tile_ref;
 
@@ -1397,6 +1358,10 @@ void gxm_draw_add(const gxm_draw_state *s, unsigned primitive, unsigned index_si
         at_once = e && *e && *e != '0';
         e = getenv("VITARECOMP_GXM_UNWRITTEN");
         usse_wide_watch = e && *e && *e != '0';
+        /* VITARECOMP_GXM_ONE_LEVEL=1 samples every texture from its first
+         * level: for holding two renderers against each other (gxm_tex.h). */
+        e = getenv("VITARECOMP_GXM_ONE_LEVEL");
+        gxm_tex_one_level = e && *e && *e != '0';
         asked = 1;
     }
     /* a list is of one target: what waits for another is drawn first */
@@ -1748,9 +1713,9 @@ static void fill_tile(void *ctx, unsigned item, unsigned index) {
 
 /* --- the list is drawn ------------------------------------------------------------------------ */
 
-uint32_t gxm_draw_flush(void) {
-    uint32_t pixels = 0, queued_now = g_queued;
-    if (!queued_now) return 0;
+/* The list drawn here, on the processor: what each draw put on the screen
+ * is left in its `pixels`. Returns 0 when it could not be. */
+static int draw_list(uint32_t queued_now) {
     uint64_t lap = g_profile ? now_ns() : 0, at, began = lap;
 #define LAP(stage) do { if (g_profile) { at = now_ns(); g_main_ns[stage] += at - lap; lap = at; } } while (0)
 
@@ -1758,7 +1723,7 @@ uint32_t gxm_draw_flush(void) {
         worker *wk = &g_workers[w];
         if (wk->draw_pixels_cap < queued_now) {
             uint32_t *grown = realloc(wk->draw_pixels, (size_t)queued_now * sizeof(*grown));
-            if (!grown) { g_queued = 0; return 0; }
+            if (!grown) return 0;
             wk->draw_pixels = grown;
             wk->draw_pixels_cap = queued_now;
         }
@@ -1782,10 +1747,27 @@ uint32_t gxm_draw_flush(void) {
         g_by_target[i].draws += queued_now;
         g_by_target[i].ns += now_ns() - began;
     }
+    for (uint32_t i = 0; i < queued_now; i++)
+        for (unsigned w = 0; w < vita_pool_size(); w++) g_queue[i]->pixels += g_workers[w].draw_pixels[i];
+    return 1;
+}
+
+uint32_t gxm_draw_flush(void) {
+    uint32_t pixels = 0, queued_now = g_queued;
+    if (!queued_now) return 0;
+
+    /* The host's card draws the list when it has been asked to and can
+     * (gxm_gpu.h); what it cannot, and everything when it has not been
+     * asked, is drawn here. Asked to check, it draws first and aside, and
+     * what it drew is held against what is then drawn here. */
+    int card = gxm_gpu_mode(), drawn = 0;
+    if (card == GXM_GPU_DRAW) drawn = gxm_gpu_list(g_queue, queued_now, 0);
+    else if (card == GXM_GPU_CHECK) gxm_gpu_list(g_queue, queued_now, 1);
+    if (!drawn && !draw_list(queued_now)) { g_queued = 0; return 0; }
+    if (card == GXM_GPU_CHECK) gxm_gpu_compare(g_queue, queued_now);
 
     for (uint32_t i = 0; i < queued_now; i++) {
         queued *q = g_queue[i];
-        for (unsigned w = 0; w < vita_pool_size(); w++) q->pixels += g_workers[w].draw_pixels[i];
         gxm_counters.triangles += q->r.triangles_drawn;
         gxm_counters.pixels += q->pixels;
         pixels += q->pixels;

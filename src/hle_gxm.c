@@ -739,6 +739,62 @@ void vita_hle_sceGxmShaderPatcherUnregisterProgram(void) { r0 = 0; }
 void vita_hle_sceGxmShaderPatcherForceUnregisterProgram(void) { r0 = 0; }
 void vita_hle_sceGxmShaderPatcherGetProgramFromId(void) { /* the id is the header */ }
 
+/* VITARECOMP_GXM_PROBE=<name>:<count>:<from>:<to>, for finding where two
+ * ways of running a program part: the program of that name (sixteen hex
+ * digits, as the profile prints it) runs only its first `count` primary
+ * instructions and then moves two words of the register `from` into the
+ * register `to`, each a bank (r, pa, o, sa) and a number. With `to` the
+ * register its result is read from, the picture is what `from` held there.
+ * A `from` that ends in .x, .y, .z or .w is that one half of the register
+ * and no more, moved into the first half of `to`. */
+static int probe_register(const char *text, usse_operand *out, int *half) {
+    static const struct { const char *name; uint8_t bank; } BANKS[4] = {
+        { "pa", USSE_PA }, { "sa", USSE_SA }, { "r", USSE_TEMP }, { "o", USSE_OUT } };
+    for (int i = 0; i < 4; i++) {
+        size_t n = strlen(BANKS[i].name);
+        char *end;
+        if (strncmp(text, BANKS[i].name, n) || text[n] < '0' || text[n] > '9') continue;
+        out->bank = BANKS[i].bank;
+        out->num = (uint16_t)strtoul(text + n, &end, 10);
+        *half = -1;
+        if (end[0] == '.' && end[1] && strchr("xyzw", end[1]) && !end[2]) *half = (int)(strchr("xyzw", end[1]) - "xyzw");
+        else if (end[0]) return 0;
+        return out->num + 2 <= USSE_WORDS;
+    }
+    return 0;
+}
+
+static void probe(gxm_program *p) {
+    static int asked;
+    static unsigned long long name;
+    static unsigned count;
+    static usse_insn move;
+    if (!asked) {
+        const char *e = getenv("VITARECOMP_GXM_PROBE");
+        asked = 1;
+        if (e && *e) {
+            char from[12] = "", to[8] = "";
+            unsigned long long n = 0;
+            int half = -1, none = -1;
+            /* the move is the one programs end with, its registers changed */
+            if (sscanf(e, "%llx:%u:%11[a-z0-9.]:%7[a-z0-9]", &n, &count, from, to) == 4 && usse_decode(0x3880054183000000ull, 0, &move) &&
+                probe_register(from, &move.src1, &half) && probe_register(to, &move.dest, &none) && none < 0) {
+                if (half >= 0) {
+                    move.src1.type = move.dest.type = USSE_F16;
+                    move.src1.sw[0] = (uint8_t)half;
+                    move.mask = 1;
+                }
+                name = n;
+            } else
+                fprintf(stderr, "gxm: VITARECOMP_GXM_PROBE is <name>:<count>:<from>:<to>, a register being r, pa, o or sa and a number\n");
+        }
+    }
+    if (!name || p->name != name || count >= p->gxp.primary_count) return;
+    p->gxp.primary[count] = move;
+    p->gxp.primary_count = count + 1;
+    fprintf(stderr, "gxm: the program %016llx stops after %u instructions\n", name, count);
+}
+
 /* Find the program made from these, or make it. */
 static uint32_t program_create(int kind, const gxm_program *want, uint32_t out) {
     if (!vita_mem_ptr(out, 4)) return E_INVALID_POINTER;
@@ -775,6 +831,7 @@ static uint32_t program_create(int kind, const gxm_program *want, uint32_t out) 
         const uint8_t *bytes = size >= 0x98 && size < 0x1000000 ? vita_mem_ptr(p->header, size) : NULL;
         int err = bytes ? gxp_parse(&p->gxp, bytes, size) : -100;
         if (bytes) p->name = program_name(bytes, size);
+        if (!err) probe(p);
         uint32_t cannot = 0;
         for (uint32_t i = 0; !err && i < p->gxp.secondary_count; i++) cannot += !usse_can_run(&p->gxp.secondary[i]);
         for (uint32_t i = 0; !err && i < p->gxp.primary_count; i++) cannot += !usse_can_run(&p->gxp.primary[i]);

@@ -86,6 +86,13 @@ typedef struct {
  * hold the second way to the first. */
 extern int gxm_tex_plain_paths;
 
+/* Set, a texture is read as having its first level and no other. Which
+ * level a sample falls on comes from how fast the coordinate changes from
+ * one pixel to the next, and two renderers measure that differently where
+ * a surface is seen edge on; with the choice taken away, what is left to
+ * differ between them is everything else. */
+extern int gxm_tex_one_level;
+
 /* Forget what a cache holds: before it is used for another texture, or
  * when the texture's bytes may have changed. */
 void gxm_tex_cache_reset(gxm_tex_cache *c);
@@ -129,5 +136,10 @@ void gxm_tex_sample_row(const gxm_tex *t, gxm_tex_cache *cache, unsigned n, cons
                         const float *lod, float *const out[4]);
 
 void gxm_tex_gather(const gxm_tex *t, gxm_tex_cache *cache, const float *coord, float texels[4], float fraction[2]);
+
+/* One face of one level whole, unfiltered: four floats a texel as
+ * gxm_tex_texel gives them, row by row, level_w by level_h of them. For a
+ * renderer that keeps its textures somewhere other than the title's memory. */
+void gxm_tex_level_floats(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsigned level, float *out);
 
 #endif /* VITARECOMP_GXM_TEX_H */

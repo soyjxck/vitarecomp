@@ -17,6 +17,7 @@ void gxm_tex_cache_reset(gxm_tex_cache *c) { memset(c->key, 0xFF, sizeof(c->key)
 static float g_unorm8[256], g_srgb8[256], g_zero8[256], g_one8[256];
 
 int gxm_tex_plain_paths;
+int gxm_tex_one_level;
 
 static void tables(void) {
     static int made;
@@ -194,6 +195,7 @@ int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
     uint32_t shorter = t->width < t->height ? t->width : t->height, most = 1;
     while ((shorter >> most) && most < GXM_TEX_LEVELS) most++;
     t->levels = levels < most ? levels : most;
+    if (gxm_tex_one_level) t->levels = 1;
 
     /* Where each level lies. The room a level takes comes from the sides
      * rounded up to powers of two and halved; within it the texels are
@@ -442,13 +444,23 @@ static void view_level(level_view *lv, const gxm_tex *t, gxm_tex_cache *cache, u
     lv->quickly = !lv->rows && t->quick && !gxm_tex_plain_paths && t->base && level < t->levels;
 }
 
+/* Where a point lies among a level's texels has 256 steps to a texel and
+ * no more, as it has in a graphics processor. A title that draws a target
+ * of half a texture's size samples exactly on the line between two texels,
+ * and which side of the line a float comes out on is the last bit of an
+ * interpolation: with steps, the line is the line, and the point belongs
+ * to the texel beyond it, here and on a host's card alike. */
+#define TEXEL_STEPS 256.0f
+
+static inline float in_steps(float texels) { return floorf(texels * TEXEL_STEPS + 0.5f) * (1.0f / TEXEL_STEPS); }
+
 static inline void sample_view(const level_view *lv, float u, float v, int linear, float rgba[4]) {
     const gxm_tex *t = lv->t;
     int w = lv->w, h = lv->h, um = lv->um, vm = lv->vm;
     const uint8_t *rows = lv->rows;
     uint32_t stride = lv->stride;
     if (!linear) {
-        int px = wrap((int)floorf(u * (float)w), w, um), py = wrap((int)floorf(v * (float)h), h, vm);
+        int px = wrap((int)floorf(in_steps(u * (float)w)), w, um), py = wrap((int)floorf(in_steps(v * (float)h)), h, vm);
         if (rows) bytes_texel(t, word_at(rows, stride, px, py), rgba);
         else if (lv->quickly) quick_texel(t, lv->face, lv->level, px, py, rgba);
         else gxm_tex_texel(t, lv->cache, lv->face, lv->level, px, py, rgba);
@@ -579,11 +591,22 @@ void gxm_tex_sample_row(const gxm_tex *t, gxm_tex_cache *cache, unsigned n, cons
     }
 }
 
+void gxm_tex_level_floats(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsigned level, float *out) {
+    level_view lv;
+    view_level(&lv, t, cache, face, level);
+    for (int y = 0; y < lv.h; y++)
+        for (int x = 0; x < lv.w; x++, out += 4) {
+            if (lv.rows) bytes_texel(t, word_at(lv.rows, lv.stride, x, y), out);
+            else if (lv.quickly) quick_texel(t, face, level, x, y, out);
+            else gxm_tex_texel(t, cache, face, level, x, y, out);
+        }
+}
+
 void gxm_tex_gather(const gxm_tex *t, gxm_tex_cache *cache, const float *coord, float texels[4], float fraction[2]) {
     int w = (int)t->level_w[0], h = (int)t->level_h[0];
     float u = coord[0], v = coord[1], rgba[4];
     if (u != u || v != v || u > 32768.0f || u < -32768.0f || v > 32768.0f || v < -32768.0f) u = v = 0.0f;
-    float x = u * (float)w - 0.5f, y = v * (float)h - 0.5f, fx0 = floorf(x), fy0 = floorf(y);
+    float x = in_steps(u * (float)w - 0.5f), y = in_steps(v * (float)h - 0.5f), fx0 = floorf(x), fy0 = floorf(y);
     int x0 = wrap((int)fx0, w, t->u_mode), x1 = wrap((int)fx0 + 1, w, t->u_mode);
     int y0 = wrap((int)fy0, h, t->v_mode), y1 = wrap((int)fy0 + 1, h, t->v_mode);
     gxm_tex_texel(t, cache, 0, 0, x0, y1, rgba); texels[0] = rgba[0];

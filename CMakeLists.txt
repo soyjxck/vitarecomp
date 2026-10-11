@@ -102,6 +102,7 @@ add_library(vitarecomp STATIC
     src/pixfmt.c
     src/gxm_tex.c
     src/gxm_draw.c
+    src/gxm_gpu.c
     src/symbols.c
 )
 
@@ -112,6 +113,16 @@ if(NOT WIN32)
 endif()
 
 target_link_libraries(vitarecomp PUBLIC vitashader)
+
+# A scene's draws on the host's graphics card (src/gxm_gpu.h): Direct3D 11
+# where there is one, which is part of the system and adds nothing to ship.
+# Elsewhere there is no card yet and every scene is drawn on the processor.
+if(WIN32)
+    target_sources(vitarecomp PRIVATE src/gpu_d3d11.c)
+    target_link_libraries(vitarecomp PUBLIC d3d11 d3dcompiler dxguid)
+else()
+    target_sources(vitarecomp PRIVATE src/gpu_none.c)
+endif()
 
 # Debug information for the runtime, and for the host when one is built: what
 # a debugger or a sampling profiler needs to name a line. Off by default; a
