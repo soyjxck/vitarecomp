@@ -1,4 +1,4 @@
-# psvitarecomp — a static-recompilation toolkit for PlayStation Vita games.
+# vitarecomp — a static-recompilation toolkit for PlayStation Vita games.
 #
 # This file builds:
 #   1. the `vitarecomp` runtime static library — what recompiled game code links
@@ -7,7 +7,7 @@
 #   3. optionally `vita_host`, the headless host, against one module's emitted C
 #
 # A game repo consumes this repo as a git submodule and does:
-#     add_subdirectory(psvitarecomp)
+#     add_subdirectory(vitarecomp)
 #     add_subdirectory(games/<game>)
 # and links its host against the `vitarecomp` target.
 #

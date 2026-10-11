@@ -211,7 +211,7 @@ established what the input path actually is:
    lightly gets to "runs" sooner.
 4. **Low NEON density** — measurable with `cover` before committing.
 
-## Beyond the six phases — psvitarecomp, from 2026-10-10
+## Beyond the six phases — this fork, from 2026-10-10
 
 Upstream's phases stand as written above. What this repository added on top,
 measured on its own fixtures:

@@ -1,15 +1,15 @@
-# psvitarecomp
+# vitarecomp
 
 > A library of static-recompilation tools for PlayStation Vita games:
 > ARMv7 / Thumb-2 to native C, with the firmware surface implemented as HLE
 > rather than emulated.
 
-This repository carries forward [sp00nznet/vitarecomp](https://github.com/sp00nznet/vitarecomp)
+This repository is a fork of [sp00nznet/vitarecomp](https://github.com/sp00nznet/vitarecomp)
 (MIT, 38 commits, July to August 2026), the only Vita-to-PC static
-recompiler found anywhere. Its history is preserved here unchanged and the
-`upstream` remote still points at it. Everything that toolkit established is
-kept; this repo exists to finish what it stopped on and to widen it from one
-QA build to retail titles.
+recompiler found anywhere, and carries it forward. Its history is preserved
+here unchanged and the `upstream` remote still points at it. Everything
+that toolkit established is kept; this fork exists to finish what it
+stopped on and to widen it from one QA build to retail titles.
 
 **Milestone A reached 2026-10-10: recompiled Vita homebrew runs natively.**
 `samples/fbdemo` (freestanding, eight firmware imports) and `samples/hello`
@@ -128,7 +128,7 @@ tools/e2e.sh            # samples/fbdemo: SELF -> C -> vita_host -> a hash-check
 
 # To rebuild the sample itself (needs vitasdk; the script installs it in a
 # Linux shell, WSL included):
-#   wsl -d <distro> -- bash /mnt/f/psvitarecomp/tools/wsl-vitasdk.sh
+#   wsl -d <distro> -- bash /mnt/<drive>/vitarecomp/tools/wsl-vitasdk.sh
 ```
 
 ## Running a module

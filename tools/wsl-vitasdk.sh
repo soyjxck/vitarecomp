@@ -2,7 +2,7 @@
 # Install the vitasdk toolchain (once) and build every sample under samples/.
 #
 # Runs inside a Linux shell, WSL included:
-#   wsl -d <distro> -- bash /mnt/f/psvitarecomp/tools/wsl-vitasdk.sh [sample...]
+#   wsl -d <distro> -- bash /mnt/<drive>/vitarecomp/tools/wsl-vitasdk.sh [sample...]
 #
 # The toolchain goes to $VITASDK (default ~/vitasdk) through vdpm's bootstrap,
 # which downloads a prebuilt release; no root is needed. Each sample's
