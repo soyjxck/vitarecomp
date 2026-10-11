@@ -11,6 +11,7 @@
 #define VITARECOMP_HOST_H
 
 #include <stdint.h>
+#include <stdio.h>
 
 /* --- supplied by the host, called by the HLE ------------------------------- */
 
@@ -98,6 +99,11 @@ const char *vita_symbol_name(uint32_t addr, uint32_t *off);
  * function when symbols are loaded. */
 extern int vita_trace_fns;
 void vita_trace_fn(uint32_t addr);
+
+/* With vita_trace_fns at 2 the entries are counted and not printed. This
+ * writes "address count" for each function entered since the last call, in
+ * address order, and starts the count again. */
+void vita_coverage_write(FILE *f);
 
 /* A sampling view of where the program is (profile.c): every `period_s`
  * seconds, the functions the samples of the recorded guest address fell in

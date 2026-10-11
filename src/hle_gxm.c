@@ -645,6 +645,17 @@ void vita_hle_sceGxmSetUniformDataF(void) {
         uint32_t c = off + k, at, bits = rd(src + 4 * k);
         float f;
         memcpy(&f, &bits, 4);
+        /* a value that is no number is the title's own, and worth knowing of: what it scales is not drawn */
+        if (f != f && floating) {
+            static uint32_t told[16], tellers;
+            uint32_t i = 0;
+            while (i < tellers && told[i] != lr) i++;
+            if (i == tellers && tellers < 16) {
+                told[tellers++] = lr;
+                vita_hle_trace("sceGxmSetUniformDataF: value %u of %u at 0x%08X is no number (0x%08X); the caller returns to 0x%08X",
+                               k, count, src, bits, lr);
+            }
+        }
         if (array == 1 || components == 1) at = base + c * (components == 1 ? 4 : size);
         else at = base + (c / components) * stride + (c % components) * size;
         if (!vita_mem_ptr(at, size)) continue;
@@ -1419,6 +1430,46 @@ static void draw(gxm_draw_state *s, uint32_t primitive, uint32_t index_format, u
                 s->fragment ? s->fragment->output_format : 0, s->viewport_on ? "on" : "off",
                 (double)s->offset[0], (double)s->scale[0], (double)s->offset[1], (double)s->scale[1],
                 (double)s->offset[2], (double)s->scale[2], s->region_mode, s->region[0], s->region[1], s->region[2], s->region[3]);
+        /* and where it was: a draw that put nothing on the screen is mostly somewhere else */
+        float at[4][4];
+        unsigned n = gxm_draw_positions(at, 4);
+        if (s->vertex) {
+            fprintf(stderr, "    its vertices from");
+            for (uint32_t i = 0; i < s->vertex->stream_count && i < 16; i++)
+                fprintf(stderr, " 0x%08X by %u", s->streams[i], s->vertex->streams[i].stride);
+            fprintf(stderr, ", indices at 0x%08X, uniforms at", indices);
+            for (unsigned i = 0; i < GXP_BUFFERS; i++)
+                if (s->vertex_buffers[i]) fprintf(stderr, " %u:0x%08X", i, s->vertex_buffers[i]);
+            fputc(10, stderr);
+            /* a vertex that came out as no number: was it one going in, or is it the matrix */
+            if (n && at[0][0] != at[0][0]) {
+                uint32_t first = index_format ? vita_read32(indices) : vita_read16(indices);
+                for (uint32_t i = 0; i < s->vertex->stream_count && i < 16; i++) {
+                    uint32_t from = s->streams[i] + first * s->vertex->streams[i].stride;
+                    fprintf(stderr, "    vertex %u of stream %u:", first, i);
+                    for (uint32_t k = 0; k + 4 <= s->vertex->streams[i].stride && k < 64 && vita_mem_ptr(from + k, 4); k += 4)
+                        fprintf(stderr, " %08X", vita_read32(from + k));
+                    fputc(10, stderr);
+                }
+                for (unsigned i = 0; i < GXP_BUFFERS; i++) {
+                    if (!s->vertex_buffers[i] || !vita_mem_ptr(s->vertex_buffers[i], 64)) continue;
+                    fprintf(stderr, "    uniforms %u:", i);
+                    for (uint32_t k = 0; k < 64; k += 4) {
+                        uint32_t word = vita_read32(s->vertex_buffers[i] + k);
+                        float f;
+                        memcpy(&f, &word, 4);
+                        fprintf(stderr, " %g", (double)f);
+                    }
+                    fputc(10, stderr);
+                }
+            }
+        }
+        if (n) {
+            fprintf(stderr, "    its first vertices, x y z w:");
+            for (unsigned i = 0; i < n; i++)
+                fprintf(stderr, " (%g %g %g %g)", (double)at[i][0], (double)at[i][1], (double)at[i][2], (double)at[i][3]);
+            fprintf(stderr, "\n");
+        }
     }
     /* the visibility test counts what the draw put on the screen */
     if (g_ctx.visibility && g_ctx.visibility_on[0] && g_ctx.visibility_index[0] * 4 + 4 <= g_ctx.visibility_stride) {

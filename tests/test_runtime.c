@@ -937,6 +937,47 @@ void vita_hle_sceCtrlPeekBufferPositive(void);
 
 /* The sticks are read only when the title has asked for them: a pad left in
  * its digital mode reports both at rest. */
+/* Which functions ran: with the entry trace at 2 they are counted and not
+ * printed, and the count is written in address order and begun again. */
+static void test_coverage(void) {
+    const char *path = "test_runtime_coverage.txt";
+    char line[64];
+    vita_trace_fns = 2;
+    vita_trace_fn(0x81000200u);
+    vita_trace_fn(0x81000100u);
+    vita_trace_fn(0x81000200u);
+    vita_trace_fn(0x81000200u);
+    vita_trace_fns = 0;
+    vita_trace_fn(0x81000300u);             /* off: not counted */
+
+    FILE *f = fopen(path, "w");
+    assert(f);
+    vita_coverage_write(f);
+    fclose(f);
+    f = fopen(path, "r");
+    assert(f);
+    assert(fgets(line, sizeof(line), f) && !strcmp(line, "0x81000100 1\n"));
+    assert(fgets(line, sizeof(line), f) && !strcmp(line, "0x81000200 3\n"));
+    assert(!fgets(line, sizeof(line), f));
+    fclose(f);
+
+    /* and the next count starts from nothing */
+    vita_trace_fns = 2;
+    vita_trace_fn(0x81000400u);
+    vita_trace_fns = 0;
+    f = fopen(path, "w");
+    assert(f);
+    vita_coverage_write(f);
+    fclose(f);
+    f = fopen(path, "r");
+    assert(f);
+    assert(fgets(line, sizeof(line), f) && !strcmp(line, "0x81000400 1\n"));
+    assert(!fgets(line, sizeof(line), f));
+    fclose(f);
+    remove(path);
+    printf("  which functions ran     ok\n");
+}
+
 static void test_sticks(void) {
     assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
     uint32_t pad = 0x81001000u;
@@ -1185,6 +1226,7 @@ int main(void) {
     test_ngs();
     test_touch();
     test_sticks();
+    test_coverage();
     test_work_areas();
     test_save_dialog();
     printf("all runtime tests passed\n");

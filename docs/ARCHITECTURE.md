@@ -658,7 +658,7 @@ on the picture it is held. The core keeps its no-dependency promise.
 
 A recompiled program that is wrong is wrong quietly: valid C, no trap, a
 pixel in the wrong place or a pointer with a plausible value. The runtime
-carries seven ways of looking, all off by default and free when off:
+carries eight ways of looking, all off by default and free when off:
 
 | Tool | Switch | What it shows |
 |---|---|---|
@@ -668,6 +668,7 @@ carries seven ways of looking, all off by default and free when off:
 | Write watchpoint | `VITARECOMP_WATCH=<hex>` | every store that covers an address, with value and PC |
 | Sampling profile | `VITARECOMP_PROFILE=N`, C emitted with `VITARECOMP_EMIT_PC=1` | every N seconds: the share of samples per guest thread and per function, and the instruction each function was most often at |
 | Threads at the end | `VITARECOMP_TRACE=1` | when the run ends, every thread on a line: running, ready, never started, or waiting, on what and for how much longer, and the address it was last at |
+| Which functions ran | `VITARECOMP_COVERAGE=FROM-TO@FILE` | every function entered between two vertical blanks, with how often, one a line in address order: made to be compared with the same list from a run that differs in one thing |
 | Discovery, one address | `VITARECOMP_WHY=<hex>` on `armrecomp discover` or `emit` | what discovery made of that address each time it met it: walked, decoded inside another function, named by a stored word, refused and why |
 
 The order they are reached for is the order above: the function trace says
@@ -680,8 +681,13 @@ tell the two apart in one period. A program that runs and yet does not
 get on is a third: nothing is wrong where it is looked at, and something
 it is waiting for never comes. The list of threads is for that one. A
 title that drew its level and kept the screen black had ten threads, and
-one line read "not started". And a dispatch miss names an address the
-output has no function for; the last row is how to ask why.
+one line read "not started". A fourth is a program that is given something
+and does nothing with it, a finger on a button that stays as it was. The
+call log of such a run is millions of lines and so is the log of the run
+without the finger; the functions entered in one and not the other are a
+few dozen, and they are where the finger went: `comm -13` on two lists of
+the row above. And a dispatch miss names an address the output has no
+function for; the last row is how to ask why.
 
 ### Seeing what was drawn
 
@@ -692,12 +698,12 @@ frames:
 | Tool | Switch | What it shows |
 |---|---|---|
 | The frame census | `VITARECOMP_TRACE=1` | at each flip whose shape differs from the last: scenes, draws, triangles, pixels, and what was not drawn and why (lines or points, a program that could not be run, a program run that stopped, a sample of a unit with nothing bound); each kind of scene once, with its target, formats and what its depth surface loads and stores |
-| One frame's draws | `VITARECOMP_GXM_FRAME=<n>` | every draw of frame n: its programs by name, its geometry, how many pixels came of it, the depth, stencil, cull, blend and viewport state |
+| One frame's draws | `VITARECOMP_GXM_FRAME=<n>` | every draw of frame n: its programs by name, its geometry, how many pixels came of it, the depth, stencil, cull, blend and viewport state; where its vertices, indices and uniforms are in the title's memory, and where its first vertices came out of the vertex program; for a draw whose vertices came out as no number, the vertex that went in and the matrix it met |
 | Textures | `VITARECOMP_GXM_TEXTURES=<dir>` | each texture a draw samples, once, as an image, with its layout on stderr; a format not decoded yet as its bytes |
 | One frame's scenes | `VITARECOMP_GXM_SCENES=<dir>`, with the frame switch above | what each scene of that frame left in its colour surface, as an image: the geometry buffer, the lit scene, each pass of the chain that ends on the display |
 | Programs | `VITARECOMP_GXP_DUMP=<dir>`, then `armrecomp gxp <file>` | the shader programs a title registers, and each one's tables and code as text |
 
-Two switches are for time, not for looking. `VITARECOMP_GXM_PROFILE=<n>`
+Three switches are for time, not for looking. `VITARECOMP_GXM_PROFILE=<n>`
 prints, every n frames, what a frame cost by stage: the drawing thread's
 own time in setting a draw up, shading its vertices, setting up its
 triangles and filling them, and, summed over the threads that fill, the
@@ -707,7 +713,15 @@ many one at a time. `VITARECOMP_GXM_SKIP=<first>-<last>`
 counts the draws of those frames and draws none of them, which takes a
 title past a screen it holds for a fixed time, a health warning over a
 costly scene, in seconds. What those frames would have left in any
-surface is missing afterwards.
+surface is missing afterwards. And `VITARECOMP_HOST_PROFILE=<ms>[@FROM-TO]`
+on `vita_host` is the stage profile's finer half: a thread stops every
+other thread each few milliseconds, between two vertical blanks if they are
+given, notes where it was, and at the end prints the functions of the host
+the samples fell in and the lines, waiting threads under the name of the
+system call they wait in. The lines want the runtime built with its debug
+information, `-DVITARECOMP_SYMBOLS=ON`, which changes nothing in the code
+and leaves the generated C without. It is the Windows host's; elsewhere
+the system's own profiler reads the same build.
 
 And the frames themselves: `vita_host --window` shows them as they are
 flipped, `--dump out.ppm@N` writes one, `--dump-dir DIR@N` one every N

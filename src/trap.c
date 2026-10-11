@@ -37,8 +37,40 @@ static FILE *g_out;
 int vita_trace_fns;
 static uint32_t g_depth_hint;
 
+/* The quiet form of the same: with vita_trace_fns at 2 the entries are
+ * counted, by function, and nothing is printed until the count is asked
+ * for. Two runs that differ in one thing, a finger on the screen in one and
+ * not in the other, then differ in the functions that deal with it, and
+ * the list of those is short where the call log of either run is not. One
+ * guest thread runs at a time, so nothing here is locked. */
+#define RAN_SLOTS (1u << 17)
+static struct { uint32_t addr, count; } g_ran[RAN_SLOTS];
+
+static void ran(uint32_t addr) {
+    uint32_t i = (addr * 2654435761u) >> 15;
+    for (uint32_t n = 0; n < RAN_SLOTS; n++, i = (i + 1) & (RAN_SLOTS - 1)) {
+        if (g_ran[i].addr == addr) { g_ran[i].count++; return; }
+        if (!g_ran[i].count) { g_ran[i].addr = addr; g_ran[i].count = 1; return; }
+    }
+}
+
+static int by_addr(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+void vita_coverage_write(FILE *f) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < RAN_SLOTS; i++)
+        if (g_ran[i].count) g_ran[n++] = g_ran[i];
+    qsort(g_ran, n, sizeof(g_ran[0]), by_addr);
+    for (uint32_t i = 0; i < n; i++) fprintf(f, "0x%08X %u\n", g_ran[i].addr, g_ran[i].count);
+    memset(g_ran, 0, sizeof(g_ran));
+}
+
 void vita_trace_fn(uint32_t addr) {
     if (!vita_trace_fns) return;
+    if (vita_trace_fns == 2) { ran(addr); return; }
     uint32_t off = 0;
     const char *name = vita_symbol_name(addr, &off);
     g_depth_hint++;

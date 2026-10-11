@@ -22,7 +22,7 @@ wait for each other by spinning. The newlib sample needed a kernel, file and C-r
 HLE surface, the NEON a retail title's own code asked for, jump tables, and fixes for nine emitter
 bugs that only running could find (docs/LESSONS.md).
 
-**A retail title reaches play (2026-10-11).**
+**A retail title plays (2026-10-11).**
 *Uncharted: Golden Abyss*, recompiled from its decrypted module, starts in
 the host, loads its front end and renders it: the loading screen's turning
 medallion, lit through the title's own deferred pipeline (a geometry
@@ -36,8 +36,10 @@ game: a line of Coronado's over the snake temple in the rain, then two men
 talking in front of it, faces, cloth and foliage lit through the same
 pipeline, thirteen scenes, 255 draws and 38,000 triangles a frame. Forty
 seconds on it saves a checkpoint, loads the first level a player moves in,
-and stops on that level's first tutorial card, over the player's character
-standing in the jungle with the icons of the touch screen down the side.
+and opens the player's journal at its first tutorial page. The journal is
+closed with a touch on its corner, the chapter's title comes up over the
+jungle, and the left stick runs the character through it to the next
+thing the game has to teach.
 Every pixel comes out of the
 title's own shader programs, run by an interpreter of the GPU's bytecode
 that is written here; nothing of the title's is replaced. It is a reference
@@ -51,8 +53,8 @@ The logo movie that comes before the
 title screen is not played: the runtime has no movie library, says so when
 the title asks for it, and the title carries on as it does when a movie
 ends. The synthesiser still plays in silence. `vita_host --window` shows it
-all, with the left mouse button for a finger on the screen; docs/PLAN.md
-says what is missing.
+all, with the left mouse button for a finger on the screen and the keys for
+the pad and the sticks; docs/PLAN.md says what is missing.
 
 **Status, measured on this machine (2026-10-11):**
 
@@ -63,7 +65,7 @@ says what is missing.
 | `tools/e2e.sh`: `samples/threads`, threads that never call the kernel to wait | two workers and the main thread wait for each other by spinning on memory, and share a test-and-set spinlock for 4,000 increments; the frame shows every check green and the counter exact, however the threads were interleaved |
 | `armrecomp emit` on VitaShell, whole module | 23,326 functions discovered (253 jump tables, 23,337 tail-call targets, 1,098 MOVW/MOVT pointers), 802,000 instructions reached; 9,780 functions emitted: what an entry point, an export or a stored pointer can reach; 13.6 M instructions of C, 99.93 % translated, 1.2 GB: seventeen times what is reached, code that several functions run into being written into each of them, which has grown since it was last measured (docs/PLAN.md, housekeeping); what still traps is NEON forms not yet claimed (0.06 %) and 953 branches to addresses discovery never registered |
 | *Uncharted: Golden Abyss* (retail, PCSA00029), decrypted by Vita3K from a NoNpDrm dump with its own licence | `ET_SCE_EXEC`, 9.43 MB of code, 3.33 M Thumb instructions, 5.34 % SIMD; 79,348 functions discovered (20,331 of them from MOVW/MOVT pairs, 36 of them hand-written ARM), 522 jump tables, 84.0 % covered; 618 imports across 42 libraries, 585 named (SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34); 24,300 functions emitted, 1,204 of them leaves that only a stored pointer names, 2.45 M instructions at 99.99 % translated, 300 MB of C in 22 parts; 293 trapped instructions, 278 of them the breakpoints of its own assertions, 12 the 64-bit exclusive loads and stores, and no Advanced SIMD or VFP instruction or jump table of a real function left; 68,217 backward branches carry the time slice |
-| *Golden Abyss* running in `vita_host` with Vita3K's decrypted data mounted as `app0:` | `module_start` allocates its memory, initialises FIOS2 and SceUlt, reads the 3 GB archive's index, starts its worker threads on the runtime's scheduler, finds its resources by their CRC, parses its input tables, builds its sound engine's eight racks on the silent synthesiser, loads its front end (`LOAD LEVEL( /frontend.bsp )`, `LEVEL START` in its own log) and draws it: 7 scenes and 2 million shaded pixels a frame for the loading screen, 8 scenes, 282 draws and 45,000 triangles for the health warning; 700 vertical blanks with no trap, no dispatch miss, no bad access, no shader instruction the interpreter lacks and no texture unit left unread; left to run, the title screen after them (1 scene, 7 draws) and, with scripted touches, the main menu, the New Game screens, the save through the system's dialog and the first level's load (`LOAD LEVEL( /igc_snake_temple_room_start.bsp )`): the level is the game's opening cinematic, 13 scenes, 255 draws (227 precomputed) and 38,000 triangles a frame, every program of them run and the title's 36 hand-written ARM-mode routines with them; after it the first playable level (`snake_temple_intro`, 544 draws and 50,000 triangles in its first frame) and its tutorial card: 6,800 vertical blanks, no trap, with the trace or without it; with `--virtual-clock` the same frames, byte for byte, on every run, and the same again with every pixel shaded by itself (`VITARECOMP_GXM_SCALAR=1`) |
+| *Golden Abyss* running in `vita_host` with Vita3K's decrypted data mounted as `app0:` | `module_start` allocates its memory, initialises FIOS2 and SceUlt, reads the 3 GB archive's index, starts its worker threads on the runtime's scheduler, finds its resources by their CRC, parses its input tables, builds its sound engine's eight racks on the silent synthesiser, loads its front end (`LOAD LEVEL( /frontend.bsp )`, `LEVEL START` in its own log) and draws it: 7 scenes and 2 million shaded pixels a frame for the loading screen, 8 scenes, 282 draws and 45,000 triangles for the health warning; 700 vertical blanks with no trap, no dispatch miss, no bad access, no shader instruction the interpreter lacks and no texture unit left unread; left to run, the title screen after them (1 scene, 7 draws) and, with scripted touches, the main menu, the New Game screens, the save through the system's dialog and the first level's load (`LOAD LEVEL( /igc_snake_temple_room_start.bsp )`): the level is the game's opening cinematic, 13 scenes, 255 draws (227 precomputed) and 38,000 triangles a frame, every program of them run and the title's 36 hand-written ARM-mode routines with them; after it the first playable level (`snake_temple_intro`, 546 draws and 50,000 triangles a frame): the journal opened and closed, the chapter's title, the character run forward with the left stick to the second tutorial: 7,200 vertical blanks, no trap, with the trace or without it; with `--virtual-clock` the same frames, byte for byte, on every run, and the same again with every pixel shaded by itself (`VITARECOMP_GXM_SCALAR=1`) |
 | `armrecomp gxp` on the shader programs the title registers | the 193 of its boot and the 254 it has registered by its first level: every instruction decoded and executable (4,014 in the first set); on the 52 programs Vita3K logged, the listing is identical to its disassembly, 1,208 lines, apart from the two branches it does not print |
 | Build (MSVC 14.50, CMake 4.3, Ninja) | `armrecomp.exe` + `vitarecomp.lib` build clean |
 | `ctest` | 13 / 13 suites pass (container, inflate, decode, discover, reloc, runtime, raster, texdec, usse, usse_wide, pixfmt, gxm_tex, pool); the interpreter that runs a program for sixty-four pixels at once leaves every register of every one as the one-at-a-time interpreter does, on 60,000 random instructions and 4,000 random programs; the PVRTC decoder gives, on words from a fixed generator, the images Imagination's codec gives for them |

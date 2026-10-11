@@ -97,6 +97,11 @@ enum { GXM_TRIANGLES = 0, GXM_LINES, GXM_POINTS, GXM_TRIANGLE_STRIP, GXM_TRIANGL
 /* Draw. `index_size` is 2 or 4; `count` indices are used for each of
  * `instances` instances. Returns how many pixels passed the depth and
  * stencil tests. The pixels are shaded on the threads of pool.h. */
+/* Where the first vertices of the last draw came out of the vertex program,
+ * in the order the indices first name them: x, y, z, w before the divide.
+ * For the log of a frame's draws. Returns how many were written. */
+unsigned gxm_draw_positions(float (*out)[4], unsigned max);
+
 uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, uint32_t indices,
                   uint32_t count, uint32_t instances);
 

@@ -951,3 +951,28 @@ pass that wrote the depth, 1,984 in the pass that tested against it.
     guards that branch to their table only looked at conditional
     branches. An unconditional one now carries what the flow before it
     had settled, and seven more tables are followed.
+
+14. **The card that would not go away was a book.** The level opened on
+    what looked like a tutorial card over a still of the game, and nothing
+    took it away: no tap, no button. START paused, and resuming brought it
+    back. Three things were tried to find what the title was waiting for,
+    and each said something true. The functions entered between two
+    vertical blanks, listed from a run with a finger on the screen and
+    from one without (`VITARECOMP_COVERAGE`), differed by 51 for a tap in
+    the middle and by 324 for a tap on an icon: the touch arrived, and
+    was acted on. The trace of that second tap showed three files read
+    and nine more draws for six frames, and not one bit of the picture
+    changed. So the log of a frame's draws was made to say where each
+    draw's vertices came out, and one draw's were no numbers at all, from
+    a matrix of 0xFFFFFFFF words: a cause, at last, and it was not one.
+    That draw is the title's own unused slot, and draws nothing on the
+    console either. What the positions did show was what the screen is:
+    two pages side by side and stencil shapes turned about the bottom
+    corners, a book. Not a card: the player's journal, which the game
+    opens by itself at its first tutorial page, and the nine draws were
+    a page lifted for as long as the finger stayed on it, six frames,
+    moving nowhere because the finger did not move. The journal closes at
+    the icon in its corner. Nothing had been wrong since the level loaded.
+    A screen that does not answer is first a screen to be read as the
+    title's designer meant it, and a picture of a console with arrows on
+    it was the manual; the half day bought two tools that stay.

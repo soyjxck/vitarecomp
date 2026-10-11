@@ -181,7 +181,8 @@ first level:
 | Loading `igc_snake_temple_room_start` | the loading screen again, 7 scenes |
 | The level: the opening cinematic | 13 scenes, 255 draws (227 precomputed), 38,000 triangles, 5.3 million pixels, 320 ms |
 | The first playable level, its first frame | 12 scenes, 544 draws (516 precomputed), 50,000 triangles, 6 million pixels, 630 ms |
-| Its tutorial card, the level held behind it | 1 scene, 16 draws, 2.3 million pixels |
+| The journal, opened on that level's first frame at a tutorial page | 1 scene, 16 draws, 2.3 million pixels |
+| Play: the level, the character run through it | 13 scenes, 546 draws (516 precomputed), 50,000 triangles, 5.4 million pixels, 350 ms |
 
 The level's picture was black, and the first reason was the ARM
 instruction set: the title carries some 8,500 instructions of hand-written
@@ -201,11 +202,16 @@ next level loading behind it, and then the title saves a checkpoint and
 switches: `LOAD LEVEL( /snake_temple_intro.bsp, /mov_min_game_intro.bsp )`,
 the first level a player moves in. Its first frame took the last jump
 tables discovery had not sized (LESSONS.md); with those followed it comes
-up and stops, as it should, on a tutorial card.
+up and opens the journal, the book the game keeps its tutorials in, at the
+page for the journal itself. That screen took half a day to be understood
+as one that was working (LESSONS.md again). A touch on the icon in its
+corner closes it, the chapter's title fades in over the level, and the
+left stick runs the character forward until the game opens the journal
+again, at jumping and climbing.
 
-What comes next: play, which wants the card dismissed and the sticks,
-which the host now has (`--stick`, and W A S D on the window); the levels
-at more than two or three frames a second (milestone E); sound that can be
+What comes next: the levels at more than three frames a second (milestone
+E), which is now the whole of the distance between this and playing; sound
+that can be
 heard, since the title streams it and the synthesiser plays it in silence;
 and the movies, which want SceMp4's demultiplexer and the H.264 and AAC
 decoders behind `sceAvcdec` and `sceAudiodec`.

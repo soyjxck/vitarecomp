@@ -22,19 +22,35 @@ file(GLOB VITARECOMP_RECOMP_PARTS "${VITARECOMP_RECOMP_DIR}/recomp_funcs_[0-9][0
 # The window is the platform's own: GDI on Windows, none elsewhere yet.
 if(WIN32)
     set(VITARECOMP_HOST_WINDOW window_win32.c)
+    set(VITARECOMP_HOST_SAMPLER sampler_win32.c)
 else()
     set(VITARECOMP_HOST_WINDOW window_none.c)
+    set(VITARECOMP_HOST_SAMPLER sampler_none.c)
 endif()
 
 add_executable(vita_host
     main.c
     ${VITARECOMP_HOST_WINDOW}
+    ${VITARECOMP_HOST_SAMPLER}
     "${VITARECOMP_RECOMP_DIR}/recomp_funcs.c"
     ${VITARECOMP_RECOMP_PARTS}
 )
 target_link_libraries(vita_host PRIVATE vitarecomp)
 if(WIN32)
-    target_link_libraries(vita_host PRIVATE user32 gdi32)
+    target_link_libraries(vita_host PRIVATE user32 gdi32 dbghelp winmm)
+endif()
+
+# Names and lines for the host and the runtime in the linked program; the
+# generated C stays without, there is too much of it.
+if(VITARECOMP_SYMBOLS)
+    if(MSVC)
+        set_source_files_properties(main.c ${VITARECOMP_HOST_WINDOW} ${VITARECOMP_HOST_SAMPLER}
+                                    PROPERTIES COMPILE_OPTIONS "/Z7")
+        target_link_options(vita_host PRIVATE /DEBUG /OPT:REF /OPT:ICF)
+    else()
+        set_source_files_properties(main.c ${VITARECOMP_HOST_WINDOW} ${VITARECOMP_HOST_SAMPLER}
+                                    PROPERTIES COMPILE_OPTIONS "-g")
+    endif()
 endif()
 
 if(VITARECOMP_IMPORT_DEFAULTS)

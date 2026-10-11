@@ -12,6 +12,7 @@
  * finger that moved from one that was lifted and put down.
  */
 
+#include "vitarecomp/hle.h"
 #include "vitarecomp/host.h"
 #include "vitarecomp/mem.h"
 #include "vitarecomp/recomp_rt.h"
@@ -41,7 +42,12 @@ void vita_hle_sceTouchPeek(void) {
     }
     int x = 0, y = 0, down = port == 0 && g_sampling[0] && vita_host_touch(&x, &y);
     if (port == 0) {
-        if (down && !g_down) g_id = (uint8_t)((g_id + 1) & 0x7F);
+        if (down && !g_down) {
+            g_id = (uint8_t)((g_id + 1) & 0x7F);
+            vita_hle_trace("touch: contact %u at %d, %d of the front panel", g_id, x, y);
+        } else if (!down && g_down) {
+            vita_hle_trace("touch: contact %u lifted", g_id);
+        }
         g_down = down;
     }
     uint64_t stamp = vita_clock_us();

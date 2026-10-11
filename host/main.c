@@ -31,6 +31,7 @@
 #include "vitarecomp/loader.h"
 #include "vitarecomp/mem.h"
 #include "vitarecomp/recomp_rt.h"
+#include "sampler.h"
 #include "window.h"
 #include "../src/sched.h"
 
@@ -83,6 +84,9 @@ static struct {
     uint32_t    frame;
     int         window;          /* --window: show frames and read the keyboard */
     uint32_t    shown_flips;     /* at the last title update */
+    uint32_t    sample_from, sample_to;  /* VITARECOMP_HOST_PROFILE: the vertical blanks sampled between, if given */
+    uint32_t    ran_from, ran_to;        /* VITARECOMP_COVERAGE: the vertical blanks counted between */
+    const char *ran_path;
 } g;
 
 static const struct { const char *name; uint32_t bit; } BUTTONS[] = {
@@ -152,6 +156,7 @@ static void summary(void) {
             g.frame, vita_display_flips(), vita_trap_count(),
             vita_dispatch_hits(), vita_dispatch_misses(), vita_mem_bad_access,
             vita_heap_used(), vita_heap_size());
+    vita_sampler_report(stderr);
     /* with the trace on, where every thread was left */
     const char *e = getenv("VITARECOMP_TRACE");
     if (e && *e && *e != '0') {
@@ -228,6 +233,15 @@ static void window_vblank(void) {
 void vita_host_vblank(void) {
     g.frame++;
     if (g.window) window_vblank();
+    if (g.sample_to) vita_sampler_run(g.frame >= g.sample_from && g.frame < g.sample_to);
+    if (g.ran_to && g.frame == g.ran_from) vita_trace_fns = 2;
+    if (g.ran_to && g.frame == g.ran_to) {
+        FILE *f = fopen(g.ran_path, "w");
+        vita_trace_fns = 0;
+        if (f) { vita_coverage_write(f); fclose(f); }
+        fprintf(stderr, "vita_host: %s %s (functions entered in vblanks %u to %u)\n",
+                f ? "wrote" : "cannot write", g.ran_path, g.ran_from, g.ran_to);
+    }
     if (g.dump_path && g.frame == g.dump_frame) write_ppm(g.dump_path);
     if (g.dump_dir && g.frame % g.dump_every == 0) {
         char path[1024];
@@ -290,7 +304,10 @@ static int usage(void) {
           "  --mount P=DIR  where the guest mount P (app0, ux0, ...) lives on the host\n"
           "  --syms F       names from an `nm -n` listing, for traces\n"
           "  --trace-fns    log every function entry (VITARECOMP_TRACE=1 logs traps and bad accesses;\n"
-          "                 VITARECOMP_PROFILE=N prints every N seconds where the time went)\n"
+          "                 VITARECOMP_PROFILE=N prints every N seconds where the title's time went,\n"
+          "                 VITARECOMP_HOST_PROFILE=MS[@FROM-TO] at the end where the host's did,\n"
+          "                 VITARECOMP_COVERAGE=FROM-TO@FILE writes which functions ran between\n"
+          "                 two vertical blanks, for comparing two runs)\n"
           "  --trace-insns LO-HI  log registers at each instruction in [LO, HI]; needs C emitted\n"
           "                 with VITARECOMP_EMIT_PC=1, which also names the PC of bad accesses\n",
           stderr);
@@ -390,6 +407,29 @@ int main(int argc, char **argv) {
     lr = 0xDEADC0DEu;
     r0 = 0;
     r1 = 0;
+
+    /* VITARECOMP_COVERAGE=FROM-TO@FILE: the functions entered between two
+     * vertical blanks, each with its count, written to FILE. */
+    {
+        const char *e = getenv("VITARECOMP_COVERAGE");
+        unsigned from = 0, to = 0;
+        const char *at = e ? strchr(e, '@') : NULL;
+        if (at && sscanf(e, "%u-%u", &from, &to) == 2 && to > from) {
+            g.ran_from = from; g.ran_to = to; g.ran_path = at + 1;
+        }
+    }
+
+    /* VITARECOMP_HOST_PROFILE=MS[@FROM-TO]: the host's own threads sampled
+     * every MS milliseconds, between two vertical blanks if given. */
+    {
+        const char *e = getenv("VITARECOMP_HOST_PROFILE");
+        unsigned ms = 0, from = 0, to = 0;
+        if (e && sscanf(e, "%u@%u-%u", &ms, &from, &to) >= 1 && ms) {
+            if (vita_sampler_start(ms)) fprintf(stderr, "vita_host: this build has no sampler\n");
+            else if (to > from) { g.sample_from = from; g.sample_to = to; }
+            else vita_sampler_run(1);
+        }
+    }
 
     /* VITARECOMP_PROFILE=N: every N seconds, where the samples fell. */
     {

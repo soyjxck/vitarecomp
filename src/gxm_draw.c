@@ -1055,12 +1055,21 @@ static void fill_band(void *ctx, unsigned band, unsigned index) {
     if (g_profile) wk->ns[T_BAND] += now_ns() - began;
 }
 
+static uint32_t g_shaded_last;
+
+unsigned gxm_draw_positions(float (*out)[4], unsigned max) {
+    unsigned n = g_shaded_last < max ? g_shaded_last : max;
+    for (unsigned i = 0; i < n; i++) memcpy(out[i], g_vertices[i].pos, 4 * sizeof(float));
+    return n;
+}
+
 uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, uint32_t indices,
                   uint32_t count, uint32_t instances) {
     static draw d;                          /* large, and never entered twice */
     static uint32_t serial;
     const gxm_program *vp = s->vertex, *fp = s->fragment;
     gxm_counters.draws++;
+    g_shaded_last = 0;
     if (primitive == GXM_LINES || primitive == GXM_POINTS) { gxm_counters.not_triangles++; return 0; }
     if (!vp || !vp->ok || (fp && !fp->ok) || !s->width || !s->height) { gxm_counters.no_program++; return 0; }
     if (count < 3 || !instances) return 0;
@@ -1161,6 +1170,7 @@ uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, ui
         vertex_job shading = { &d, used, instance };
         if (used < 4 * VERTEX_RUN) for (unsigned n = 0; n * VERTEX_RUN < used; n++) shade_run(&shading, n, 0);
         else vita_pool_run((used + VERTEX_RUN - 1) / VERTEX_RUN, shade_run, &shading);
+        g_shaded_last = used;
         LAP(T_VERTICES);
         for (uint32_t i = 0; i < count; i++) {
             uint32_t v = index_size == 2 ? (uint32_t)(index_data[2 * i] | index_data[2 * i + 1] << 8)

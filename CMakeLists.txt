@@ -111,6 +111,20 @@ endif()
 
 target_link_libraries(vitarecomp PUBLIC vitashader)
 
+# Debug information for the runtime, and for the host when one is built: what
+# a debugger or a sampling profiler needs to name a line. Off by default; a
+# release build is the same code with or without it.
+option(VITARECOMP_SYMBOLS "Debug information for the runtime and the host" OFF)
+if(VITARECOMP_SYMBOLS)
+    foreach(target vitashader vitarecomp)
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /Z7)
+        else()
+            target_compile_options(${target} PRIVATE -g)
+        endif()
+    endforeach()
+endif()
+
 target_include_directories(vitarecomp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

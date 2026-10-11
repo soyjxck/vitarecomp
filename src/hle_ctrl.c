@@ -9,6 +9,7 @@
  * left zero as the console leaves them.
  */
 
+#include "vitarecomp/hle.h"
 #include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
 #include "sched.h"
@@ -22,6 +23,7 @@
 
 static uint32_t g_mode;        /* SCE_CTRL_MODE_DIGITAL by default */
 static uint64_t g_stamp;
+static uint32_t g_buttons;     /* as last read, for the trace */
 
 /* int sceCtrlSetSamplingMode(SceCtrlPadInputMode mode): returns the previous mode */
 void vita_hle_sceCtrlSetSamplingMode(void) {
@@ -45,6 +47,8 @@ void vita_hle_sceCtrlPeekBufferPositive(void) {
     }
 
     uint32_t buttons = vita_host_buttons();
+    if (buttons != g_buttons) vita_hle_trace("ctrl: buttons 0x%04X, were 0x%04X", buttons, g_buttons);
+    g_buttons = buttons;
     uint8_t sticks[4] = { 128, 128, 128, 128 };
     if (g_mode) vita_host_sticks(sticks);       /* a pad in its digital mode reports them at rest */
     g_stamp += FRAME_US;
