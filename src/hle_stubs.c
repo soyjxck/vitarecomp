@@ -33,18 +33,6 @@ static uint32_t arg(int n) { return vita_read32(sp + 4u * (uint32_t)(n - 4)); }
 
 /* --- touch, motion, camera -------------------------------------------------------- */
 
-/* int sceTouchRead(SceUInt32 port, SceTouchData *pData, SceUInt32 nBufs): no touches,
- * SceTouchData is 0x90 bytes. Returns the buffers filled. */
-void vita_hle_sceTouchRead(void) {
-    uint32_t n = r2 > 64 ? 64 : r2;
-    for (uint32_t i = 0; i < n; i++) zero(r1 + i * 0x90, 0x90);
-    r0 = n;
-}
-void vita_hle_sceTouchPeek(void) { vita_hle_sceTouchRead(); }
-void vita_hle_sceTouchSetSamplingState(void) { r0 = 0; }
-void vita_hle_sceTouchGetSamplingState(void) { if (vita_mem_ptr(r1, 4)) vita_write32(r1, 0); r0 = 0; }
-void vita_hle_sceTouchGetPanelInfo(void) { zero(r1, 0x20); r0 = 0; }
-
 /* SceMotion: a device lying still. SceMotionState is 0xF8 bytes. */
 void vita_hle_sceMotionReset(void)            { r0 = 0; }
 void vita_hle_sceMotionStartSampling(void)    { r0 = 0; }

@@ -5,9 +5,11 @@
  * here: fetch the vertices, run the vertex program on each, assemble and
  * rasterise triangles, and for every pixel covered run the tests, the
  * fragment program and the blend, and store the result in the colour
- * surface's own format. It is a reference renderer: one sample a pixel, one
- * pixel at a time, every program interpreted. It is meant to be right
- * before it is fast.
+ * surface's own format. It is a reference renderer: one sample a pixel,
+ * every program interpreted. It is meant to be right before it is fast, and
+ * what it does for speed changes no pixel: a draw's rows are shared out
+ * among threads, and a fragment program is run for a row of pixels at a
+ * time where it is one that can be.
  */
 
 #ifndef VITARECOMP_GXM_DRAW_H
@@ -27,6 +29,7 @@ typedef struct {
     uint32_t      header;                   /* the GXP, in guest memory */
     uint64_t      name;                     /* a hash of its bytes: what a dump of it is called */
     int           ok;                       /* read, and all of its code can be run */
+    int           wide;                     /* and its main part for a row of pixels at once (usse.h) */
     gxp_program   gxp;
     gxm_attribute attributes[16];           /* a vertex program's inputs */
     uint32_t      attribute_count;
@@ -96,6 +99,10 @@ enum { GXM_TRIANGLES = 0, GXM_LINES, GXM_POINTS, GXM_TRIANGLE_STRIP, GXM_TRIANGL
  * stencil tests. The pixels are shaded on the threads of pool.h. */
 uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, uint32_t indices,
                   uint32_t count, uint32_t instances);
+
+/* A frame has been shown. Compressed textures are kept decoded from one
+ * draw to the next, and looked at again for changes once a frame. */
+void gxm_draw_frame(void);
 
 /* Where pixel (x, y) of a surface lies, in bytes from its start. */
 uint32_t gxm_pixel_offset(uint32_t layout, uint32_t x, uint32_t y, uint32_t width, uint32_t height,

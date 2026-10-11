@@ -4,7 +4,8 @@
  * it, swapped into the byte order a DIB wants, into a buffer the paint
  * handler stretches over the client area; the keyboard is tracked from the
  * window's own key messages, so it reads nothing while another window has
- * the focus.
+ * the focus. The left mouse button is a finger on the front panel: where it
+ * is held on the picture is where the panel is touched.
  */
 
 #include "window.h"
@@ -24,6 +25,7 @@ static struct {
     int              fw, fh;            /* the frame's size */
     int              ww, wh;            /* the client size asked for */
     volatile LONG    buttons, closed;
+    volatile LONG    finger;            /* bit 31 while the button is held; y above x, eleven bits each */
     char             title[256];
     LARGE_INTEGER    freq, next;
 } W;
@@ -43,11 +45,28 @@ static void key(WPARAM k, int down) {
     }
 }
 
+/* The mouse at a client position, as a place on the panel. */
+static void finger(HWND h, LPARAM lp) {
+    RECT rc;
+    GetClientRect(h, &rc);
+    if (rc.right <= 0 || rc.bottom <= 0) return;
+    int x = (int)(short)LOWORD(lp) * 1920 / rc.right, y = (int)(short)HIWORD(lp) * 1088 / rc.bottom;
+    if (x < 0) x = 0;
+    if (x > 1919) x = 1919;
+    if (y < 0) y = 0;
+    if (y > 1087) y = 1087;
+    InterlockedExchange(&W.finger, (LONG)(0x80000000u | ((uint32_t)y << 11) | (uint32_t)x));
+}
+
 static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_KEYDOWN: key(wp, 1); return 0;
     case WM_KEYUP:   key(wp, 0); return 0;
     case WM_KILLFOCUS: InterlockedExchange(&W.buttons, 0); return 0;
+    case WM_LBUTTONDOWN: SetCapture(h); finger(h, lp); return 0;
+    case WM_MOUSEMOVE: if (W.finger < 0) finger(h, lp); return 0;
+    case WM_LBUTTONUP: ReleaseCapture(); return 0;
+    case WM_CAPTURECHANGED: InterlockedExchange(&W.finger, 0); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -149,6 +168,14 @@ void vita_window_present(const uint8_t *pixels, int width, int height, int pitch
 }
 
 uint32_t vita_window_buttons(void) { return (uint32_t)W.buttons; }
+
+int vita_window_touch(int *x, int *y) {
+    uint32_t f = (uint32_t)W.finger;
+    if (!(f & 0x80000000u)) return 0;
+    *x = (int)(f & 0x7FF);
+    *y = (int)((f >> 11) & 0x7FF);
+    return 1;
+}
 int      vita_window_closed(void)  { return W.closed != 0; }
 
 void vita_window_title(const char *text) {

@@ -45,6 +45,7 @@ typedef struct {
     uint8_t  unit_w, unit_h, unit_bytes;    /* a unit is a texel, or a compressed block */
     uint8_t  no_chain;                      /* declared without a mip chain */
     uint8_t  pvrtc_version, pvrtc_bits;     /* which PVRTC: generation 1 or 2, 2 or 4 bits a texel */
+    uint8_t  bytes8;                        /* every field of a texel is one unsigned byte */
     pixfmt   pf;                            /* a texel; for blocks and palettes, what they decode to */
     uint32_t level_w[GXM_TEX_LEVELS], level_h[GXM_TEX_LEVELS];      /* texels */
     uint32_t store_w[GXM_TEX_LEVELS], store_h[GXM_TEX_LEVELS];      /* units, as laid out */
@@ -56,6 +57,11 @@ typedef struct {
     const uint8_t *base;                    /* the bytes at `data` */
     uint32_t avail;                         /* how many of them may be read */
     const uint8_t *pal;                     /* 16 or 256 words at `palette`, or NULL */
+    /* Optionally, for a compressed texture: its levels decoded, a word a
+     * texel with red in the low byte, row by row, a cube's six faces one
+     * after another (gxm_tex_unpack fills them). Texels are then read from
+     * here and the compressed bytes are not looked at again. */
+    const uint32_t *plain[GXM_TEX_LEVELS];
 } gxm_tex;
 
 /* The compressed blocks decoded lately, for whoever is reading a texture:
@@ -72,6 +78,15 @@ void gxm_tex_cache_reset(gxm_tex_cache *c);
 /* Read the control words. Returns 0 when they do not describe a texture
  * (a zero size); the texture is otherwise ready for `base` to be set. */
 int gxm_tex_decode(gxm_tex *t, const uint32_t words[4]);
+
+/* Whether the format is one gxm_tex_unpack decodes: blocks of some kind. */
+int gxm_tex_is_packed(const gxm_tex *t);
+
+/* Decode rows of blocks row0 <= row < row1 of one face of one level into
+ * `out`, which holds that face of the level whole: level_w by level_h
+ * words, row by row. The rows of blocks of a level are store_h[level].
+ * Different rows may be decoded by different threads. */
+void gxm_tex_unpack(const gxm_tex *t, unsigned face, unsigned level, uint32_t row0, uint32_t row1, uint32_t *out);
 
 /* One texel, unfiltered, in the channel order the format's swizzle gives.
  * Coordinates outside the level, or bytes outside `avail`, read as zero.

@@ -35,6 +35,32 @@ endif()
 
 # --- the runtime library ------------------------------------------------------
 
+# The shader bytecode: its decoder, its two interpreters, the program
+# container. A library of its own because the recompiler's tool lists
+# programs with it too, and because one of its files is built for a newer
+# processor than the rest and chosen at run time.
+add_library(vitashader STATIC
+    src/usse.c
+    src/gxp.c
+    src/half_rows.c
+)
+target_include_directories(vitashader PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|amd64)$")
+    target_sources(vitashader PRIVATE src/half_rows_avx2.c)
+    target_compile_definitions(vitashader PRIVATE VITA_HALF_ROWS_AVX2)
+    if(MSVC)
+        set_source_files_properties(src/half_rows_avx2.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    else()
+        set_source_files_properties(src/half_rows_avx2.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mf16c")
+    endif()
+endif()
+if(NOT MSVC)
+    target_link_libraries(vitashader PUBLIC m)
+endif()
+
 add_library(vitarecomp STATIC
     src/cpu.c
     src/mem.c
@@ -57,6 +83,7 @@ add_library(vitarecomp STATIC
     src/hle_gxm.c
     src/hle_ngs.c
     src/hle_stubs.c
+    src/hle_touch.c
     src/hle_movie.c
     src/hle_vars.c
     src/hle_scanf.c
@@ -68,8 +95,6 @@ add_library(vitarecomp STATIC
     src/raster.c
     src/texdec.c
     src/pvrtc.c
-    src/usse.c
-    src/gxp.c
     src/pixfmt.c
     src/gxm_tex.c
     src/gxm_draw.c
@@ -81,6 +106,8 @@ if(NOT WIN32)
     find_package(Threads REQUIRED)
     target_link_libraries(vitarecomp PUBLIC Threads::Threads)
 endif()
+
+target_link_libraries(vitarecomp PUBLIC vitashader)
 
 target_include_directories(vitarecomp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include

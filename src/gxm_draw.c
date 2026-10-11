@@ -2,6 +2,7 @@
 
 #include "gxm_draw.h"
 #include "gxm_tex.h"
+#include "half_rows.h"
 #include "pool.h"
 #include "raster.h"
 #include "texdec.h"
@@ -84,6 +85,114 @@ static void run(stage *g, const usse_insn *code, uint32_t count) {
     usse_reset(&g->st);
     uint32_t at = usse_run(code, count, &g->st);
     if (at) { g->counters->stopped++; g->counters->stopped_at = at; }
+}
+
+/* --- compressed textures, decoded once ---------------------------------------------------
+ * A texel of a compressed texture costs a block's decoding, and a PVRTC
+ * block is decoded from nine words. Sampled as a scene samples them, eight
+ * texels to a pixel from blocks all over the texture, that was most of a
+ * frame. So a compressed texture is decoded whole the first time a draw
+ * binds it, every level, and kept. Its bytes are the title's and can
+ * change under it: once a frame, a hash of some of them is compared with
+ * what it was, and the texture decoded again if it differs. */
+
+#define UNPACKED_LIMIT ((size_t)768 << 20)      /* bytes kept before the least recently used go */
+#define UNPACK_ROWS    8                        /* rows of blocks a thread takes at a time */
+
+typedef struct {
+    uint32_t  data, format, sides, shape;       /* what it is: where, of what, how large, laid out how */
+    uint64_t  stamp;                            /* the hash of its bytes it was decoded from */
+    uint32_t  checked, used;                    /* the frames it was last compared and last drawn with */
+    uint32_t *level[GXM_TEX_LEVELS];
+    size_t    bytes;
+} unpacked;
+
+static unpacked *g_unpacked;
+static uint32_t g_unpacked_count, g_unpacked_cap, g_frame = 1;
+static size_t g_unpacked_bytes;
+
+void gxm_draw_frame(void) { g_frame++; }
+
+static uint64_t stamp(const gxm_tex *t) {
+    uint32_t n = t->bytes < t->avail ? t->bytes : t->avail;
+    uint64_t h = 1469598103934665603ull ^ n, word;
+    if (n < 16) return h;
+    /* all of a small one; of a large one, 256 places spread over it */
+    uint32_t places = n <= 4096 ? n / 8 : 256, step = n <= 4096 ? 8 : (n - 8) / 255;
+    for (uint32_t i = 0; i < places; i++) {
+        memcpy(&word, t->base + (size_t)i * step, 8);
+        h = (h ^ word) * 1099511628211ull;
+    }
+    return h;
+}
+
+typedef struct { const gxm_tex *t; unsigned face, level; uint32_t *out; } unpack_job;
+
+static void unpack_rows(void *ctx, unsigned item, unsigned worker) {
+    const unpack_job *job = ctx;
+    (void)worker;
+    gxm_tex_unpack(job->t, job->face, job->level, item * UNPACK_ROWS, (item + 1) * UNPACK_ROWS, job->out);
+}
+
+static void unpack_all(const gxm_tex *t, unpacked *e) {
+    unsigned faces = t->cube ? 6 : 1;
+    for (unsigned level = 0; level < t->levels; level++)
+        for (unsigned face = 0; face < faces; face++) {
+            unpack_job job = { t, face, level, e->level[level] + (size_t)face * t->level_w[level] * t->level_h[level] };
+            uint32_t rows = t->store_h[level];
+            if (rows <= 2 * UNPACK_ROWS) gxm_tex_unpack(t, face, level, 0, rows, job.out);
+            else vita_pool_run((rows + UNPACK_ROWS - 1) / UNPACK_ROWS, unpack_rows, &job);
+        }
+    e->stamp = stamp(t);
+}
+
+/* Give a compressed texture its decoded levels, decoding them if this is
+ * the first draw to bind it or its bytes have changed. */
+static void attach_unpacked(gxm_tex *t) {
+    uint32_t shape = t->type | (t->levels << 8) | ((uint32_t)t->no_chain << 16), sides = t->width | (t->height << 16);
+    unsigned faces = t->cube ? 6 : 1;
+    unpacked *e = NULL;
+    for (uint32_t i = 0; i < g_unpacked_count; i++) {
+        unpacked *u = &g_unpacked[i];
+        if (u->data == t->data && u->format == t->format && u->sides == sides && u->shape == shape) { e = u; break; }
+    }
+    if (!e) {
+        size_t texels = 0;
+        for (unsigned level = 0; level < t->levels; level++) texels += (size_t)faces * t->level_w[level] * t->level_h[level];
+        /* make room: what no draw of this frame or the last has used goes first */
+        while (g_unpacked_bytes + texels * 4 > UNPACKED_LIMIT && g_unpacked_count) {
+            uint32_t oldest = 0;
+            for (uint32_t i = 1; i < g_unpacked_count; i++) if (g_unpacked[i].used < g_unpacked[oldest].used) oldest = i;
+            if (g_unpacked[oldest].used + 1 >= g_frame) break;
+            g_unpacked_bytes -= g_unpacked[oldest].bytes;
+            free(g_unpacked[oldest].level[0]);
+            g_unpacked[oldest] = g_unpacked[--g_unpacked_count];
+        }
+        if (g_unpacked_count == g_unpacked_cap) {
+            uint32_t cap = g_unpacked_cap ? g_unpacked_cap * 2 : 256;
+            unpacked *grown = realloc(g_unpacked, (size_t)cap * sizeof(*grown));
+            if (!grown) return;
+            g_unpacked = grown; g_unpacked_cap = cap;
+        }
+        uint32_t *texel = malloc(texels * 4 + 4);
+        if (!texel) return;
+        e = &g_unpacked[g_unpacked_count++];
+        memset(e, 0, sizeof(*e));
+        e->data = t->data; e->format = t->format; e->sides = sides; e->shape = shape;
+        e->bytes = texels * 4;
+        g_unpacked_bytes += e->bytes;
+        for (unsigned level = 0; level < t->levels; level++) {
+            e->level[level] = texel;
+            texel += (size_t)faces * t->level_w[level] * t->level_h[level];
+        }
+        unpack_all(t, e);
+        e->checked = g_frame;
+    } else if (e->checked != g_frame) {
+        e->checked = g_frame;
+        if (stamp(t) != e->stamp) unpack_all(t, e);
+    }
+    e->used = g_frame;
+    for (unsigned level = 0; level < t->levels; level++) t->plain[level] = e->level[level];
 }
 
 /* VITARECOMP_GXM_TEXTURES=<directory>: each texture a draw samples is written
@@ -169,6 +278,7 @@ static void stage_begin(stage *g, const gxp_program *p, const uint32_t buffers[G
         t->base = t->avail ? vita_mem_ptr(t->data, 1) : NULL;
         t->pal = t->palette ? vita_mem_ptr(t->palette, t->kind == GXM_TEX_PALETTE4 ? 64 : 1024) : NULL;
         if (!t->base) continue;
+        if (gxm_tex_is_packed(t)) attach_unpacked(t);
         g->tex[unit] = t;
         gxm_tex_cache_reset(&cache[unit]);          /* what it held was another draw's texture */
         dump_texture(t, unit, storage == g_textures[1]);
@@ -200,7 +310,13 @@ typedef struct {
     int w_at;                               /* the clip-space w, for programs that ask for the position */
     int varyings;
 
+    /* how the pixels go through the fragment program */
+    int wide;                               /* a row of them at a time */
+    int late;                               /* the program can discard: the tests come after it */
+    int each;                               /* the program reads the pixel: no triangle waits on another */
 } draw;
+
+struct batch;
 
 /* What a thread shading part of a draw has to itself: the fragment stage's
  * registers, the blocks it has decoded, its counts. */
@@ -211,6 +327,7 @@ typedef struct {
     gxm_tex_cache cache[GXP_TEXTURE_UNITS];
     gxm_draw_counters counters;
     uint32_t pixels;
+    struct batch *b;                        /* the pixels waiting for the program, when they go in rows */
 } worker;
 
 static const uint8_t ATTRIBUTE_BYTES[11] = { 1, 1, 2, 2, 1, 1, 2, 2, 2, 4, 4 };
@@ -344,12 +461,71 @@ static void read_pixel(const gxm_draw_state *s, const uint8_t *px, float rgba[4]
     if (s->colour_gamma) for (int i = 0; i < 3; i++) rgba[i] = pix_srgb_to_linear(rgba[i]);
 }
 
+/* The sample of a texture that a program is handed as an input: the
+ * coordinate `v` and its rates of change, projected if the input says so,
+ * to the texels. Returns how many components the texture has. */
+static int sample_input(worker *wk, const gxp_input *in, const gxm_tex *t, float v[4], float dx[4], float dy[4],
+                        float rgba[4]) {
+    rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0.0f;
+    if (!t) { wk->counters.no_texture++; return 4; }
+    if (in->projection && !t->cube) {
+        /* the coordinate over its w, or over its z, and the rate of change of that */
+        int by = in->projection == 1 ? 3 : 2;
+        float q = 1.0f / v[by];
+        for (int k = 0; k < 2; k++) {
+            dx[k] = (dx[k] - v[k] * q * dx[by]) * q;
+            dy[k] = (dy[k] - v[k] * q * dy[by]) * q;
+            v[k] *= q;
+        }
+    }
+    gxm_tex_sample(t, &wk->cache[in->unit], v, t->cube ? 0.0f : gxm_tex_footprint(t, dx[0], dx[1], dy[0], dy[1]), rgba);
+    return t->pf.components;
+}
+
+/* Such a sample into the registers the program looks for it in, in the
+ * form the program was compiled to find there. */
+static void store_sample(const gxp_input *in, const gxm_tex *t, const float rgba[4], int n, uint32_t *reg) {
+    if (in->result == 3) {
+        if (in->single) n = 1;
+        for (int k = 0; k < 4; k++) if (k < n || !in->single) reg[k] = k < n ? float_to_bits(rgba[k]) : 0;
+    } else if (in->result == 0 && t && t->pf.type == USSE_F32) {
+        /* a texture of whole words, kept as it is */
+        for (int k = 0; k < n; k++) reg[k] = float_to_bits(rgba[k]);
+    } else if (in->result == 0 && (!t || t->pf.type == USSE_U8 || t->pf.type == USSE_S8)) {
+        reg[0] = 0;
+        for (int k = 0; k < n; k++) {
+            if (t && t->pf.type == USSE_S8) pack(reg, GXP_S8, (unsigned)k, roundf((rgba[k] < -1.0f ? -1.0f : rgba[k] > 1.0f ? 1.0f : rgba[k]) * 127.0f));
+            else pack(reg, GXP_U8, (unsigned)k, roundf(unit_clamp(rgba[k]) * 255.0f));
+        }
+    } else {
+        reg[0] = reg[1] = 0;
+        for (int k = 0; k < n; k++) pack(reg, GXP_F16, (unsigned)k, rgba[k]);
+    }
+}
+
+/* A program that blends for itself is given the pixel as it stands, in the
+ * registers its own result will be left in. */
+static void preload(const gxm_draw_state *s, const gxp_program *p, int x, int y, uint32_t *out) {
+    const uint8_t *px = pixel(s, x, y);
+    if (!px) return;
+    if (is_raw_result(p)) {
+        memset(out, 0, 16);
+        memcpy(out, px, s->colour.bytes > 16 ? 16 : s->colour.bytes);
+        return;
+    }
+    float now[4];
+    read_pixel(s, px, now);
+    if (p->result_type == GXP_F16) { out[0] = halves(now[0], now[1]); out[1] = halves(now[2], now[3]); }
+    else if (p->result_type == GXP_F32) for (int k = 0; k < 4; k++) out[k] = float_to_bits(now[k]);
+    else { out[0] = 0; for (unsigned k = 0; k < 4; k++) pack(out, GXP_U8, k, roundf(unit_clamp(now[k]) * 255.0f)); }
+}
+
 /* Fill the primary attributes from the program's input list and run it. */
 static void run_fragment(worker *wk, int x, int y, float depth, const float *var, const float *ddx, const float *ddy) {
     const draw *d = wk->d;
     const gxp_program *p = wk->f.p;
     usse_state *st = &wk->f.st;
-    float v[4], dx[4], dy[4];
+    float v[4], dx[4], dy[4], rgba[4];
 
     for (uint32_t i = 0; i < p->input_count; i++) {
         const gxp_input *in = &p->inputs[i];
@@ -365,60 +541,13 @@ static void run_fragment(worker *wk, int x, int y, float depth, const float *var
             }
         }
         if (in->has_texture && in->texture_reg < USSE_WORDS - 4) {
-            uint32_t *reg = &st->pa[in->texture_reg];
             const gxm_tex *t = in->unit < GXP_TEXTURE_UNITS ? wk->f.tex[in->unit] : NULL;
-            float rgba[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-            int n = 4;
-            if (t) {
-                slot_value(d, in->coord, x, y, depth, var, ddx, ddy, v, dx, dy);
-                if (in->projection && !t->cube) {
-                    /* the coordinate over its w, or over its z, and the rate of change of that */
-                    int by = in->projection == 1 ? 3 : 2;
-                    float q = 1.0f / v[by];
-                    for (int k = 0; k < 2; k++) {
-                        dx[k] = (dx[k] - v[k] * q * dx[by]) * q;
-                        dy[k] = (dy[k] - v[k] * q * dy[by]) * q;
-                        v[k] *= q;
-                    }
-                }
-                gxm_tex_sample(t, &wk->cache[in->unit], v, t->cube ? 0.0f : gxm_tex_footprint(t, dx[0], dx[1], dy[0], dy[1]), rgba);
-                n = t->pf.components;
-            } else {
-                wk->counters.no_texture++;
-            }
-            if (in->result == 3) {
-                if (in->single) n = 1;
-                for (int k = 0; k < 4; k++) if (k < n || !in->single) reg[k] = k < n ? float_to_bits(rgba[k]) : 0;
-            } else if (in->result == 0 && t && t->pf.type == USSE_F32) {
-                /* a texture of whole words, kept as it is */
-                for (int k = 0; k < n; k++) reg[k] = float_to_bits(rgba[k]);
-            } else if (in->result == 0 && (!t || t->pf.type == USSE_U8 || t->pf.type == USSE_S8)) {
-                reg[0] = 0;
-                for (int k = 0; k < n; k++) {
-                    if (t && t->pf.type == USSE_S8) pack(reg, GXP_S8, (unsigned)k, roundf((rgba[k] < -1.0f ? -1.0f : rgba[k] > 1.0f ? 1.0f : rgba[k]) * 127.0f));
-                    else pack(reg, GXP_U8, (unsigned)k, roundf(unit_clamp(rgba[k]) * 255.0f));
-                }
-            } else {
-                reg[0] = reg[1] = 0;
-                for (int k = 0; k < n; k++) pack(reg, GXP_F16, (unsigned)k, rgba[k]);
-            }
+            if (t) slot_value(d, in->coord, x, y, depth, var, ddx, ddy, v, dx, dy);
+            int n = sample_input(wk, in, t, v, dx, dy, rgba);
+            store_sample(in, t, rgba, n, &st->pa[in->texture_reg]);
         }
     }
-
-    /* a program that blends for itself is given the pixel as it stands */
-    if ((p->flags & GXP_FLAG_FRAGCOLOR) && d->s->has_colour) {
-        const uint8_t *px = pixel(d->s, x, y);
-        if (px && is_raw_result(p)) {
-            memset(st->out, 0, 16);
-            memcpy(st->out, px, d->s->colour.bytes > 16 ? 16 : d->s->colour.bytes);
-        } else if (px) {
-            float now[4];
-            read_pixel(d->s, px, now);
-            if (p->result_type == GXP_F16) { st->out[0] = halves(now[0], now[1]); st->out[1] = halves(now[2], now[3]); }
-            else if (p->result_type == GXP_F32) for (int k = 0; k < 4; k++) st->out[k] = float_to_bits(now[k]);
-            else { st->out[0] = 0; for (unsigned k = 0; k < 4; k++) pack(st->out, GXP_U8, k, roundf(unit_clamp(now[k]) * 255.0f)); }
-        }
-    }
+    if ((p->flags & GXP_FLAG_FRAGCOLOR) && d->s->has_colour) preload(d->s, p, x, y, st->out);
     run(&wk->f, p->primary, p->primary_count);
 }
 
@@ -450,13 +579,13 @@ static float blend_channel(unsigned func, float s, float fs, float dst, float fd
     }
 }
 
-/* The program's result into the colour surface: decoded from the registers
- * it was left in, blended with what is there, stored in the surface's form. */
-static void write_colour(worker *wk, int x, int y) {
+/* The program's result into the colour surface: decoded from the four
+ * registers it was left in, blended with what is there, stored in the
+ * surface's form. */
+static void write_colour(worker *wk, int x, int y, const uint32_t *reg) {
     const gxm_draw_state *s = wk->d->s;
     const gxm_program *fp = s->fragment;
     const gxp_program *p = wk->f.p;
-    const uint32_t *reg = (p->flags & GXP_FLAG_NATIVECOLOR) ? wk->f.st.out : wk->f.st.pa;
     uint8_t *px = pixel(s, x, y);
     if (!px) return;
 
@@ -526,35 +655,18 @@ static void stencil_update(uint8_t *stored, unsigned op, const gxm_face *f) {
     *stored = (uint8_t)((now & ~f->write_mask) | (next & f->write_mask));
 }
 
-/* One covered pixel: the mask, the stencil and depth tests, the program,
- * the colour. A program that may discard runs before the tests, since its
- * verdict decides whether depth and stencil change at all. */
-static int shade_pixel(void *user, int x, int y, float depth, int clockwise,
-                       const float *var, const float *ddx, const float *ddy) {
-    worker *wk = user;
-    const draw *d = wk->d;
-    gxm_draw_state *s = d->s;
-    size_t at = (size_t)y * s->width + (size_t)x;
-    if (s->mask && !s->mask[at]) return 0;
+/* A depth surface of integers compares and keeps integers: without this
+ * a surface stored and loaded again would never equal the depth of the
+ * same geometry drawn a second time. */
+static float whole_depth(const gxm_draw_state *s, float depth) {
+    if (!s->depth_bits) return depth;
+    double top = (double)((1u << s->depth_bits) - 1), steps = floor((double)depth * top + 0.5);
+    return (float)((steps > top ? top : steps > 0.0 ? steps : 0.0) / top);
+}
 
-    /* A depth surface of integers compares and keeps integers: without this
-     * a surface stored and loaded again would never equal the depth of the
-     * same geometry drawn a second time. */
-    if (s->depth_bits) {
-        double top = (double)((1u << s->depth_bits) - 1), steps = floor((double)depth * top + 0.5);
-        depth = (float)((steps > top ? top : steps > 0.0 ? steps : 0.0) / top);
-    }
-
-    /* counter-clockwise on the screen is the front */
-    const gxm_face *f = &s->face[(s->two_sided && clockwise) ? 1 : 0];
-    int shaded = wk->f.p && !f->program_off;
-    int ran = 0;
-    if (shaded && (wk->f.p->flags & (GXP_FLAG_DISCARD | GXP_FLAG_DEPTH))) {
-        run_fragment(wk, x, y, depth, var, ddx, ddy);
-        if (wk->f.st.killed) return 0;
-        ran = 1;
-    }
-
+/* The stencil test and then the depth test, and what the outcome does to
+ * the stencil and to the depth kept for the pixel. Whether it is drawn. */
+static int tested(gxm_draw_state *s, const gxm_face *f, size_t at, float depth) {
     uint8_t *stencil = s->stencil ? &s->stencil[at] : NULL, stored = stencil ? *stencil : 0;
     if (!compare(f->stencil_func, (float)(f->stencil_ref & f->compare_mask), (float)(stored & f->compare_mask))) {
         stencil_update(stencil, f->stencil_fail, f);
@@ -566,12 +678,196 @@ static int shade_pixel(void *user, int x, int y, float depth, int clockwise,
     }
     stencil_update(stencil, f->depth_pass, f);
     if (s->depth && f->depth_write) s->depth[at] = depth;
+    return 1;
+}
+
+/* One covered pixel: the mask, the stencil and depth tests, the program,
+ * the colour. A program that may discard runs before the tests, since its
+ * verdict decides whether depth and stencil change at all. */
+static int shade_pixel(void *user, int x, int y, float depth, int clockwise,
+                       const float *var, const float *ddx, const float *ddy) {
+    worker *wk = user;
+    const draw *d = wk->d;
+    gxm_draw_state *s = d->s;
+    size_t at = (size_t)y * s->width + (size_t)x;
+    if (s->mask && !s->mask[at]) return 0;
+    depth = whole_depth(s, depth);
+
+    /* counter-clockwise on the screen is the front */
+    const gxm_face *f = &s->face[(s->two_sided && clockwise) ? 1 : 0];
+    int shaded = wk->f.p && !f->program_off;
+    int ran = 0;
+    if (shaded && (wk->f.p->flags & (GXP_FLAG_DISCARD | GXP_FLAG_DEPTH))) {
+        run_fragment(wk, x, y, depth, var, ddx, ddy);
+        if (wk->f.st.killed) return 0;
+        ran = 1;
+    }
+    if (!tested(s, f, at, depth)) return 0;
     wk->pixels++;
 
     if (shaded && s->has_colour) {
         if (!ran) run_fragment(wk, x, y, depth, var, ddx, ddy);
-        write_colour(wk, x, y);
+        write_colour(wk, x, y, (wk->f.p->flags & GXP_FLAG_NATIVECOLOR) ? wk->f.st.out : wk->f.st.pa);
     }
+    return 1;
+}
+
+/* --- the same, for a row of pixels at once ------------------------------------------------
+ * Most of what a pixel costs is the fragment program, and most of what an
+ * interpreted program costs is finding out what each instruction says. So
+ * the pixels a thread covers are not shaded as they are met: they wait, up
+ * to USSE_LANES of them, and the program is then run once for all of them,
+ * each instruction taken apart once and done for every pixel waiting
+ * (usse.h). Nothing a pixel ends as is different. What has to hold for
+ * that: a pixel's depth and stencil tests are made in the order the
+ * triangles came in, and so are its writes to the colour surface; both are
+ * kept by letting pixels wait and leave in the order they arrived. A
+ * program that reads the pixel it is about to write must not find a pixel
+ * of an earlier triangle still waiting, so for those nothing waits across
+ * triangles. */
+
+struct batch {
+    unsigned n;                             /* pixels waiting */
+    int      x[USSE_LANES], y[USSE_LANES];
+    float    depth[USSE_LANES];
+    uint8_t  back[USSE_LANES];              /* drawn by a back face */
+    float    var[RASTER_MAX_VARYINGS][USSE_LANES];                  /* each varying, for every pixel */
+    float    ddx[USSE_LANES][RASTER_MAX_VARYINGS], ddy[USSE_LANES][RASTER_MAX_VARYINGS];
+    usse_wide w;
+};
+
+/* Component k of an interpolated quantity, for each of the n pixels waiting. */
+static const float *slot_row(const draw *d, const struct batch *b, unsigned n, unsigned slot, unsigned k, float *scratch) {
+    if (slot == GXP_SLOT_POSITION) {
+        if (k == 0) { for (unsigned l = 0; l < n; l++) scratch[l] = (float)b->x[l] + 0.5f; return scratch; }
+        if (k == 1) { for (unsigned l = 0; l < n; l++) scratch[l] = (float)b->y[l] + 0.5f; return scratch; }
+        if (k == 2) return b->depth;
+        if (d->w_at >= 0) return b->var[d->w_at];
+        for (unsigned l = 0; l < n; l++) scratch[l] = 1.0f;
+        return scratch;
+    }
+    if (slot >= GXP_SLOTS || d->slot_at[slot] < 0) {
+        for (unsigned l = 0; l < n; l++) scratch[l] = k == 3 ? 1.0f : 0.0f;
+        return scratch;
+    }
+    return b->var[d->slot_at[slot] + (int)k];
+}
+
+/* slot_value, for one of the pixels waiting. */
+static void lane_value(const draw *d, const struct batch *b, unsigned slot, unsigned l, float v[4], float dx[4], float dy[4]) {
+    memset(dx, 0, 4 * sizeof(float));
+    memset(dy, 0, 4 * sizeof(float));
+    if (slot == GXP_SLOT_POSITION) {
+        v[0] = (float)b->x[l] + 0.5f; v[1] = (float)b->y[l] + 0.5f; v[2] = b->depth[l];
+        v[3] = d->w_at >= 0 ? b->var[d->w_at][l] : 1.0f;
+        dx[0] = 1.0f; dy[1] = 1.0f;
+        return;
+    }
+    if (slot >= GXP_SLOTS || d->slot_at[slot] < 0) { v[0] = v[1] = v[2] = 0.0f; v[3] = 1.0f; return; }
+    int at = d->slot_at[slot];
+    for (int k = 0; k < 4; k++) v[k] = b->var[at + k][l];
+    memcpy(dx, b->ddx[l] + at, 4 * sizeof(float));
+    memcpy(dy, b->ddy[l] + at, 4 * sizeof(float));
+}
+
+/* Shade the pixels waiting: their inputs into rows of registers, the
+ * program once, then each pixel's tests if they come after it, and its
+ * colour. */
+static void flush(worker *wk) {
+    struct batch *b = wk->b;
+    unsigned n = b ? b->n : 0;
+    if (!n) return;
+    const draw *d = wk->d;
+    gxm_draw_state *s = d->s;
+    const gxp_program *p = wk->f.p;
+    usse_wide *w = &b->w;
+    float scratch[USSE_LANES], v[4], dx[4], dy[4], rgba[4];
+    uint32_t reg[4];
+
+    for (uint32_t i = 0; i < p->input_count; i++) {
+        const gxp_input *in = &p->inputs[i];
+        if (in->has_iterator && in->iterator_reg < USSE_WORDS - 4) {
+            uint32_t (*row)[USSE_LANES] = &w->pa[in->iterator_reg];
+            for (unsigned k = 0; k < in->components; k++) {
+                const float *from = slot_row(d, b, n, in->source, k, scratch);
+                if (in->type == USSE_F32) memcpy(row[k], from, n * sizeof(float));
+                else if (in->type == USSE_F16) vita_floats_to_halves(from, row[k >> 1], (int)(k & 1), n);
+                else for (unsigned l = 0; l < n; l++) pack(&row[k >> 2][l], GXP_U8, k & 3, roundf(unit_clamp(from[l]) * 255.0f));
+            }
+        }
+        if (in->has_texture && in->texture_reg < USSE_WORDS - 4) {
+            uint32_t (*row)[USSE_LANES] = &w->pa[in->texture_reg];
+            const gxm_tex *t = in->unit < GXP_TEXTURE_UNITS ? wk->f.tex[in->unit] : NULL;
+            for (unsigned l = 0; l < n; l++) {
+                if (t) lane_value(d, b, in->coord, l, v, dx, dy);
+                int got = sample_input(wk, in, t, v, dx, dy, rgba);
+                for (int k = 0; k < 4; k++) reg[k] = row[k][l];
+                store_sample(in, t, rgba, got, reg);
+                for (int k = 0; k < 4; k++) row[k][l] = reg[k];
+            }
+        }
+    }
+    if ((p->flags & GXP_FLAG_FRAGCOLOR) && s->has_colour) {
+        for (unsigned l = 0; l < n; l++) {
+            for (int k = 0; k < 4; k++) reg[k] = w->out[k][l];
+            preload(s, p, b->x[l], b->y[l], reg);
+            for (int k = 0; k < 4; k++) w->out[k][l] = reg[k];
+        }
+    }
+
+    w->sa = wk->f.sa;
+    w->env = &wk->f.env;
+    w->lanes = n;
+    usse_run_wide(p->primary, p->primary_count, w);
+
+    uint32_t (*result)[USSE_LANES] = (p->flags & GXP_FLAG_NATIVECOLOR) ? w->out : w->pa;
+    for (unsigned l = 0; l < n; l++) {
+        int x = b->x[l], y = b->y[l];
+        if (d->late) {
+            if (w->killed[l]) continue;
+            if (!tested(s, &s->face[b->back[l]], (size_t)y * s->width + (size_t)x, b->depth[l])) continue;
+            wk->pixels++;
+            if (!s->has_colour) continue;
+        }
+        for (int k = 0; k < 4; k++) reg[k] = result[k][l];
+        write_colour(wk, x, y, reg);
+    }
+    b->n = 0;
+}
+
+/* One covered pixel, as shade_pixel takes it: tested now if the program has
+ * no say in the tests, and then left to wait for the program. */
+static int collect_pixel(void *user, int x, int y, float depth, int clockwise,
+                         const float *var, const float *ddx, const float *ddy) {
+    worker *wk = user;
+    const draw *d = wk->d;
+    gxm_draw_state *s = d->s;
+    size_t at = (size_t)y * s->width + (size_t)x;
+    if (s->mask && !s->mask[at]) return 0;
+    depth = whole_depth(s, depth);
+
+    unsigned back = (s->two_sided && clockwise) ? 1 : 0;
+    const gxm_face *f = &s->face[back];
+    if (f->program_off) {
+        /* depth and stencil only: but after whatever waits to be tested, which may be at this pixel */
+        if (d->late) flush(wk);
+        if (!tested(s, f, at, depth)) return 0;
+        wk->pixels++;
+        return 1;
+    }
+    if (!d->late) {
+        if (!tested(s, f, at, depth)) return 0;
+        wk->pixels++;
+        if (!s->has_colour) return 1;
+    }
+
+    struct batch *b = wk->b;
+    unsigned n = b->n;
+    b->x[n] = x; b->y[n] = y; b->depth[n] = depth; b->back[n] = (uint8_t)back;
+    for (int i = 0; i < d->varyings; i++) b->var[i][n] = var[i];
+    memcpy(b->ddx[n], ddx, (size_t)d->varyings * sizeof(float));
+    memcpy(b->ddy[n], ddy, (size_t)d->varyings * sizeof(float));
+    if (++b->n == USSE_LANES) flush(wk);
     return 1;
 }
 
@@ -683,11 +979,18 @@ static void fill_band(void *ctx, unsigned band, unsigned index) {
     int row0 = job->first_row + (int)band * job->rows, row1 = row0 + job->rows;
     size_t per = raster_plane_floats(job->r);
     if (row1 > job->last_row + 1) row1 = job->last_row + 1;
+    raster_shade shade = shade_pixel;
+    if (job->d->wide) {
+        if (!wk->b) wk->b = calloc(1, sizeof(*wk->b));
+        if (wk->b) shade = collect_pixel;
+    }
     for (uint32_t i = 0; i < g_piece_count; i++) {
         const raster_piece *t = &g_pieces[i];
         if (t->y1 < row0 || t->y0 >= row1) continue;
-        raster_walk(job->r, t, g_planes + (size_t)i * per, row0, row1, shade_pixel, wk);
+        raster_walk(job->r, t, g_planes + (size_t)i * per, row0, row1, shade, wk);
+        if (job->d->each) flush(wk);
     }
+    flush(wk);                              /* nothing waits beyond its band */
 }
 
 uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, uint32_t indices,
@@ -711,6 +1014,14 @@ uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, ui
     if (fp) stage_begin(&d.f, &fp->gxp, s->fragment_buffers, s->fragment_textures, g_textures[1], g_workers[0].cache);
     else memset(&d.f, 0, sizeof(d.f));
     vertex_inputs(&d);
+
+    /* VITARECOMP_GXM_SCALAR=1 shades every pixel by itself, as the definition
+     * of what the rows must come out as. */
+    static int scalar = -1;
+    if (scalar < 0) { const char *e = getenv("VITARECOMP_GXM_SCALAR"); scalar = e && *e && *e != '0'; }
+    d.wide = fp && fp->wide && !scalar;
+    d.late = fp && (fp->gxp.flags & (GXP_FLAG_DISCARD | GXP_FLAG_DEPTH)) != 0;
+    d.each = fp && (fp->gxp.flags & GXP_FLAG_FRAGCOLOR) && s->has_colour;
 
     /* What the fragment program reads of the vertex program's outputs is
      * what gets interpolated; nothing else is carried. */

@@ -757,6 +757,7 @@ static uint32_t program_create(int kind, const gxm_program *want, uint32_t out) 
     memset(&p->gxp, 0, sizeof(p->gxp));
     p->name = 0;
     p->ok = 0;
+    p->wide = 0;
     if (kind != PROGRAM_MASK && vita_mem_ptr(p->header, 0x98) && vita_read32(p->header) == 0x00505847u) {
         uint32_t size = vita_read32(p->header + 8);
         const uint8_t *bytes = size >= 0x98 && size < 0x1000000 ? vita_mem_ptr(p->header, size) : NULL;
@@ -766,6 +767,7 @@ static uint32_t program_create(int kind, const gxm_program *want, uint32_t out) 
         for (uint32_t i = 0; !err && i < p->gxp.secondary_count; i++) cannot += !usse_can_run(&p->gxp.secondary[i]);
         for (uint32_t i = 0; !err && i < p->gxp.primary_count; i++) cannot += !usse_can_run(&p->gxp.primary[i]);
         p->ok = !err && !cannot;
+        p->wide = p->ok && usse_wide_can_run(p->gxp.primary, p->gxp.primary_count);
         if (!p->ok)
             vita_hle_trace("gxm: the program at 0x%08X cannot be run (read %d, %u instructions without an implementation)",
                            p->header, err, cannot);
@@ -1158,6 +1160,7 @@ static uint32_t g_frames;
 
 static void frame_end(void) {
     g_frames++;
+    gxm_draw_frame();
     g_frame.c = gxm_counters;
     memset(&gxm_counters, 0, sizeof(gxm_counters));
     if (g_frames % 100 == 0 ||

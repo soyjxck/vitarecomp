@@ -65,6 +65,41 @@ The voice definitions' module chains and the parameter structures' sizes
 are the console's interface, taken from Vita3K's documentation of it
 (`vita3k/ngs`).
 
+## Movies: a library that is not there
+
+A title that plays movies carries Sony's player in its own code and
+imports the layer beneath it: SceMp4 to take a file apart into video and
+audio units, `sceAvcdec` and `sceAudiodec` to decode them. The runtime has
+none of the three yet. How it says so matters more than it looks.
+
+The player loads SceMp4 as a system module and then opens the file. If the
+open fails, the player writes a line to its log and tells its caller
+nothing: no callback, no state change, and a title waits for ever on a
+movie that never began. If the module cannot be loaded, the player's own
+start fails in the call that asked, the title's script hears that the
+movie has finished, and what follows the movie follows. So
+`sceSysmoduleIsLoaded` and `sceSysmoduleLoadModule` no longer say yes to
+everything: for the one module the runtime does not have (`0x2D`) they
+answer "not loaded" and "cannot be loaded" (`src/hle_kernel.c`), and the
+functions in `src/hle_movie.c` are what a title reaches only if it did not
+ask.
+
+The rule is general. Where a library is absent, the place to say so is
+the place the title checks before it relies on it, and that is found by
+reading the title's code, not by guessing an error code for the first
+call that happens to trap.
+
+## Pad and panels
+
+`src/hle_ctrl.c` and `src/hle_touch.c` are snapshots of what the host says
+is held: a mask of buttons, and whether a finger is on the front panel and
+where, in the panel's units of half a display pixel. A contact keeps its
+number while it lasts and the next has the next one. A panel reports
+nothing until the program has started its sampling, and nothing ever
+touches the back. The host's side of it is two functions
+(ARCHITECTURE.md, "The contract"), scripted on the command line or read
+from a window.
+
 ## SceGxm: what it took
 
 The section after this one is upstream's estimate, kept because it was
@@ -92,7 +127,10 @@ in a few places. What it took, now that it draws:
 - **The shader path is an interpreter**, not a compiler: `src/usse.c`
   runs a program's bytecode as it is, once per vertex and once per
   pixel. It is slow and it is the definition (PLAN.md, milestones D and
-  E).
+  E). The same file runs a fragment program for sixty-four pixels at
+  once where the program allows it, each register a row of words; a
+  test holds that form to the first, bit for bit, on instructions made
+  at random.
 
 `armrecomp gxp <file.gxp>` prints what the renderer makes of a program:
 its parameters, where each input arrives, and its code.

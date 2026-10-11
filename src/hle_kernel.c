@@ -38,13 +38,28 @@ void vita_hle_sceKernelPowerTick(void) { r0 = 0; }
 
 /* --- modules and power -------------------------------------------------------------
  *
- * sceSysmoduleLoadModule brings a firmware library into the process; here every
- * library the HLE answers for is already present, so loading succeeds and
- * "is it loaded" says yes (SCE_SYSMODULE_LOADED is 0). Power configuration is
- * a clock-speed request the host has no equivalent of. */
-void vita_hle_sceSysmoduleLoadModule(void)   { vita_hle_trace("sceSysmoduleLoadModule(0x%X)", r0); r0 = 0; }
+ * sceSysmoduleLoadModule brings a firmware library into the process; here
+ * every library the HLE answers for is already present, so loading succeeds
+ * and "is it loaded" says yes (SCE_SYSMODULE_LOADED is 0). Except for a
+ * library this runtime does not have at all: that one is not loaded and
+ * cannot be, which is the truth and is an answer titles are written to take.
+ * The movie container library is such a one (hle_movie.c): told that it
+ * cannot be loaded, a title's movie player fails to start, and the title
+ * goes on to what comes after the movie. Power configuration is a
+ * clock-speed request the host has no equivalent of. */
+#define SCE_SYSMODULE_MP4              0x2Du
+#define SCE_SYSMODULE_ERROR_UNLOADED   0x805A1001u
+#define SCE_SYSMODULE_ERROR_FATAL      0x805A10FFu
+
+static int module_absent(uint32_t id) { return id == SCE_SYSMODULE_MP4; }
+
+void vita_hle_sceSysmoduleLoadModule(void) {
+    uint32_t id = r0;
+    r0 = module_absent(id) ? SCE_SYSMODULE_ERROR_FATAL : 0;
+    vita_hle_trace("sceSysmoduleLoadModule(0x%X) -> 0x%X", id, r0);
+}
 void vita_hle_sceSysmoduleUnloadModule(void) { r0 = 0; }
-void vita_hle_sceSysmoduleIsLoaded(void)     { r0 = 0; }
+void vita_hle_sceSysmoduleIsLoaded(void)     { r0 = module_absent(r0) ? SCE_SYSMODULE_ERROR_UNLOADED : 0; }
 void vita_hle_scePowerSetConfigurationMode(void) { r0 = 0; }
 void vita_hle_scePowerSetArmClockFrequency(void) { r0 = 0; }
 void vita_hle_scePowerSetGpuClockFrequency(void) { r0 = 0; }

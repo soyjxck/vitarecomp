@@ -19,9 +19,16 @@
 #include <stdlib.h>
 
 /* The host contract (host.h), as the tests stand in for a host: the HLE
- * reaches these from exit paths and vblank waits. */
+ * reaches these from exit paths and vblank waits. The finger is the touch
+ * test's to put down and lift. */
+static int g_finger, g_finger_x, g_finger_y;
 void vita_host_vblank(void) { }
 uint32_t vita_host_buttons(void) { return 0; }
+int vita_host_touch(int *x, int *y) {
+    if (!g_finger) return 0;
+    *x = g_finger_x; *y = g_finger_y;
+    return 1;
+}
 void vita_host_exit(int status) { exit(status); }
 
 /* The generated code's variable-import table, with one entry the test binds:
@@ -895,6 +902,62 @@ static void test_neon_shifts(void) {
     printf("  neon shifts, widen, narrow      ok\n");
 }
 
+void vita_hle_sceTouchPeek(void);
+void vita_hle_sceTouchSetSamplingState(void);
+void vita_hle_sceTouchGetPanelInfo(void);
+
+/* The front panel reports what the host says is on it, once it has been
+ * told to sample; a contact keeps its number while it lasts. */
+static void test_touch(void) {
+    assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
+    vita_mem_bad_access = 0;
+    uint32_t data = 0x81001000u;
+
+    /* not sampling: no finger is reported, though there is one */
+    g_finger = 1; g_finger_x = 961; g_finger_y = 681;
+    r0 = 0; r1 = data; r2 = 1; vita_hle_sceTouchPeek();
+    assert(r0 == 1 && vita_read32(data + 12) == 0);
+
+    r0 = 0; r1 = 1; vita_hle_sceTouchSetSamplingState();
+    assert(r0 == 0);
+    r0 = 0; r1 = data; r2 = 2; vita_hle_sceTouchPeek();
+    assert(r0 == 2);
+    for (uint32_t rec = data; rec < data + 0x120; rec += 0x90) {
+        assert(vita_read32(rec + 12) == 1);
+        assert(vita_read16(rec + 18) == 961 && vita_read16(rec + 20) == 681);
+        assert(vita_read8(rec + 17) != 0);
+    }
+    uint8_t first = vita_read8(data + 16);
+
+    /* held and moved it is the same contact; lifted and put down, another */
+    g_finger_x = 1000;
+    r0 = 0; r1 = data; r2 = 1; vita_hle_sceTouchPeek();
+    assert(vita_read32(data + 12) == 1 && vita_read8(data + 16) == first && vita_read16(data + 18) == 1000);
+    g_finger = 0;
+    r0 = 0; r1 = data; r2 = 1; vita_hle_sceTouchPeek();
+    assert(r0 == 1 && vita_read32(data + 12) == 0);
+    g_finger = 1;
+    r0 = 0; r1 = data; r2 = 1; vita_hle_sceTouchPeek();
+    assert(vita_read32(data + 12) == 1 && vita_read8(data + 16) != first);
+
+    /* nothing touches the back, and there is no third panel */
+    r0 = 1; r1 = 1; vita_hle_sceTouchSetSamplingState();
+    assert(r0 == 0);
+    r0 = 1; r1 = data; r2 = 1; vita_hle_sceTouchPeek();
+    assert(r0 == 1 && vita_read32(data + 12) == 0);
+    r0 = 2; r1 = data; r2 = 1; vita_hle_sceTouchPeek();
+    assert((int32_t)r0 < 0);
+
+    /* the panel is twice the display each way */
+    r0 = 0; r1 = data; vita_hle_sceTouchGetPanelInfo();
+    assert(r0 == 0 && vita_read16(data + 4) == 1919 && vita_read16(data + 6) == 1087);
+
+    g_finger = 0;
+    assert(vita_mem_bad_access == 0);
+    vita_mem_free();
+    printf("  touch panel                    ok\n");
+}
+
 static void test_memory(void) {
     assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
     vita_mem_bad_access = 0;
@@ -947,6 +1010,7 @@ int main(void) {
     test_scanf();
     test_time_slice();
     test_ngs();
+    test_touch();
     printf("all runtime tests passed\n");
     return 0;
 }

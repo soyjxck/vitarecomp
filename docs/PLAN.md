@@ -159,14 +159,20 @@ its shape changes; the counts are the front end's sequence:
 |---|---|
 | Loading screen, while the front end loads | 7 scenes, 19 draws, 1,200 triangles, 2 million pixels shaded |
 | The health warning | 8 scenes, 282 draws (255 of them precomputed), 45,000 triangles, 5 million pixels |
-| The first logo movie's screen | 1 scene, 2 draws |
+| The title screen | 1 scene, 7 draws, 380 triangles, 780,000 pixels |
+| The main menu, after a touch | 1 scene, 9 draws, 80 triangles, 900,000 pixels |
 
-It stays on the last one. The title asks for `game/movies/bend_logo3.mp4`
-through SceMp4, which opens nothing yet (`src/hle_movie.c`), and the
-title's player does not report that failure onwards, so the front end
-waits for a movie that never ends. What comes next is therefore the
-movie path: SceMp4's demultiplexer, and the H.264 and AAC decoders
-behind `sceAvcdec` and `sceAudiodec`, at first decoding to nothing.
+Between the last two the title means to play a logo movie,
+`game/movies/bend_logo3.mp4` out of its archive. Its player is its own
+code; what it imports is SceMp4, to take the file apart, and the decoders.
+None of that is here, and the runtime says so in the one place the player
+asks first, the loading of the system module (docs/HLE.md, "Movies"); the
+player fails to start, the front end's script is told the movie is over,
+and the title screen follows. A touch on it (`--touch 480,335@1500-1512`,
+or the mouse on the window) brings the main menu. So what comes next is
+twofold: the way in from the menu, which is a new game and its first
+level; and the movie itself, which wants SceMp4's demultiplexer and the
+H.264 and AAC decoders behind `sceAvcdec` and `sceAudiodec`.
 
 1. Accept FAGDec-decrypted `eboot.bin` and `*.suprx` (plain SCE ELF, the
    Vita3K input format) in `armrecomp info/extract`, in addition to fself.
@@ -232,6 +238,7 @@ interpretation, so that the first picture is already the title's own:
 | Pixels | `src/pixfmt.c` | every texel and surface format, between bytes and colours |
 | A draw | `src/gxm_draw.c` | vertex fetch to stored pixel: the tests, the fragment program, the blend |
 | Threads | `src/pool.c` | a draw's vertices in runs and its pixels in bands of rows, on the host's other cores |
+| Rows | `src/usse.c`, `src/half_rows.c` | the same bytecode run for sixty-four pixels at a time, each instruction taken apart once for all of them |
 
 How it was kept honest: the decoder's listing is compared line for line
 with the disassembly Vita3K logs for the same programs; each piece has a
@@ -242,11 +249,13 @@ frame's draws, the textures they sampled and the programs they ran.
 Not there yet, in the order the title will want them:
 
 1. Speed. One pixel at a time through an interpreter was a second a
-   frame of the loading screen on one thread, and is about 80 ms on
-   sixteen, bands of rows to a thread, with the same frames to the byte.
-   The title screen's scene, 45,000 triangles and five million pixels,
-   is still close to a second. What is left is to stop interpreting the
-   bytecode per vertex and per pixel (milestone E).
+   frame of the loading screen on one thread. Three things since, each
+   leaving the same frames to the byte: bands of rows to a thread (80 ms
+   on sixteen); compressed textures decoded once and kept, not a block
+   at a time as they are sampled; and the fragment program run for
+   sixty-four pixels at a time (30 ms). The scene behind the health
+   warning, 45,000 triangles and five million pixels, went from a second
+   to about 350 ms. What is left is in milestone E.
 2. Lines and points, depth bias, the mask-update program, multisampled
    targets, the YUV textures a movie arrives in, the transfer calls.
    Each is counted or named where it is skipped, none is silent.
@@ -254,13 +263,16 @@ Not there yet, in the order the title will want them:
 ## Milestone E: the renderer at speed
 
 The interpreter is the definition; what runs every frame should be
-generated from it. Two routes, not exclusive: translate each program's
-bytecode to C once, the way the title's own code is translated, and
-shade tiles on several threads; or translate it to a host GPU's shading
-language and draw there (DECISIONS.md, 3). The first keeps the pipeline
-exactly as it is and needs no graphics API; the second is where real
-time at full resolution is. Either is checked against the interpreter,
-frame for frame.
+generated from it. A first step is taken: a program whose instructions
+allow it is run for a row of pixels at once, which takes the decoding out
+of the cost of a pixel and leaves the arithmetic, the texture samples and
+the store. Beyond that, two routes, not exclusive: translate each
+program's bytecode to C once, the way the title's own code is translated;
+or translate it to a host GPU's shading language and draw there
+(DECISIONS.md, 3). The first keeps the pipeline exactly as it is and needs
+no graphics API; the second is where real time at full resolution is.
+Either is checked against the interpreter, frame for frame, as the rows
+were (`VITARECOMP_GXM_SCALAR=1` is the interpreter one pixel at a time).
 
 ## Milestone F: first title repo
 
@@ -281,6 +293,13 @@ stays game-agnostic.
   581 (VitaShell) and 557 (*Golden Abyss*) branches to addresses
   discovery never registered, each a function reached only by a jump from
   the middle of another.
+- VitaShell's output has grown again: measured 2026-10-11 it is 9,780
+  functions and 13.6 M emitted instructions for 802,000 reached, where
+  *Golden Abyss* emits 2.37 M and stays in proportion. Code that several
+  functions run into is written into each; on a module with 23,000
+  tail-call targets that is most of the output. To find: which of the
+  discovery changes since made it worse, and whether shared tails can be
+  emitted once and called.
 
 - CI on Windows and Linux: build, `ctest`, and the smoke run on the VitaShell
   fixture.

@@ -22,22 +22,26 @@ wait for each other by spinning. The newlib sample needed a kernel, file and C-r
 HLE surface, the NEON a retail title's own code asked for, jump tables, and fixes for nine emitter
 bugs that only running could find (docs/LESSONS.md).
 
-**A retail title draws (2026-10-11).** *Uncharted: Golden Abyss*, recompiled
-from its decrypted module, starts in the host, loads its front end and
-renders it: the loading screen's turning medallion, lit through the title's
-own deferred pipeline (a geometry buffer, light passes, bloom, tone
-mapping, a scale to the panel), the health warning with its text, and behind
-the warning the temple, the waterfall and the shafts of light of its title
-screen. Every
-pixel comes out of the title's own shader programs, run by an interpreter of
-the GPU's bytecode that is written here; nothing of the title's is replaced.
-It is a reference renderer, right before fast: with the pixels and the
-vertices shared out over the host's cores, a frame of the loading screen
-takes about 80 ms on sixteen threads and one of the title screen's scene
-close to a second. The title then asks for its first logo movie and waits
-there, because the movie library opens nothing yet, and the synthesiser
-still plays in silence. `vita_host --window` shows it; docs/PLAN.md says
-what is missing.
+**A retail title reaches its main menu (2026-10-11).** *Uncharted: Golden
+Abyss*, recompiled from its decrypted module, starts in the host, loads its
+front end and renders it: the loading screen's turning medallion, lit
+through the title's own deferred pipeline (a geometry buffer, light passes,
+bloom, tone mapping, a scale to the panel), the health warning over the
+temple, the waterfall and the shafts of light, the title screen with its
+logo, legal lines and "Touch to Start", and, touched, the main menu: New
+Game, Load Game, Options. Every pixel comes out of the
+title's own shader programs, run by an interpreter of the GPU's bytecode
+that is written here; nothing of the title's is replaced. It is a reference
+renderer, right before fast: with a draw's rows shared out over the host's
+cores and each fragment program run for sixty-four pixels at a time, a frame
+of the loading screen takes about 30 ms on sixteen threads, the title screen
+and the menu about 20, and the scene behind the health warning, 45,000
+triangles and five million pixels, about 350. The logo movie that comes before the
+title screen is not played: the runtime has no movie library, says so when
+the title asks for it, and the title carries on as it does when a movie
+ends. The synthesiser still plays in silence. `vita_host --window` shows it
+all, with the left mouse button for a finger on the screen; docs/PLAN.md
+says what is missing.
 
 **Status, measured on this machine (2026-10-11):**
 
@@ -46,12 +50,12 @@ what is missing.
 | `tools/e2e.sh`: `samples/fbdemo` SELF to pixels | extract, emit (one function, 163 instructions, all translated), build `vita_host`, run 200 frames: 0 traps, 0 bad accesses, frame hash matches |
 | `tools/e2e.sh`: `samples/hello`, a newlib-linked program | 52 KB SELF, 54 imports across 11 libraries, all implemented on its path; 132 of 764 discovered functions emitted (the rest nothing can reach), 99.96 % translated; runs 60 frames with 0 traps and 0 bad accesses: `sceClibPrintf` reaches the console, `snprintf`/`malloc` output is drawn on screen with its own font, frame hash matches |
 | `tools/e2e.sh`: `samples/threads`, threads that never call the kernel to wait | two workers and the main thread wait for each other by spinning on memory, and share a test-and-set spinlock for 4,000 increments; the frame shows every check green and the counter exact, however the threads were interleaved |
-| `armrecomp emit` on VitaShell, whole module | 21,555 functions discovered (251 jump tables, 23,243 tail-call targets, 1,033 MOVW/MOVT pointers), 8,137 emitted: what an entry point, an export or a stored pointer can reach; 4.47 M instructions, 99.89 % translated, 395 MB of C; what still traps is NEON forms not yet claimed (0.09 %) and 581 branches to addresses discovery never registered |
-| *Uncharted: Golden Abyss* (retail, PCSA00029), decrypted by Vita3K from a NoNpDrm dump with its own licence | `ET_SCE_EXEC`, 9.43 MB of code, 3.33 M Thumb instructions, 5.34 % SIMD; 78,327 functions discovered (19,705 of them from MOVW/MOVT pairs), 508 jump tables, 83.1 % covered; 618 imports across 42 libraries, 585 named (SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34); 23,480 functions emitted, 2.37 M instructions at 99.98 % translated, 290 MB of C in 12 parts; 385 trapped instructions, 7 of them computed transfers; 66,689 backward branches carry the time slice |
-| *Golden Abyss* running in `vita_host` with Vita3K's decrypted data mounted as `app0:` | `module_start` allocates its memory, initialises FIOS2 and SceUlt, reads the 3 GB archive's index, starts its worker threads on the runtime's scheduler, finds its resources by their CRC, parses its input tables, builds its sound engine's eight racks on the silent synthesiser, loads its front end (`LOAD LEVEL( /frontend.bsp )`, `LEVEL START` in its own log) and draws it: 7 scenes and 2 million shaded pixels a frame for the loading screen, 8 scenes, 282 draws and 45,000 triangles for the health warning; 700 vertical blanks with no trap, no dispatch miss, no bad access, no shader instruction the interpreter lacks and no texture unit left unread; with `--virtual-clock` the same frames, byte for byte, on every run |
+| `armrecomp emit` on VitaShell, whole module | 23,326 functions discovered (253 jump tables, 23,337 tail-call targets, 1,098 MOVW/MOVT pointers), 802,000 instructions reached; 9,780 functions emitted: what an entry point, an export or a stored pointer can reach; 13.6 M instructions of C, 99.93 % translated, 1.2 GB: seventeen times what is reached, code that several functions run into being written into each of them, which has grown since it was last measured (docs/PLAN.md, housekeeping); what still traps is NEON forms not yet claimed (0.06 %) and 953 branches to addresses discovery never registered |
+| *Uncharted: Golden Abyss* (retail, PCSA00029), decrypted by Vita3K from a NoNpDrm dump with its own licence | `ET_SCE_EXEC`, 9.43 MB of code, 3.33 M Thumb instructions, 5.34 % SIMD; 78,328 functions discovered (19,705 of them from MOVW/MOVT pairs), 512 jump tables, 83.1 % covered; 618 imports across 42 libraries, 585 named (SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34); 23,480 functions emitted, 2.37 M instructions at 99.98 % translated, 290 MB of C in 12 parts; 381 trapped instructions, 3 of them computed transfers; 66,699 backward branches carry the time slice |
+| *Golden Abyss* running in `vita_host` with Vita3K's decrypted data mounted as `app0:` | `module_start` allocates its memory, initialises FIOS2 and SceUlt, reads the 3 GB archive's index, starts its worker threads on the runtime's scheduler, finds its resources by their CRC, parses its input tables, builds its sound engine's eight racks on the silent synthesiser, loads its front end (`LOAD LEVEL( /frontend.bsp )`, `LEVEL START` in its own log) and draws it: 7 scenes and 2 million shaded pixels a frame for the loading screen, 8 scenes, 282 draws and 45,000 triangles for the health warning; 700 vertical blanks with no trap, no dispatch miss, no bad access, no shader instruction the interpreter lacks and no texture unit left unread; left to run, the title screen after them (1 scene, 7 draws) and, with a scripted touch on it, the main menu (1 scene, 9 draws): 2,600 vertical blanks in all; with `--virtual-clock` the same frames, byte for byte, on every run, and the same again with every pixel shaded by itself (`VITARECOMP_GXM_SCALAR=1`) |
 | `armrecomp gxp` on the 193 shader programs the title registers while it boots | every one of 4,014 instructions decoded and executable; on the 52 programs Vita3K logged, the listing is identical to its disassembly, 1,208 lines, apart from the two branches it does not print |
 | Build (MSVC 14.50, CMake 4.3, Ninja) | `armrecomp.exe` + `vitarecomp.lib` build clean |
-| `ctest` | 10 / 10 suites pass (container, inflate, decode, reloc, runtime, raster, texdec, usse, pixfmt, gxm_tex); the PVRTC decoder gives, on words from a fixed generator, the images Imagination's codec gives for them |
+| `ctest` | 12 / 12 suites pass (container, inflate, decode, reloc, runtime, raster, texdec, usse, usse_wide, pixfmt, gxm_tex, pool); the interpreter that runs a program for sixty-four pixels at once leaves every register of every one as the one-at-a-time interpreter does, on 60,000 random instructions and 4,000 random programs; the PVRTC decoder gives, on words from a fixed generator, the images Imagination's codec gives for them |
 | `armrecomp info / extract / cover` on VitaShell 2.02 `eboot.bin` (homebrew, no keys) | 3 segments inflated, Adler-32 ok, ELF 4,882,182 bytes as declared; Thumb-2 dominant, 0.22 % unknown, 2.01 % SIMD |
 | `armrecomp relocs` on the same module (`ET_SCE_RELEXEC`) | 63,334 entries decoded, all format 0; 6,735 relocated words hold Thumb-tagged `.text` addresses; applying the stream at the link addresses changes 0 bytes |
 | `armrecomp discover` with relocation seeding | 9,195 functions (4,523 from seeds, 2,975 only the relocations named, 1,697 from shape), 71.5 % of the segment covered; was 8,074 and 65.3 % before the stream was read |
@@ -118,6 +122,7 @@ tools/e2e.sh            # samples/fbdemo: SELF -> C -> vita_host -> a hash-check
 
 ```
 vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--press BUTTON@FROM[-TO]]...
+                       [--touch X,Y@FROM[-TO]]... [--window]
 ```
 
 The host is built against one module's emitted C: configure with
@@ -126,9 +131,11 @@ It loads the ELF's segments at their link addresses, carves an arena for
 memory blocks and a heap above them, registers the dispatch table, and calls
 `module_start`. Every firmware import the runtime implements is linked by
 name; every one it does not traps by name on first use
-(`VITARECOMP_TRACE=1` to log and continue). It is headless: input is scripted
-and frames are written as PPM. A windowed host is the same three functions in
-`include/vitarecomp/host.h` pointed at a window.
+(`VITARECOMP_TRACE=1` to log and continue). It is headless by default: input
+is scripted, buttons and touches alike, and frames are written as PPM. With
+`--window` the four functions of `include/vitarecomp/host.h` have a window
+behind them: the frames as they are shown, the keyboard as the buttons, the
+left mouse button as a finger on the screen.
 
 The core has no external dependencies: a fresh clone builds with CMake and a C
 compiler only. zlib inflate is written in-tree.

@@ -12,10 +12,35 @@ static uint32_t at_least_1(uint32_t v) { return v ? v : 1; }
 
 void gxm_tex_cache_reset(gxm_tex_cache *c) { memset(c->key, 0xFF, sizeof(c->key)); }
 
+/* A byte as a fraction, and as light when it was kept on the display's
+ * curve: the two conversions nearly every texel goes through, looked up. */
+static float g_unorm8[256], g_srgb8[256];
+
+static void tables(void) {
+    static int made;
+    if (made) return;
+    for (int i = 0; i < 256; i++) {
+        g_unorm8[i] = (float)i / 255.0f;
+        g_srgb8[i] = pix_srgb_to_linear(g_unorm8[i]);
+    }
+    made = 1;
+}
+
+/* A texel whose fields are whole bytes, through the tables. */
+static void bytes_texel(const gxm_tex *t, uint32_t px, float rgba[4]) {
+    for (int c = 0; c < 4; c++) {
+        int from = t->pf.from[c];
+        /* light, for the colour channels of a texture kept on the curve: all three, or the two a two-channel format has */
+        const float *table = t->gamma && (c < 2 || (c == 2 && t->gamma != 3)) ? g_srgb8 : g_unorm8;
+        rgba[c] = from == PIX_ZERO ? 0.0f : from == PIX_ONE ? 1.0f : table[(px >> (8 * from)) & 255];
+    }
+}
+
 /* --- the control words ------------------------------------------------------------ */
 
 int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
     memset(t, 0, sizeof(*t));
+    tables();
 
     t->type = w[1] >> 29;
     t->format = (w[1] & 0x1F000000u) | (w[0] & 0x80000000u) | (((w[3] >> 28) & 7) << 12);
@@ -74,6 +99,9 @@ int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
         break;
     }
     if (t->kind >= GXM_TEX_BC1 && t->kind <= GXM_TEX_BC5) t->unit_w = t->unit_h = 4;
+    t->bytes8 = t->pf.bytes <= 4;
+    for (int i = 0; i < t->pf.fields; i++)
+        if (t->pf.f[i].kind != PIX_UNORM || t->pf.f[i].bits != 8 || t->pf.f[i].shift != 8 * i) t->bytes8 = 0;
     if (t->kind == GXM_TEX_PVRTC) { t->unit_w = t->pvrtc_bits == 2 ? 8 : 4; t->unit_h = 4; }
 
     /* no more levels than the shorter side can be halved */
@@ -145,6 +173,11 @@ void gxm_tex_texel(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsign
     if (!t->base || level >= t->levels || x < 0 || y < 0 ||
         (uint32_t)x >= t->level_w[level] || (uint32_t)y >= t->level_h[level]) return;
     if (t->kind == GXM_TEX_UNKNOWN) { rgba[0] = rgba[2] = rgba[3] = 1.0f; return; }    /* a format not read yet: shown, not hidden */
+    if (t->plain[level]) {
+        size_t w = t->level_w[level], h = t->level_h[level];
+        bytes_texel(t, t->plain[level][((size_t)face * h + (size_t)y) * w + (size_t)x], rgba);
+        return;
+    }
 
     uint32_t ux = (uint32_t)x / t->unit_w, uy = (uint32_t)y / t->unit_h, index;
     uint64_t at = (uint64_t)face * t->face_bytes + t->level_at[level];
@@ -160,8 +193,7 @@ void gxm_tex_texel(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsign
             if (cache) cache->key[slot] = (uint32_t)word;
         }
         texel = block[((uint32_t)y & 3) * t->unit_w + ((uint32_t)x & (t->unit_w - 1u))];
-        pixfmt_decode(&t->pf, (const uint8_t *)&texel, rgba);
-        if (t->gamma) for (int i = 0; i < 3; i++) rgba[i] = pix_srgb_to_linear(rgba[i]);
+        bytes_texel(t, texel, rgba);
         return;
     }
     switch (t->type) {
@@ -202,8 +234,14 @@ void gxm_tex_texel(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsign
             decode_block(t, t->base + at, block);
             if (cache) cache->key[slot] = (uint32_t)at;
         }
-        texel = block[(y & 3) * 4 + (x & 3)];
-        bytes = (const uint8_t *)&texel;
+        bytes_texel(t, block[(y & 3) * 4 + (x & 3)], rgba);
+        return;
+    }
+    if (t->bytes8) {
+        texel = 0;
+        memcpy(&texel, bytes, t->pf.bytes);
+        bytes_texel(t, texel, rgba);
+        return;
     }
     pixfmt_decode(&t->pf, bytes, rgba);
 
@@ -213,6 +251,39 @@ void gxm_tex_texel(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsign
         rgba[1] = pix_srgb_to_linear(rgba[1]);
         if (t->gamma != 3) rgba[2] = pix_srgb_to_linear(rgba[2]);
     }
+}
+
+int gxm_tex_is_packed(const gxm_tex *t) {
+    return (t->kind >= GXM_TEX_BC1 && t->kind <= GXM_TEX_BC5) || t->kind == GXM_TEX_PVRTC;
+}
+
+void gxm_tex_unpack(const gxm_tex *t, unsigned face, unsigned level, uint32_t row0, uint32_t row1, uint32_t *out) {
+    uint32_t w = t->level_w[level], h = t->level_h[level], nx = t->store_w[level], ny = t->store_h[level];
+    uint64_t at = (uint64_t)face * t->face_bytes + t->level_at[level];
+    uint32_t block[32];
+    if (!gxm_tex_is_packed(t) || !t->base || level >= t->levels) return;
+    if (row1 > ny) row1 = ny;
+    int whole = at + (uint64_t)nx * ny * t->unit_bytes <= t->avail;        /* PVRTC reads around each block */
+    for (uint32_t by = row0; by < row1; by++)
+        for (uint32_t bx = 0; bx < nx; bx++) {
+            uint32_t index = t->type == GXM_TEX_LINEAR ? by * nx + bx
+                           : t->type == GXM_TEX_TILED ? ((by >> 5) * (nx / 32) + (bx >> 5)) * 1024 + (by & 31) * 32 + (bx & 31)
+                           : tex_morton_index(bx, by, nx, ny);
+            uint64_t unit = at + (uint64_t)index * t->unit_bytes;
+            if (t->kind == GXM_TEX_PVRTC) {
+                if (whole) tex_decode_pvrtc(t->base + at, nx, ny, bx, by, t->pvrtc_version, t->pvrtc_bits, block);
+                else memset(block, 0, sizeof(block));
+            } else if (unit + t->unit_bytes <= t->avail) {
+                decode_block(t, t->base + unit, block);
+            } else {
+                memset(block, 0, sizeof(block));
+            }
+            for (uint32_t j = 0; j < t->unit_h; j++)
+                for (uint32_t i = 0; i < t->unit_w; i++) {
+                    uint32_t x = bx * t->unit_w + i, y = by * t->unit_h + j;
+                    if (x < w && y < h) out[(size_t)y * w + x] = block[j * t->unit_w + i];
+                }
+        }
 }
 
 /* --- samples ---------------------------------------------------------------------- */

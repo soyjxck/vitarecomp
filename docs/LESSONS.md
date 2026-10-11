@@ -783,3 +783,61 @@ day.
 What found the fifth and sixth was not the picture, which was only
 scrambled, but the per-draw pixel counts beside it: 3,787 pixels in the
 pass that wrote the depth, 1,984 in the pass that tested against it.
+
+## Between the first pictures and the title screen (2026-10-11)
+
+1. **A failure the title cannot hear is a hang.** The title's first logo
+   movie stopped it. The open was made to fail, with no handle, and the
+   title waited all the same. The reason was in the title's own player,
+   read as disassembly: an open that fails is logged and reported to
+   nobody. The player does tell its caller when it cannot load the movie
+   library as a system module, and the runtime had been answering
+   "loaded" for every module there is. Saying "not loaded" for the one it
+   does not have took the title straight to its title screen. An absent
+   library is to be reported where the title asks whether it is there.
+
+2. **The time was not where it was assumed to be.** A scene of 45,000
+   triangles took a second, and the vertices were shared out among
+   threads first, because 45,000 triangles sounds like vertex work. A
+   cycle count by stage, on one thread, said otherwise: nearly all of it
+   was pixels, in texture samples and fragment programs. Wall-clock times
+   on a machine doing other work had said nothing either way; a cycle
+   counter on one thread is what could be read.
+
+3. **A sample of a compressed texture was a block's decoding.** With
+   eight texels to a filtered pixel and a small cache of blocks, a PVRTC
+   texture was being decoded over and over, nine words to a block. Now a
+   compressed texture is decoded whole when a draw first binds it and
+   kept; once a frame a hash of some of its bytes says whether the title
+   has changed it. What was left of a frame after that: fragment programs
+   54 %, their inputs 32 % (texture samples 22 %), the store 7 %,
+   vertices 3 %.
+
+4. **A second interpreter is only as good as its agreement with the
+   first.** Running a program for a row of pixels at once is a second
+   implementation of every instruction. Before it shaded a pixel it was
+   run against the first on instruction words made at random, every
+   register of every lane compared. Two differences came out that no
+   picture had shown: a texture sample's level operand, which is read in
+   the coordinate's type and not its own; and a signalling NaN in a
+   half-float, which the processor's conversion makes quiet and the C
+   conversion had passed through as it was. The first is now refused
+   by the row form, the second fixed in the C, which the CPU side shares.
+   Then the frames: twenty of a run, the same to the byte with the rows
+   and without.
+
+5. **A path nobody had run had a trap on it.** Skipping the movie sent
+   the title down its failure path, which formats a message with its own
+   printf, and that function's switch on the conversion character was one
+   of seven jump tables left as computed transfers. Its compiler had
+   split the range check across a tree of compares: `cmp r0, #103; bgt
+   elsewhere; cmp r0, #62; bgt table`, and at the table only the lower
+   end, `cmp r0, #97; ble out; subs r0, #98`. The branch that reaches the
+   table says the index is above 62 and nothing about how far; the
+   compare before it had already bounded it. A guard that branches to
+   its table on "greater" now takes its upper bound from the earlier
+   compare of the same register, if nothing wrote the register between,
+   and the walk from the table trusts that bound whatever has set the
+   flags since. Four of the seven tables were of this shape. With traps
+   set to continue the run had gone on regardless, which is why it was
+   seen at all only as a count of one at the end.

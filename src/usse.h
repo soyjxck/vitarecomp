@@ -129,6 +129,35 @@ int usse_can_run(const usse_insn *in);
  * instruction it could not execute. */
 uint32_t usse_run(const usse_insn *code, uint32_t count, usse_state *s);
 
+/* --- many at once ---------------------------------------------------------------------
+ * The same programs, run for a row of vertices or pixels in one pass: every
+ * register is a row of words, one a lane, and an instruction is done for
+ * all the lanes before the next is looked at. What each lane ends with is
+ * what usse_run would have left it with; the gain is that the instruction
+ * is taken apart once for the row, not once a pixel, and that the work on a
+ * row is the kind a processor does several of at a time. */
+
+#define USSE_LANES 64
+
+typedef struct {
+    uint32_t  temp[USSE_WORDS][USSE_LANES], pa[USSE_WORDS][USSE_LANES], out[USSE_WORDS][USSE_LANES];
+    uint32_t  internal[16][USSE_LANES];
+    const uint32_t *sa;                     /* USSE_WORDS of them, the same for every lane */
+    uint8_t   pred[4][USSE_LANES];
+    uint8_t   killed[USSE_LANES];           /* set where the fragment was discarded */
+    int32_t   inc[4][17];
+    unsigned  lanes;                        /* how many are in use */
+    const usse_env *env;
+} usse_wide;
+
+/* Whether a program is one usse_run_wide executes: every instruction of it
+ * and every operand. One that is not is run a lane at a time by usse_run. */
+int usse_wide_can_run(const usse_insn *code, uint32_t count);
+
+/* Run `count` instructions for lanes 0 to w->lanes - 1. The registers are
+ * the caller's to fill and to read; `killed` is cleared first. */
+void usse_run_wide(const usse_insn *code, uint32_t count, usse_wide *w);
+
 /* Print one instruction as text into `out`, one line per execution it
  * stands for, each ending in a newline. The repeat increments in `s` are
  * consulted and, for the instructions that set them, changed, as when

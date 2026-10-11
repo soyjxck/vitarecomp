@@ -73,13 +73,15 @@ add_executable(test_texdec test_texdec.c ${CMAKE_SOURCE_DIR}/src/texdec.c ${CMAK
 target_compile_options(test_texdec PRIVATE -UNDEBUG)
 add_test(NAME texdec COMMAND test_texdec)
 
-add_executable(test_usse test_usse.c ${CMAKE_SOURCE_DIR}/src/usse.c)
-target_include_directories(test_usse PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_executable(test_usse test_usse.c)
+target_link_libraries(test_usse PRIVATE vitashader)
 target_compile_options(test_usse PRIVATE -UNDEBUG)
-if(NOT MSVC)
-    target_link_libraries(test_usse PRIVATE m)
-endif()
 add_test(NAME usse COMMAND test_usse)
+
+add_executable(test_usse_wide test_usse_wide.c)
+target_link_libraries(test_usse_wide PRIVATE vitashader)
+target_compile_options(test_usse_wide PRIVATE -UNDEBUG)
+add_test(NAME usse_wide COMMAND test_usse_wide)
 
 add_executable(test_pixfmt test_pixfmt.c ${CMAKE_SOURCE_DIR}/src/pixfmt.c)
 target_include_directories(test_pixfmt PRIVATE ${CMAKE_SOURCE_DIR}/include)

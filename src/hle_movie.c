@@ -1,14 +1,19 @@
-/* hle_movie.c — SceMp4, the movie container library: so far, one that opens
- * nothing.
+/* hle_movie.c — SceMp4, the movie container library: not here yet.
  *
  * A title that plays movies carries Sony's player in its own code; what it
  * imports is the layer beneath: this library to take an MP4 apart into
  * video and audio units, and the decoders to turn those into pictures and
- * sound. Neither exists here yet. Until they do, a movie is a file that
- * cannot be opened: sceMp4OpenFile gives no handle, the title's player
- * reports the failure to the title, and the title goes on to whatever
- * comes after the movie. That is what the title does on the console when
- * the file is damaged, so it is a path its code already has.
+ * sound. Neither exists here yet.
+ *
+ * A title does not find that out from these functions. The player loads
+ * the library as a system module before it uses it, and the runtime
+ * answers there that it has no such module (hle_kernel.c); the player then
+ * fails to start, at once and in the call that asked, and the title goes on
+ * to whatever follows the movie. That matters because the other way of
+ * failing does not work: a player whose module loaded, and whose open then
+ * failed, logs the failure and tells its caller nothing, and the title
+ * waits for ever on a movie that never began. What is below is therefore
+ * not reached by a title that asks first; it answers the ones that do not.
  *
  * The imports arrive by number, since the name tables this toolkit uses do
  * not carry them; the names are the Vita3K project's.

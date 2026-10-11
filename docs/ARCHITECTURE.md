@@ -163,7 +163,7 @@ with the table of offsets in the bytes after the instruction. The walk reads
 the table when it knows its length, and the length comes from the guard: a
 compare of the index against the last valid case. `arm_table_count` walks
 back through the instructions decoded in flow before the table branch and
-reads that compare, with the four things a retail compiler does to it: the
+reads that compare, with the things a retail compiler does to it: the
 branch after the compare says whether the compare bounds the index from
 above (`bgt out`) or below (`ble out`, the lower end of a range whose upper
 compare sits further back); the index may be adjusted after the compare
@@ -172,8 +172,14 @@ finder follows it through adds, subtracts and moves; the compare may be
 against a register a MOVW just set; and the guard may branch *to* the table
 (`cmp r0, #37; bls table`), which the walk starting at that label would
 never see, so a walk started at a conditional branch's target is seeded
-with the compare that guarded it. Without a count the table is a computed
-transfer like any other, and traps by address.
+with the compare that guarded it. A fifth, from a tree of compares over a
+dense range: the branch to the table is taken on "greater" and bounds
+nothing from above (`cmp r0, #103; bgt elsewhere; cmp r0, #62; bgt
+table`), and the seed is then the earlier compare of the same register,
+whose own branch had already sent everything larger elsewhere. Without a
+count the table is a computed transfer like any other, and traps by
+address; with one that is too small, the cases beyond it trap by address
+too, so a wrong reading is loud.
 
 ### Relocatable modules: the stream names the pointers
 
@@ -518,12 +524,13 @@ a title's patch sits over its data on the console.
 
 ### The contract
 
-`include/vitarecomp/host.h` is the whole interface. The HLE calls three
+`include/vitarecomp/host.h` is the whole interface. The HLE calls four
 functions a host supplies:
 
 ```c
 void     vita_host_vblank(void);    /* sceDisplayWaitVblankStart: present, poll, pace */
 uint32_t vita_host_buttons(void);   /* the VITA_CTRL_* mask held right now            */
+int      vita_host_touch(int *x, int *y);   /* a finger on the front panel, and where */
 void     vita_host_exit(int);       /* sceKernelExitProcess: never returns             */
 ```
 
@@ -548,15 +555,20 @@ vita_host fbdemo.elf --frames 240 --press RIGHT@10-70 --press DOWN@30-60 \
                      --press START@200 --dump frame.ppm@120
 ```
 
-Input is a list of buttons held between two vertical blanks; a frame is
+Input is a list of buttons held between two vertical blanks, and of
+touches the same way (`--touch 480,340@900-910`: a finger at that pixel of
+the display for ten vertical blanks); a frame is
 written at the vblank asked for, or at exit. That makes a run reproducible
 to the byte, which is what lets `tools/e2e.sh` compare a SHA-256 of the frame
 and lets CI prove the chain on both platforms without a display. The sample's
 frame — a gradient whose blue channel is the frame counter, and a square
 where sixty frames of RIGHT and thirty of DOWN put it — is the fixture.
 
-A windowed host is the same three functions pointed at SDL2, behind an
-option, so the core keeps its no-dependency promise.
+`--window` is the same four functions with a window behind them
+(`host/window_win32.c`, GDI and nothing else): the frame shown at each
+vertical blank, the keyboard added to the scripted buttons, and the left
+mouse button as a finger, wherever on the picture it is held. The core
+keeps its no-dependency promise.
 
 ### Bring-up: seeing what the program did
 
@@ -610,6 +622,11 @@ reading. Two runs then write the same frames, byte for byte, and a change
 to the renderer can be judged by a hash. That is how the renderer was put
 on several threads (`VITARECOMP_THREADS` says how many; one is the
 renderer as it was): twenty frames of a run, the same before and after.
+The same twenty stood behind keeping compressed textures decoded and
+behind running fragment programs for a row of pixels at a time; for the
+last there is a switch that stays, `VITARECOMP_GXM_SCALAR=1`, which shades
+every pixel by itself, so the two can be compared on any frame of any
+title.
 
 The first scrambled picture went through all four in that order. The
 census said every program ran. The textures were right. The geometry

@@ -2,6 +2,7 @@
 
 #include "usse.h"
 #include "usse_fields.h"
+#include "half_rows.h"
 #include "vitarecomp/half.h"
 
 #include <math.h>
@@ -996,33 +997,26 @@ static void modifiers(value *v, uint8_t flags) {
     }
 }
 
-/* Read an operand: for each component the mask asks for, the source channel
- * its swizzle names, or a constant. The result is closed up over the mask. */
-static value load(usse_state *s, const usse_operand *op, uint8_t mask, int32_t shift) {
+/* An operand that is a number in the instruction, or a register this
+ * interpreter has nothing behind: the same for every component. */
+static value load_immediate(const usse_operand *op, uint8_t mask) {
     value out;
     memset(&out, 0, sizeof(out));
-    if (op->bank == USSE_CONST) { out = load_constant(op, mask); modifiers(&out, op->flags); return out; }
-    if (op->bank == USSE_PREDICATE) { out.kind = V_UINT; out.n = 1; out.v.u[0] = s->pred[op->num & 3]; return out; }
-    if (op->bank == USSE_INDEX) {
-        int32_t v = s->index[(op->num - 1) & 1];
-        if (op->type == USSE_U8 || op->type == USSE_S8) v &= 0xFF;
-        if (op->type == USSE_U16 || op->type == USSE_S16) v &= 0xFFFF;
-        out.kind = V_SINT; out.n = 1; out.v.i[0] = v;
-        return out;
+    out.kind = kind_of(op->type);
+    uint32_t imm = op->bank == USSE_IMMEDIATE ? op->num : 0;
+    for (int i = 0; i < 4; i++) {
+        if (!((mask >> i) & 1)) continue;
+        if (out.kind == V_FLOAT) out.v.f[out.n] = (float)imm; else out.v.u[out.n] = imm;
+        out.n++;
     }
-    uint8_t type = op->type;
-    out.kind = kind_of(type);
-    if (op->bank == USSE_IMMEDIATE || op->bank == USSE_GLOBAL || op->bank == USSE_SPECIAL || op->bank == USSE_INVALID) {
-        uint32_t imm = op->bank == USSE_IMMEDIATE ? op->num : 0;
-        for (int i = 0; i < 4; i++) {
-            if (!((mask >> i) & 1)) continue;
-            if (out.kind == V_FLOAT) out.v.f[out.n] = (float)imm; else out.v.u[out.n] = imm;
-            out.n++;
-        }
-        modifiers(&out, op->flags);
-        return out;
-    }
-    uint32_t *w = resolve(s, op, shift, &type, 4);
+    return out;
+}
+
+/* The components of an operand whose words are at `w` (NULL: nowhere), read
+ * as `type`, before its modifiers. */
+static value load_words(const usse_operand *op, uint8_t type, const uint32_t *w, uint8_t mask) {
+    value out;
+    memset(&out, 0, sizeof(out));
     out.kind = kind_of(type);
     for (int i = 0; i < 4; i++) {
         if (!((mask >> i) & 1)) continue;
@@ -1055,6 +1049,31 @@ static value load(usse_state *s, const usse_operand *op, uint8_t mask, int32_t s
         }
         out.n++;
     }
+    return out;
+}
+
+/* Read an operand: for each component the mask asks for, the source channel
+ * its swizzle names, or a constant. The result is closed up over the mask. */
+static value load(usse_state *s, const usse_operand *op, uint8_t mask, int32_t shift) {
+    value out;
+    memset(&out, 0, sizeof(out));
+    if (op->bank == USSE_CONST) { out = load_constant(op, mask); modifiers(&out, op->flags); return out; }
+    if (op->bank == USSE_PREDICATE) { out.kind = V_UINT; out.n = 1; out.v.u[0] = s->pred[op->num & 3]; return out; }
+    if (op->bank == USSE_INDEX) {
+        int32_t v = s->index[(op->num - 1) & 1];
+        if (op->type == USSE_U8 || op->type == USSE_S8) v &= 0xFF;
+        if (op->type == USSE_U16 || op->type == USSE_S16) v &= 0xFFFF;
+        out.kind = V_SINT; out.n = 1; out.v.i[0] = v;
+        return out;
+    }
+    if (op->bank == USSE_IMMEDIATE || op->bank == USSE_GLOBAL || op->bank == USSE_SPECIAL || op->bank == USSE_INVALID) {
+        out = load_immediate(op, mask);
+        modifiers(&out, op->flags);
+        return out;
+    }
+    uint8_t type = op->type;
+    uint32_t *w = resolve(s, op, shift, &type, 4);
+    out = load_words(op, type, w, mask);
     modifiers(&out, op->flags);
     return out;
 }
@@ -1184,17 +1203,19 @@ static int32_t integer_element(usse_state *s, const usse_operand *op, uint8_t ty
 }
 
 /* The condition of a conditional move, on one component: against zero. */
-static int against_zero(const value *t, int i, uint8_t test) {
-    if (t->kind == V_FLOAT) {
-        float x = t->v.f[i];
+static int zero_test(uint8_t kind, uint32_t bits, uint8_t test) {
+    if (kind == V_FLOAT) {
+        float x = bits_to_float(bits);
         return test == 0 ? x == 0.0f : test == 1 ? (x < 0.0f || x > 0.0f) : test == 2 ? x < 0.0f : x <= 0.0f;
     }
-    if (t->kind == V_SINT) {
-        int32_t x = t->v.i[i];
+    if (kind == V_SINT) {
+        int32_t x = (int32_t)bits;
         return test == 0 ? x == 0 : test == 1 ? x != 0 : test == 2 ? x < 0 : x <= 0;
     }
-    return test == 1 ? t->v.u[i] != 0 : test == 2 ? 0 : t->v.u[i] == 0;
+    return test == 1 ? bits != 0 : test == 2 ? 0 : bits == 0;
 }
+
+static int against_zero(const value *t, int i, uint8_t test) { return zero_test(t->kind, t->v.u[i], test); }
 
 /* --- conversions between the formats a pack instruction knows --- */
 
@@ -1207,6 +1228,24 @@ static int32_t to_integer(float f) {
     if (f >= 2147483520.0f) return 2147483520;
     if (f <= -2147483648.0f) return INT32_MIN;
     return (int32_t)f;
+}
+
+static float integer_to_float(uint8_t kind, uint32_t bits, uint8_t source, int scale) {
+    float f = kind == V_SINT ? (float)(int32_t)bits : (float)bits;
+    if (scale) {
+        f /= type_max(source);
+        if (kind == V_SINT && f < -1.0f) f = -1.0f;
+    }
+    return f;
+}
+
+static int32_t float_to_integer(float f, uint8_t kind, uint8_t dest, int scale) {
+    if (scale) {
+        float low = kind == V_SINT ? -1.0f : 0.0f;
+        f = f != f ? 0.0f : f < low ? low : f > 1.0f ? 1.0f : f;
+        f = roundf(f * type_max(dest));
+    }
+    return to_integer(f);
 }
 
 /* Between floats nothing happens but the re-encoding the store does, and
@@ -1222,26 +1261,11 @@ static value convert(const value *v, uint8_t source, uint8_t dest, int scale) {
     }
     if (to_float) {
         out.kind = V_FLOAT;
-        for (int i = 0; i < v->n; i++) {
-            float f = v->kind == V_SINT ? (float)v->v.i[i] : (float)v->v.u[i];
-            if (scale) {
-                f /= type_max(source);
-                if (v->kind == V_SINT && f < -1.0f) f = -1.0f;
-            }
-            out.v.f[i] = f;
-        }
+        for (int i = 0; i < v->n; i++) out.v.f[i] = integer_to_float(v->kind, v->v.u[i], source, scale);
         return out;
     }
     out.kind = kind_of(dest);
-    for (int i = 0; i < v->n; i++) {
-        float f = v->v.f[i];
-        if (scale) {
-            float low = out.kind == V_SINT ? -1.0f : 0.0f;
-            f = f != f ? 0.0f : f < low ? low : f > 1.0f ? 1.0f : f;
-            f = roundf(f * type_max(dest));
-        }
-        out.v.i[i] = to_integer(f);
-    }
+    for (int i = 0; i < v->n; i++) out.v.i[i] = float_to_integer(v->v.f[i], out.kind, dest, scale);
     return out;
 }
 
@@ -1307,6 +1331,43 @@ static int test_component(const usse_insn *in, const value *a, const value *b, i
 
 /* --- the instructions --- */
 
+static float binary(uint8_t op, float x, float y) {
+    return op == USSE_OP_MUL ? x * y : op == USSE_OP_ADD ? x + y : op == USSE_OP_FRC ? x - floorf(y)
+         : op == USSE_OP_MIN ? (y < x ? y : x) : (x < y ? y : x);
+}
+
+static float unary(uint8_t op, float x) {
+    if (op == USSE_OP_RCP) return 1.0f / x;
+    if (op == USSE_OP_RSQ) return 1.0f / sqrtf(x);
+    if (op == USSE_OP_LOG) return logf(x);
+    return x != x ? 1.0f : expf(x);
+}
+
+/* The second operand of a bitwise instruction when it is a register: turned,
+ * then perhaps complemented, within the instruction's width. */
+static uint32_t second_operand(const usse_insn *in, uint32_t bits) {
+    uint32_t width = in->a ? 16 : 32, low = in->a ? 0xFFFFu : 0xFFFFFFFFu, turn = in->c % width, b = bits & low;
+    if (turn) b = (b << turn) | (b >> (width - turn));
+    if (in->b == 2) b = ~b;
+    return b & low;
+}
+
+static uint32_t bitwise(const usse_insn *in, uint32_t a, uint32_t b) {
+    uint32_t width = in->a ? 16 : 32;
+    switch (in->op) {
+    case USSE_OP_AND: return a & b;
+    case USSE_OP_OR:  return a | b;
+    case USSE_OP_XOR: return a ^ b;
+    case USSE_OP_SHL: return b >= width ? 0 : a << b;
+    case USSE_OP_SHR: return b >= width ? 0 : a >> b;
+    case USSE_OP_ROL: return b % width ? (a << (b % width)) | (a >> (width - b % width)) : a;
+    default: {
+        int32_t wide = in->a ? (int16_t)a : (int32_t)a;
+        return (uint32_t)(wide >> (b >= width ? width - 1 : b));
+    }
+    }
+}
+
 /* The instructions this file does not execute end the run and say which
  * they were, so a program that needs one is named instead of producing a
  * wrong picture. */
@@ -1325,12 +1386,7 @@ static int execute(usse_state *s, const usse_insn *in) {
     case USSE_OP_MUL: case USSE_OP_ADD: case USSE_OP_FRC: case USSE_OP_MIN: case USSE_OP_MAX: {
         value a = load(s, &in->src1, in->src_mask, 0), b = load(s, &in->src2, in->src_mask, 0);
         value out = floats(a.n);
-        for (int i = 0; i < a.n; i++) {
-            float x = a.v.f[i], y = b.v.f[i];
-            out.v.f[i] = in->op == USSE_OP_MUL ? x * y : in->op == USSE_OP_ADD ? x + y
-                       : in->op == USSE_OP_FRC ? x - floorf(y)
-                       : in->op == USSE_OP_MIN ? (y < x ? y : x) : (x < y ? y : x);
-        }
+        for (int i = 0; i < a.n; i++) out.v.f[i] = binary(in->op, a.v.f[i], b.v.f[i]);
         store(s, &in->dest, &out, in->mask, 0);
         return 1;
     }
@@ -1357,12 +1413,7 @@ static int execute(usse_state *s, const usse_insn *in) {
     case USSE_OP_RCP: case USSE_OP_RSQ: case USSE_OP_LOG: case USSE_OP_EXP:
         for (int r = 0; r <= in->repeat; r++) {
             value a = load(s, &in->src1, in->src_mask, repeat_offset(s, in, &in->src1, r)), out;
-            float x = a.v.f[0], y;
-            if (in->op == USSE_OP_RCP)      y = 1.0f / x;
-            else if (in->op == USSE_OP_RSQ) y = 1.0f / sqrtf(x);
-            else if (in->op == USSE_OP_LOG) y = logf(x);
-            else                            y = x != x ? 1.0f : expf(x);
-            spread(&out, y, in->mask);
+            spread(&out, unary(in->op, a.v.f[0]), in->mask);
             store(s, &in->dest, &out, in->mask, repeat_offset(s, in, &in->dest, r));
         }
         return 1;
@@ -1404,31 +1455,15 @@ static int execute(usse_state *s, const usse_insn *in) {
 
     case USSE_OP_AND: case USSE_OP_OR: case USSE_OP_XOR: case USSE_OP_SHL: case USSE_OP_SHR:
     case USSE_OP_ASR: case USSE_OP_ROL: {
-        uint32_t width = in->a ? 16 : 32, low = in->a ? 0xFFFFu : 0xFFFFFFFFu;
+        uint32_t low = in->a ? 0xFFFFu : 0xFFFFFFFFu;
         for (int r = 0; r <= in->repeat; r++) {
             value x = load(s, &in->src1, 1, repeat_offset(s, in, &in->src1, r));
             uint32_t a = x.v.u[0] & low, b = in->imm, v;
             if (in->b != 1) {
                 value y = load(s, &in->src2, 1, repeat_offset(s, in, &in->src2, r));
-                uint32_t turn = in->c % width;
-                b = y.v.u[0] & low;
-                if (turn) b = (b << turn) | (b >> (width - turn));
-                if (in->b == 2) b = ~b;
-                b &= low;
+                b = second_operand(in, y.v.u[0]);
             }
-            switch (in->op) {
-            case USSE_OP_AND: v = a & b; break;
-            case USSE_OP_OR:  v = a | b; break;
-            case USSE_OP_XOR: v = a ^ b; break;
-            case USSE_OP_SHL: v = b >= width ? 0 : a << b; break;
-            case USSE_OP_SHR: v = b >= width ? 0 : a >> b; break;
-            case USSE_OP_ROL: v = b % width ? (a << (b % width)) | (a >> (width - b % width)) : a; break;
-            default: {
-                int32_t wide = in->a ? (int16_t)a : (int32_t)a;
-                v = (uint32_t)(wide >> (b >= width ? width - 1 : b));
-                break;
-            }
-            }
+            v = bitwise(in, a, b);
             value out = one_integer(v & low, V_UINT);
             store(s, &in->dest, &out, 1, repeat_offset(s, in, &in->dest, r));
         }
@@ -1601,4 +1636,508 @@ uint32_t usse_run(const usse_insn *code, uint32_t count, usse_state *s) {
         pc++;
     }
     return pc < count ? pc + 1 : 0;
+}
+
+/* --- many at once -----------------------------------------------------------------------
+ * The same instructions for a row of lanes. Everything below follows the
+ * one-at-a-time interpreter above rule for rule: an operand that is the same
+ * for every lane (a secondary attribute, a constant, an immediate) is read
+ * by the very functions above and copied along the row; one that differs is
+ * read from the rows of its register with the same arithmetic in a loop.
+ * What is not handled here is refused by usse_wide_can_run, and a program
+ * with any of it runs a lane at a time. */
+
+#define LANES USSE_LANES
+
+typedef struct {
+    uint8_t n, kind;
+    union { float f[4][LANES]; int32_t i[4][LANES]; uint32_t u[4][LANES]; } v;
+} wvalue;
+
+static void fill_row(uint32_t *row, uint32_t bits, unsigned n) {
+    for (unsigned l = 0; l < n; l++) row[l] = bits;
+}
+
+/* Copy a row to another, in every lane or only where `exec` says. */
+static void copy_row(uint32_t *to, const uint32_t *from, unsigned n, const uint8_t *exec) {
+    if (!exec) { memcpy(to, from, (size_t)n * 4); return; }
+    for (unsigned l = 0; l < n; l++) if (exec[l]) to[l] = from[l];
+}
+
+static int in_rows(uint8_t bank) { return bank == USSE_TEMP || bank == USSE_PA || bank == USSE_OUT || bank == USSE_INTERNAL; }
+
+/* The first row of an operand's register, and the type it is kept as; NULL
+ * when it would leave its bank. Row k of the register is LANES words on. */
+static uint32_t *rows_of(usse_wide *w, const usse_operand *op, int32_t shift, uint8_t *type) {
+    int64_t base;
+    if (op->bank == USSE_INTERNAL) {
+        base = 4 * ((int64_t)op->num + shift);
+        if (base < 0 || base + 4 > 16) return NULL;
+        if (*type == USSE_F16) *type = USSE_F32;
+        else if (*type == USSE_S16 || *type == USSE_S8) *type = USSE_S32;
+        else if (*type == USSE_U16 || *type == USSE_U8) *type = USSE_U32;
+        return w->internal[base];
+    }
+    uint32_t (*bank)[LANES] = op->bank == USSE_TEMP ? w->temp : op->bank == USSE_PA ? w->pa : op->bank == USSE_OUT ? w->out : NULL;
+    base = (int64_t)op->num + shift;
+    if (!bank || base < 0 || base + 4 > USSE_WORDS) return NULL;
+    return bank[base];
+}
+
+static void wide_modifiers(wvalue *v, uint8_t flags, unsigned n) {
+    if (flags & USSE_ABS) {
+        if (v->kind == V_UINT) return;
+        for (int k = 0; k < v->n; k++) {
+            if (v->kind == V_FLOAT) for (unsigned l = 0; l < n; l++) v->v.f[k][l] = fabsf(v->v.f[k][l]);
+            else for (unsigned l = 0; l < n; l++) if (v->v.i[k][l] < 0) v->v.i[k][l] = (int32_t)(0u - (uint32_t)v->v.i[k][l]);
+        }
+    }
+    if (flags & USSE_NEG) {
+        for (int k = 0; k < v->n; k++) {
+            if (v->kind == V_FLOAT) for (unsigned l = 0; l < n; l++) v->v.f[k][l] = 0.0f - v->v.f[k][l];
+            else for (unsigned l = 0; l < n; l++) v->v.u[k][l] = 0u - v->v.u[k][l];
+        }
+    }
+}
+
+static void wide_load(usse_wide *w, const usse_operand *op, uint8_t mask, int32_t shift, wvalue *out) {
+    unsigned n = w->lanes;
+    out->n = 0;
+    if (!in_rows(op->bank)) {
+        value v;
+        if (op->bank == USSE_SA) {
+            int64_t base = (int64_t)op->num + shift;
+            v = load_words(op, op->type, (w->sa && base >= 0 && base + 4 <= USSE_WORDS) ? w->sa + base : NULL, mask);
+        } else if (op->bank == USSE_CONST) {
+            v = load_constant(op, mask);
+        } else {
+            v = load_immediate(op, mask);
+        }
+        modifiers(&v, op->flags);
+        out->n = v.n;
+        out->kind = v.kind;
+        for (int k = 0; k < v.n; k++) fill_row(out->v.u[k], v.v.u[k], n);
+        return;
+    }
+    uint8_t type = op->type;
+    const uint32_t *rows = rows_of(w, op, shift, &type);
+    out->kind = kind_of(type);
+    for (int i = 0; i < 4; i++) {
+        if (!((mask >> i) & 1)) continue;
+        uint8_t ch = op->sw[i];
+        uint32_t *u = out->v.u[out->n];
+        if (ch >= USSE_ZERO && ch <= USSE_HALF) {
+            float c = CHANNEL_CONSTANT[ch - USSE_ZERO];
+            fill_row(u, out->kind == V_FLOAT ? float_to_bits(c) : (uint32_t)c, n);
+        } else if (!rows || ch > USSE_W) {
+            fill_row(u, 0, n);
+        } else {
+            const uint32_t *half = rows + (size_t)(ch >> 1) * LANES;
+            unsigned at = 16u * (ch & 1u), byte = 8u * ch;
+            switch (type) {
+            case USSE_F32: case USSE_U32: case USSE_S32: memcpy(u, rows + (size_t)ch * LANES, (size_t)n * 4); break;
+            case USSE_F16: vita_halves_to_floats(half, ch & 1, out->v.f[out->n], n); break;
+            case USSE_U16: for (unsigned l = 0; l < n; l++) u[l] = (uint16_t)(half[l] >> at); break;
+            case USSE_S16: for (unsigned l = 0; l < n; l++) u[l] = (uint32_t)(int32_t)(int16_t)(half[l] >> at); break;
+            case USSE_U8:  for (unsigned l = 0; l < n; l++) u[l] = (uint8_t)(rows[l] >> byte); break;
+            case USSE_S8:  for (unsigned l = 0; l < n; l++) u[l] = (uint32_t)(int32_t)(int8_t)(rows[l] >> byte); break;
+            default:       fill_row(u, 0, n); break;
+            }
+        }
+        out->n++;
+    }
+    wide_modifiers(out, op->flags, n);
+}
+
+static void wide_store(usse_wide *w, const usse_operand *op, const wvalue *val, uint8_t mask, int32_t shift, const uint8_t *exec) {
+    unsigned n = w->lanes;
+    if (op->bank == USSE_PREDICATE) {
+        uint8_t *p = w->pred[op->num & 3];
+        for (unsigned l = 0; l < n; l++) if (!exec || exec[l]) p[l] = val->v.u[0][l] != 0;
+        return;
+    }
+    if (!in_rows(op->bank)) return;
+    uint8_t type = op->type;
+    uint32_t *rows = rows_of(w, op, shift, &type);
+    if (!rows || !val->n) return;
+    int k = 0;
+    if (op->bank == USSE_INTERNAL || type == USSE_F32 || type == USSE_U32 || type == USSE_S32) {
+        for (int p = 0; p < 4; p++) {
+            if (!((mask >> p) & 1) || k >= val->n) continue;
+            copy_row(rows + (size_t)p * LANES, val->v.u[k], n, exec);
+            k++;
+        }
+        return;
+    }
+    for (int p = 0; p < 4; p++) {
+        if (!((mask >> p) & 1)) continue;
+        int j = k < val->n ? k : val->n - 1;
+        k++;
+        switch (type) {
+        case USSE_F16: {
+            uint32_t *half = rows + (size_t)(p >> 1) * LANES;
+            float converted[LANES];
+            const float *from = val->v.f[j];
+            if (val->kind != V_FLOAT) {
+                for (unsigned l = 0; l < n; l++) converted[l] = (float)val->v.i[j][l];
+                from = converted;
+            }
+            if (!exec) {
+                vita_floats_to_halves(from, half, p & 1, n);
+            } else {
+                unsigned at = 16u * ((unsigned)p & 1u);
+                for (unsigned l = 0; l < n; l++)
+                    if (exec[l]) half[l] = (half[l] & ~(0xFFFFu << at)) | ((uint32_t)vita_f32_to_f16(from[l]) << at);
+            }
+            break;
+        }
+        case USSE_U16: case USSE_S16: {
+            uint32_t *half = rows + (size_t)(p >> 1) * LANES;
+            unsigned at = 16u * ((unsigned)p & 1u);
+            for (unsigned l = 0; l < n; l++)
+                if (!exec || exec[l]) half[l] = (half[l] & ~(0xFFFFu << at)) | ((val->v.u[j][l] & 0xFFFFu) << at);
+            break;
+        }
+        case USSE_U8: case USSE_S8: {
+            unsigned at = 8u * (unsigned)p;
+            for (unsigned l = 0; l < n; l++)
+                if (!exec || exec[l]) rows[l] = (rows[l] & ~(0xFFu << at)) | ((val->v.u[j][l] & 0xFFu) << at);
+            break;
+        }
+        default: break;
+        }
+    }
+}
+
+/* One register of an operand as its bits, `index` registers on, for every lane. */
+static void wide_word(usse_wide *w, const usse_operand *op, int32_t shift, int index, uint32_t *row) {
+    unsigned n = w->lanes;
+    int64_t base = (int64_t)op->num + shift;
+    const uint32_t *from = NULL;
+    uint32_t bits = 0;
+    if (op->bank == USSE_INTERNAL) {
+        if (base >= 0 && 4 * base + 4 <= 16) from = w->internal[4 * base + index];
+    } else if (op->bank == USSE_TEMP || op->bank == USSE_PA || op->bank == USSE_OUT) {
+        uint32_t (*bank)[LANES] = op->bank == USSE_TEMP ? w->temp : op->bank == USSE_PA ? w->pa : w->out;
+        if (base >= 0 && base + index + 1 <= USSE_WORDS) from = bank[base + index];
+    } else if (op->bank == USSE_IMMEDIATE) {
+        bits = op->num;
+    } else if (op->bank == USSE_CONST) {
+        bits = CONSTANTS[op->num & 63][index & 1];
+    } else if (op->bank == USSE_SA && w->sa && base >= 0 && base + index + 1 <= USSE_WORDS) {
+        bits = w->sa[base + index];
+    }
+    if (from) memcpy(row, from, (size_t)n * 4); else fill_row(row, bits, n);
+}
+
+/* What usse_reset and repeat_offset need of a state: the increments. */
+static int32_t wide_offset(const usse_wide *w, const usse_insn *in, const usse_operand *op, int r) {
+    usse_state s;                               /* only its increments are read */
+    memcpy(s.inc, w->inc, sizeof(s.inc));
+    return repeat_offset(&s, in, op, r);
+}
+
+static void wide_floats(wvalue *v, int n) { v->kind = V_FLOAT; v->n = (uint8_t)n; }
+
+/* An operand the batched executor reads or writes as it stands. */
+static int wide_operand_ok(const usse_operand *op, int dest) {
+    if (in_rows(op->bank)) return op->type != USSE_C10 && op->type != USSE_O8;
+    if (dest) return 0;
+    return op->bank == USSE_SA || op->bank == USSE_CONST || op->bank == USSE_IMMEDIATE || op->bank == USSE_GLOBAL ||
+           op->bank == USSE_SPECIAL || op->bank == USSE_INVALID;
+}
+
+static int wide_can(const usse_insn *in) {
+    if (!usse_can_run(in)) return 0;
+    switch (in->op) {
+    case USSE_OP_MAD:
+        return wide_operand_ok(&in->src0, 0) && wide_operand_ok(&in->src1, 0) && wide_operand_ok(&in->src2, 0) && wide_operand_ok(&in->dest, 1);
+    case USSE_OP_MUL: case USSE_OP_ADD: case USSE_OP_FRC: case USSE_OP_MIN: case USSE_OP_MAX: case USSE_OP_DOT:
+    case USSE_OP_DOT_GPI:
+        return wide_operand_ok(&in->src1, 0) && wide_operand_ok(&in->src2, 0) && wide_operand_ok(&in->dest, 1);
+    case USSE_OP_RCP: case USSE_OP_RSQ: case USSE_OP_LOG: case USSE_OP_EXP:
+        return wide_operand_ok(&in->src1, 0) && wide_operand_ok(&in->dest, 1);
+    case USSE_OP_MOV:
+        return wide_operand_ok(&in->src1, 0) && wide_operand_ok(&in->dest, 1);
+    case USSE_OP_MOVC: case USSE_OP_MOVCU8:
+        return wide_operand_ok(&in->src0, 0) && wide_operand_ok(&in->src1, 0) && wide_operand_ok(&in->src2, 0) && wide_operand_ok(&in->dest, 1);
+    case USSE_OP_PCK:
+        return wide_operand_ok(&in->src1, 0) && (!in->b || wide_operand_ok(&in->src2, 0)) && wide_operand_ok(&in->dest, 1) &&
+               in->src1.type != USSE_C10;
+    case USSE_OP_AND: case USSE_OP_OR: case USSE_OP_XOR: case USSE_OP_SHL: case USSE_OP_SHR: case USSE_OP_ASR: case USSE_OP_ROL:
+        return wide_operand_ok(&in->src1, 0) && (in->b == 1 || wide_operand_ok(&in->src2, 0)) && wide_operand_ok(&in->dest, 1);
+    case USSE_OP_TEST:
+        return wide_operand_ok(&in->src1, 0) && wide_operand_ok(&in->src2, 0);
+    case USSE_OP_TESTMASK:
+        return wide_operand_ok(&in->src1, 0) && wide_operand_ok(&in->src2, 0) && wide_operand_ok(&in->dest, 1);
+    case USSE_OP_SMP:
+        /* the level operand is read in the coordinate's type */
+        return wide_operand_ok(&in->src0, 0) && in_rows(in->dest.bank) &&
+               (!in->b || (wide_operand_ok(&in->src2, 0) && !(in_rows(in->src2.bank) && in->src0.type == USSE_C10))) &&
+               (in->c == 0 || ((in->c == 1 || in->c == 3) && is_float_type(in->dest.type)));
+    case USSE_OP_KILL: case USSE_OP_PHAS: case USSE_OP_NOP: case USSE_OP_SPEC:
+        return 1;
+    case USSE_OP_SMLSI:
+        return in->pred == USSE_PRED_NONE;     /* the increments are the row's, not a lane's */
+    default:
+        return 0;                               /* branches, indices, memory: a lane at a time */
+    }
+}
+
+int usse_wide_can_run(const usse_insn *code, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) if (!wide_can(&code[i])) return 0;
+    return 1;
+}
+
+static void wide_execute(usse_wide *w, const usse_insn *in, const uint8_t *exec) {
+    wvalue a, b, c, out;                            /* a kilobyte each */
+    unsigned n = w->lanes;
+    switch (in->op) {
+    case USSE_OP_MAD:
+        for (int r = 0; r <= in->repeat; r++) {
+            wide_load(w, &in->src0, in->mask, wide_offset(w, in, &in->src0, r), &a);
+            wide_load(w, &in->src1, in->mask, wide_offset(w, in, &in->src1, r), &b);
+            wide_load(w, &in->src2, in->mask, wide_offset(w, in, &in->src2, r), &c);
+            wide_floats(&out, a.n);
+            for (int k = 0; k < a.n; k++) {
+                const float *x = a.v.f[k], *y = b.v.f[k], *z = c.v.f[k];
+                float *o = out.v.f[k];
+                for (unsigned l = 0; l < n; l++) o[l] = x[l] * y[l] + z[l];
+            }
+            wide_store(w, &in->dest, &out, in->mask, wide_offset(w, in, &in->dest, r), exec);
+        }
+        return;
+    case USSE_OP_MUL: case USSE_OP_ADD: case USSE_OP_FRC: case USSE_OP_MIN: case USSE_OP_MAX:
+        wide_load(w, &in->src1, in->src_mask, 0, &a);
+        wide_load(w, &in->src2, in->src_mask, 0, &b);
+        wide_floats(&out, a.n);
+        for (int k = 0; k < a.n; k++) {
+            const float *x = a.v.f[k], *y = b.v.f[k];
+            float *o = out.v.f[k];
+            switch (in->op) {
+            case USSE_OP_MUL: for (unsigned l = 0; l < n; l++) o[l] = x[l] * y[l]; break;
+            case USSE_OP_ADD: for (unsigned l = 0; l < n; l++) o[l] = x[l] + y[l]; break;
+            case USSE_OP_MIN: for (unsigned l = 0; l < n; l++) o[l] = y[l] < x[l] ? y[l] : x[l]; break;
+            case USSE_OP_MAX: for (unsigned l = 0; l < n; l++) o[l] = x[l] < y[l] ? y[l] : x[l]; break;
+            default:          for (unsigned l = 0; l < n; l++) o[l] = x[l] - floorf(y[l]); break;
+            }
+        }
+        wide_store(w, &in->dest, &out, in->mask, 0, exec);
+        return;
+    case USSE_OP_DOT:
+        wide_load(w, &in->src1, 15, 0, &a);
+        wide_load(w, &in->src2, 15, 0, &b);
+        wide_floats(&out, bits_set(in->mask));
+        for (unsigned l = 0; l < n; l++)
+            out.v.f[0][l] = a.v.f[0][l] * b.v.f[0][l] + a.v.f[1][l] * b.v.f[1][l] + a.v.f[2][l] * b.v.f[2][l] + a.v.f[3][l] * b.v.f[3][l];
+        for (int k = 1; k < out.n; k++) memcpy(out.v.f[k], out.v.f[0], (size_t)n * 4);
+        wide_store(w, &in->dest, &out, in->mask, 0, exec);
+        return;
+    case USSE_OP_DOT_GPI: {
+        uint8_t mask = in->mask;
+        for (int r = 0; r <= in->repeat; r++) {
+            wide_load(w, &in->src1, in->src_mask, wide_offset(w, in, &in->src1, r), &a);
+            wide_load(w, &in->src2, in->src_mask, wide_offset(w, in, &in->src2, r), &b);
+            wide_floats(&out, bits_set(mask));
+            for (unsigned l = 0; l < n; l++) {
+                float d = 0.0f;
+                for (int k = 0; k < a.n; k++) d += a.v.f[k][l] * b.v.f[k][l];
+                out.v.f[0][l] = d;
+            }
+            for (int k = 1; k < out.n; k++) memcpy(out.v.f[k], out.v.f[0], (size_t)n * 4);
+            wide_store(w, &in->dest, &out, mask, 0, exec);
+            mask = (uint8_t)(((mask << 1) | (mask >> 3)) & 15);
+        }
+        return;
+    }
+    case USSE_OP_RCP: case USSE_OP_RSQ: case USSE_OP_LOG: case USSE_OP_EXP:
+        for (int r = 0; r <= in->repeat; r++) {
+            wide_load(w, &in->src1, in->src_mask, wide_offset(w, in, &in->src1, r), &a);
+            wide_floats(&out, bits_set(in->mask));
+            if (in->op == USSE_OP_RCP)      for (unsigned l = 0; l < n; l++) out.v.f[0][l] = 1.0f / a.v.f[0][l];
+            else if (in->op == USSE_OP_RSQ) for (unsigned l = 0; l < n; l++) out.v.f[0][l] = 1.0f / sqrtf(a.v.f[0][l]);
+            else                            for (unsigned l = 0; l < n; l++) out.v.f[0][l] = unary(in->op, a.v.f[0][l]);
+            for (int k = 1; k < out.n; k++) memcpy(out.v.f[k], out.v.f[0], (size_t)n * 4);
+            wide_store(w, &in->dest, &out, in->mask, wide_offset(w, in, &in->dest, r), exec);
+        }
+        return;
+
+    case USSE_OP_MOV: case USSE_OP_MOVC: case USSE_OP_MOVCU8:
+        for (int r = 0; r <= in->repeat; r++) {
+            wide_load(w, &in->src1, in->mask, wide_offset(w, in, &in->src1, r), &a);
+            if (in->op != USSE_OP_MOV) {
+                wide_load(w, &in->src0, in->mask, wide_offset(w, in, &in->src0, r), &c);
+                wide_load(w, &in->src2, in->mask, wide_offset(w, in, &in->src2, r), &b);
+                for (int k = 0; k < a.n; k++)
+                    for (unsigned l = 0; l < n; l++)
+                        if (!zero_test(c.kind, c.v.u[k][l], in->a)) a.v.u[k][l] = b.v.u[k][l];
+            }
+            wide_store(w, &in->dest, &a, in->mask, wide_offset(w, in, &in->dest, r), exec);
+        }
+        return;
+
+    case USSE_OP_PCK:
+        for (int r = 0; r <= in->repeat; r++) {
+            int32_t o1 = wide_offset(w, in, &in->src1, r), o2 = wide_offset(w, in, &in->src2, r);
+            if (in->b) {
+                wide_floats(&a, 0);
+                for (int i = 0; i < 4; i++) {
+                    if (!((in->mask >> i) & 1)) continue;
+                    int ch = in->src1.sw[i] & 3;
+                    if (ch < 2) wide_word(w, &in->src1, o1, ch, a.v.u[a.n]); else wide_word(w, &in->src2, o2, ch - 2, a.v.u[a.n]);
+                    a.n++;
+                }
+            } else {
+                wide_load(w, &in->src1, in->mask, o1, &a);
+            }
+            /* between floats and between integers the values pass as they are */
+            int from_float = a.kind == V_FLOAT, to_float = is_float_type(in->dest.type);
+            if (from_float != to_float) {
+                uint8_t kind = kind_of(in->dest.type);
+                for (int k = 0; k < a.n; k++) {
+                    if (to_float) for (unsigned l = 0; l < n; l++) a.v.f[k][l] = integer_to_float(a.kind, a.v.u[k][l], in->src1.type, in->a);
+                    else          for (unsigned l = 0; l < n; l++) a.v.i[k][l] = float_to_integer(a.v.f[k][l], kind, in->dest.type, in->a);
+                }
+                a.kind = to_float ? V_FLOAT : kind;
+            } else if (!to_float) {
+                a.kind = kind_of(in->dest.type);
+            }
+            wide_store(w, &in->dest, &a, in->mask, wide_offset(w, in, &in->dest, r), exec);
+        }
+        return;
+
+    case USSE_OP_AND: case USSE_OP_OR: case USSE_OP_XOR: case USSE_OP_SHL: case USSE_OP_SHR:
+    case USSE_OP_ASR: case USSE_OP_ROL: {
+        uint32_t low = in->a ? 0xFFFFu : 0xFFFFFFFFu;
+        for (int r = 0; r <= in->repeat; r++) {
+            wide_load(w, &in->src1, 1, wide_offset(w, in, &in->src1, r), &a);
+            if (in->b != 1) wide_load(w, &in->src2, 1, wide_offset(w, in, &in->src2, r), &b);
+            out.kind = V_UINT;
+            out.n = 1;
+            for (unsigned l = 0; l < n; l++) {
+                uint32_t x = a.v.u[0][l] & low, y = in->b != 1 ? second_operand(in, b.v.u[0][l]) : in->imm;
+                out.v.u[0][l] = bitwise(in, x, y) & low;
+            }
+            wide_store(w, &in->dest, &out, 1, wide_offset(w, in, &in->dest, r), exec);
+        }
+        return;
+    }
+
+    case USSE_OP_TEST: case USSE_OP_TESTMASK: {
+        if (in->op == USSE_OP_TESTMASK && !in->imm) return;
+        wide_load(w, &in->src1, in->mask, 0, &a);
+        wide_load(w, &in->src2, in->mask, 0, &b);
+        uint8_t type = in->dest.type;
+        out.kind = in->op == USSE_OP_TEST ? V_UINT : a.kind;
+        out.n = in->op == USSE_OP_TEST ? 1 : a.n;
+        for (int k = 0; k < out.n; k++)
+            for (unsigned l = 0; l < n; l++) {
+                value x, y;
+                int result = 0;
+                x.kind = a.kind; x.n = 1; x.v.u[0] = a.v.u[k][l];
+                y.kind = b.kind; y.n = 1; y.v.u[0] = b.v.u[k][l];
+                test_component(in, &x, &y, 0, &result);
+                if (in->op == USSE_OP_TEST)  out.v.u[k][l] = (uint32_t)result;
+                else if (a.kind == V_FLOAT)  out.v.f[k][l] = result ? 1.0f : 0.0f;
+                else if (!result)            out.v.u[k][l] = 0;
+                else out.v.u[k][l] = type == USSE_U8 ? 0xFFu : type == USSE_U16 ? 0xFFFFu : type == USSE_U32 ? 0xFFFFFFFFu
+                                   : type == USSE_S8 ? 0x7Fu : type == USSE_S16 ? 0x7FFFu : 0x7FFFFFFFu;
+            }
+        if (in->op == USSE_OP_TEST) {
+            uint8_t *p = w->pred[in->dest.num & 3];
+            for (unsigned l = 0; l < n; l++) if (!exec || exec[l]) p[l] = (uint8_t)out.v.u[0][l];
+        } else {
+            wide_store(w, &in->dest, &out, in->mask, 0, exec);
+        }
+        return;
+    }
+
+    case USSE_OP_SMP: {
+        if (!w->env || !w->env->sample) return;
+        wide_load(w, &in->src0, in->src_mask, 0, &a);
+        if (in->b) {
+            usse_operand bias = in->src2;
+            bias.type = in->src0.type;
+            wide_load(w, &bias, 1, 0, &b);
+        }
+        if (in->c == 0) {
+            int comps = 4;
+            for (unsigned l = 0; l < n; l++) {
+                float coord[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, rgba[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+                if (exec && !exec[l]) continue;
+                for (int k = 0; k < a.n; k++) coord[k] = a.v.f[k][l];
+                int m = w->env->sample(w->env->user, in->src1.num, coord, in->a, in->b, in->b ? b.v.f[0][l] : 0.0f, rgba);
+                comps = (m < 1 || m > 4) ? 4 : m;
+                for (int k = 0; k < 4; k++) out.v.f[k][l] = rgba[k];
+            }
+            wide_floats(&out, comps);
+            if (!is_float_type(in->dest.type)) {
+                uint8_t kind = kind_of(in->dest.type);
+                for (int k = 0; k < comps; k++)
+                    for (unsigned l = 0; l < n; l++) out.v.i[k][l] = float_to_integer(out.v.f[k][l], kind, in->dest.type, 1);
+                out.kind = kind;
+            }
+            wide_store(w, &in->dest, &out, (uint8_t)((1u << comps) - 1), 0, exec);
+        } else if (w->env->gather) {
+            for (unsigned l = 0; l < n; l++) {
+                float coord[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, texels[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, uv[2] = { 0.0f, 0.0f };
+                if (exec && !exec[l]) continue;
+                for (int k = 0; k < a.n; k++) coord[k] = a.v.f[k][l];
+                w->env->gather(w->env->user, in->src1.num, coord, texels, uv);
+                for (int k = 0; k < 4; k++) out.v.f[k][l] = texels[k];
+                c.v.f[0][l] = (1.0f - uv[0]) * (1.0f - uv[1]);
+                c.v.f[1][l] = uv[0] * (1.0f - uv[1]);
+                c.v.f[2][l] = uv[0] * uv[1];
+                c.v.f[3][l] = (1.0f - uv[0]) * uv[1];
+            }
+            wide_floats(&out, 4);
+            wide_store(w, &in->dest, &out, 15, 0, exec);
+            if (in->c == 3) {
+                usse_operand weights = in->dest;
+                weights.type = USSE_F16;
+                weights.num = (uint16_t)(weights.num + (in->dest.type == USSE_F32 ? 4 : 2));
+                wide_floats(&c, 4);
+                wide_store(w, &weights, &c, 15, 0, exec);
+            }
+        }
+        return;
+    }
+
+    case USSE_OP_SMLSI: {
+        usse_state s;                           /* only its increments are written */
+        memcpy(s.inc, w->inc, sizeof(s.inc));
+        apply_smlsi(&s, in);
+        memcpy(w->inc, s.inc, sizeof(s.inc));
+        return;
+    }
+    case USSE_OP_KILL:
+        for (unsigned l = 0; l < n; l++) {
+            int spared = in->a == 1 ? w->pred[0][l] : in->a == 2 ? w->pred[1][l] : in->a == 3 ? !w->pred[0][l] : 0;
+            if (!spared && (!exec || exec[l])) w->killed[l] = 1;
+        }
+        return;
+    default:
+        return;
+    }
+}
+
+void usse_run_wide(const usse_insn *code, uint32_t count, usse_wide *w) {
+    uint8_t mask[LANES];
+    unsigned n = w->lanes;
+    for (int role = 0; role < 4; role++)
+        for (int j = 0; j < 17; j++) w->inc[role][j] = j;
+    memset(w->killed, 0, n);
+    for (uint32_t pc = 0; pc < count; pc++) {
+        const usse_insn *in = &code[pc];
+        const uint8_t *exec = NULL;
+        if (in->pred != USSE_PRED_NONE && in->pred != USSE_PRED_PN) {
+            /* a lane whose predicate is false is left exactly as it was */
+            const uint8_t *p = w->pred[in->pred == USSE_PRED_NOT_P0 ? 0 : in->pred == USSE_PRED_NOT_P1 ? 1 : in->pred - USSE_PRED_P0];
+            int negate = in->pred == USSE_PRED_NOT_P0 || in->pred == USSE_PRED_NOT_P1, any = 0;
+            for (unsigned l = 0; l < n; l++) { mask[l] = (uint8_t)((p[l] != 0) != negate); any |= mask[l]; }
+            if (!any) continue;
+            exec = mask;
+        }
+        wide_execute(w, in, exec);
+    }
 }

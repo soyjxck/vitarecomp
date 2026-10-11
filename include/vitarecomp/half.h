@@ -1,7 +1,7 @@
 /* half.h — sixteen-bit floats.
  *
  * IEEE binary16 to and from single precision: the subnormals, round to
- * nearest even on the way down, infinities and NaN kept. The CPU's VCVTB
+ * nearest even on the way down, infinities kept, a NaN kept and made quiet. The CPU's VCVTB
  * and VCVTT use it, and so does everything on the GPU side, where half the
  * registers of a shader are pairs of these.
  */
@@ -24,7 +24,8 @@ static inline float vita_f16_to_f32(uint16_t h) {
             bits = sign | ((uint32_t)(127 - 15 - e) << 23) | (man << 13);
         }
     } else if (exp == 31) {
-        bits = sign | 0x7F800000u | (man << 13);
+        /* infinity, or a NaN, which comes out quiet as it does from the processor */
+        bits = sign | 0x7F800000u | (man << 13) | (man ? 0x00400000u : 0);
     } else {
         bits = sign | ((exp + 127 - 15) << 23) | (man << 13);
     }

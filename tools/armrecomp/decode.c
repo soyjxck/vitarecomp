@@ -1959,6 +1959,11 @@ static int cmp_upper(const arm_insn *prev, uint32_t nprev, uint32_t i, uint32_t 
     return 1;
 }
 
+/* The compare a walk starts with when it begins at a guard's target: made
+ * by arm_table_seed, not decoded, and so of no width. What it says holds
+ * however far on the table is and whatever has set the flags since. */
+static int is_seed(const arm_insn *p) { return p->op == OP_CMP && p->width == 0; }
+
 /* The index is some register plus an offset, and the compiler moves it
  * between registers on the way: `adds r0, r7, #1; tbh [pc, r0]` is guarded
  * by a compare of r7, `subs r0, #40` by one of r0's earlier value, and
@@ -1992,6 +1997,10 @@ uint32_t arm_table_count(const arm_insn *prev, uint32_t nprev, const arm_insn *t
             int8_t creg = p->rn != ARM_NO_REG ? p->rn : p->rd;
             if (pair_find(al, nal, creg, &at)) {
                 uint32_t n = count_from(prev, nprev, i, al[at].off);
+                if (!n && is_seed(p)) {
+                    int64_t m = (int64_t)p->imm + al[at].off + 1;
+                    n = m > 0 && m <= 0x10000 ? (uint32_t)m : 0;
+                }
                 if (n) return n;
             }
             continue;
@@ -2040,6 +2049,35 @@ uint32_t arm_table_count(const arm_insn *prev, uint32_t nprev, const arm_insn *t
     return 0;
 }
 
+/* What bounds `reg` from above at prev[i], from before it: an earlier
+ * compare whose branch left when the register was greater, so that the flow
+ * which went on has it no greater; or the guard this walk itself began
+ * past. The register must not have been written since. */
+static int bound_before(const arm_insn *prev, uint32_t i, int8_t reg, uint32_t *max) {
+    for (uint32_t k = i; k-- > 0;) {
+        const arm_insn *p = &prev[k];
+        if (p->op == OP_CMP) {
+            if ((p->rn != ARM_NO_REG ? p->rn : p->rd) != reg) continue;
+            if (is_seed(p)) { *max = p->imm; return 1; }
+            if (!p->has_imm) continue;
+            for (uint32_t j = k + 1; j < i; j++) {
+                const arm_insn *q = &prev[j];
+                if (q->cls == A_BRANCH && q->conditional) {
+                    if (q->cond == ARM_COND_HI || q->cond == ARM_COND_GT) { *max = p->imm; return 1; }
+                    if ((q->cond == ARM_COND_CS || q->cond == ARM_COND_GE) && p->imm) { *max = p->imm - 1; return 1; }
+                    break;
+                }
+                if (q->sets_flags) break;
+            }
+            continue;
+        }
+        if (writes_reg(p, 0) == reg || writes_reg(p, 1) == reg || writes_reg(p, 2) == reg) return 0;
+        if (p->cls == A_CALL && reg <= 3) return 0;
+        if (p->cls == A_BRANCH && !p->conditional) return 0;
+    }
+    return 0;
+}
+
 int arm_table_guard(const arm_insn *prev, uint32_t nprev, const arm_insn *br,
                     int8_t *reg, uint32_t *max) {
     if (br->cls != A_BRANCH || !br->conditional || !br->has_target) return 0;
@@ -2051,9 +2089,15 @@ int arm_table_guard(const arm_insn *prev, uint32_t nprev, const arm_insn *br,
              * the register the target will index with. */
             for (uint32_t j = i + 1; j < nprev; j++)
                 if (prev[j].rd == p->rn || (prev[j].cls == A_LOAD && prev[j].rt == p->rn)) return 0;
-            if (!bound_arriving(br->cond, p->imm, max)) return 0;
             *reg = p->rn;
-            return 1;
+            if (bound_arriving(br->cond, p->imm, max)) return 1;
+            /* A branch taken when the register is greater says nothing of
+             * how great. In a tree of compares over a dense range the top
+             * was settled earlier: `cmp r0, #103; bgt elsewhere; cmp r0,
+             * #62; bgt here` arrives here with r0 no more than 103. */
+            if (br->cond == ARM_COND_GT || br->cond == ARM_COND_HI || br->cond == ARM_COND_GE || br->cond == ARM_COND_CS)
+                return bound_before(prev, i, p->rn, max);
+            return 0;
         }
         if (p->sets_flags || p->cls == A_BRANCH || p->cls == A_CALL) return 0;
     }

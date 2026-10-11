@@ -181,7 +181,11 @@ and functions are emitted in address order, so a prefix is not a sample.
 - [ ] `sceKernel` — threads, memory blocks, sync primitives
 - [x] GXP reflection, then the scene pipeline: a software one, in `src/gxm_draw.c`
 - [x] GXP shader translation, as an interpreter of the bytecode rather than a
-      compiler (`src/usse.c`); a compiled path is what speed will need
+      compiler (`src/usse.c`), one pixel at a time and sixty-four at a time;
+      a compiled path is what speed will need after that
+- [x] Touch: the front panel, from a script or the mouse (`src/hle_touch.c`)
+- [ ] Movies: SceMp4, `sceAvcdec`, `sceAudiodec`. Until then the movie
+      library is reported absent and titles skip their movies
 
 **Measured, not estimated:** `SceGxm` is 107 functions, but ~85 of them are
 struct field writes. The real work is ~15 functions, one of which is a shader

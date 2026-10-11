@@ -1076,6 +1076,35 @@ static void test_exclusive(void) {
         assert(arm_table_count(prev, 2, &tb) == 38);
     }
 
+    /* A tree of compares over a dense range: cmp r0, #103 / bgt far / cmp r0,
+     * #62 / bgt table ... table: cmp r0, #97 / ble.w out / subs r0, #98 /
+     * tbh [pc, r0, lsl #1]. The branch to the table is taken when r0 is
+     * above 62, which bounds nothing from above; the compare before it had
+     * already sent everything above 103 elsewhere. Seeded with that, the
+     * table counts 103 - 98 + 1: six. A write to r0 between the two
+     * compares and the bound is gone. */
+    {
+        arm_insn prev[3], win[4], br, tb;
+        int8_t reg = -1; uint32_t max = 0;
+        put16(0, 0x2867); prev[0] = dec(ARM_T32, BASE);
+        put16(0, 0xDC11); prev[1] = dec(ARM_T32, BASE);
+        put16(0, 0x283E); prev[2] = dec(ARM_T32, BASE);
+        put16(0, 0xDC2B); br = dec(ARM_T32, BASE);
+        assert(br.cls == A_BRANCH && br.conditional && br.cond == ARM_COND_GT);
+        assert(arm_table_guard(prev, 3, &br, &reg, &max) && reg == 0 && max == 103);
+        assert(!arm_table_guard(prev + 2, 1, &br, &reg, &max));    /* the first compare out of view */
+        put16(0, 0x3001); prev[1] = dec(ARM_T32, BASE);            /* adds r0, #1 in between */
+        assert(!arm_table_guard(prev, 3, &br, &reg, &max));
+
+        arm_table_seed(&win[0], 0, 103);
+        put16(0, 0x2861); win[1] = dec(ARM_T32, BASE);
+        put16(0, 0xF340); put16(2, 0x8115); win[2] = dec(ARM_T32, BASE);
+        put16(0, 0x3862); win[3] = dec(ARM_T32, BASE);
+        put16(0, 0xE8DF); put16(2, 0xF010); tb = dec(ARM_T32, BASE);
+        assert(arm_table_count(win, 4, &tb) == 6);
+        assert(arm_table_count(win + 1, 3, &tb) == 0);              /* not seeded: only the lower bound */
+    }
+
     /* The index moved between registers and offset on the way.
      * cmp r7, #13 / bgt / adds r0, r7, #1 / tbh [pc, r0]: 15.
      * adds r5, r1, #0 / cmp r1, #4 / bhi / tbh [pc, r5]: the compare comes
