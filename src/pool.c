@@ -1,12 +1,19 @@
 /* pool.c — a few host threads for work that divides. See pool.h.
  *
  * A job is a count of items and a function. The threads and the caller
- * take items one at a time under a lock until none is left, and the caller
- * returns when the last has finished. Nobody waits for a thread that is
- * still asleep: one that wakes late finds nothing to take. Jobs come in
- * bursts, a few hundred in a frame and then none for a while, and waking a
- * sleeping thread costs more than most jobs take; so a thread that runs out
- * of work watches for the next job for a moment before it sleeps.
+ * take items one at a time until none is left, and the caller returns when
+ * the last has finished. An item is taken by adding one to a counter, with
+ * no lock: a job can be four hundred items of a few microseconds each, and
+ * two dozen threads queuing on a lock for every one of those spent more
+ * time in the queue than at the work. The lock is for the two things that
+ * happen once a job to each thread, joining it and leaving it, and for
+ * sleeping.
+ *
+ * Nobody waits for a thread that is still asleep: one that wakes late finds
+ * nothing to take. Jobs come in bursts, a few dozen in a frame and then
+ * none for a while, and waking a sleeping thread costs more than most items
+ * take; so a thread that runs out of work watches for the next job for a
+ * moment before it sleeps.
  */
 
 #include "pool.h"
@@ -28,19 +35,31 @@
 #define relax() ((void)0)
 #endif
 
+/* One more, and what it was before; one fewer, and what it is now. */
+#if defined(_MSC_VER)
+#include <intrin.h>
+#define count_up(p)   ((unsigned)_InterlockedIncrement((volatile long *)(p)) - 1u)
+#define count_down(p) ((unsigned)_InterlockedDecrement((volatile long *)(p)))
+#else
+#define count_up(p)   __atomic_fetch_add((p), 1u, __ATOMIC_SEQ_CST)
+#define count_down(p) __atomic_sub_fetch((p), 1u, __ATOMIC_SEQ_CST)
+#endif
+
 #define POOL_MAX 32
 #define WATCH    20000              /* looks at the job counter before sleeping: a millisecond or so */
 
 static struct {
     mtx_t    lock;
-    cnd_t    work, done;            /* a job was posted; its last item finished */
+    cnd_t    work, done;            /* a job was posted; its last item finished and every thread has left it */
     unsigned size;                  /* threads taking part, the caller included */
 
-    /* the job in hand */
-    unsigned items, next;           /* how many, and the first not yet taken */
-    unsigned running;               /* items taken and not yet finished */
+    /* the job in hand: set under the lock before it is posted, not changed until it is over */
+    unsigned items;
     void   (*fn)(void *, unsigned, unsigned);
     void    *ctx;
+    volatile unsigned next;         /* the first item not yet taken: counted up without the lock */
+    volatile unsigned left;         /* items not yet finished: counted down without it */
+    unsigned inside;                /* pool threads that have joined the job and not left: under the lock */
 } g;
 
 /* Goes up by one a job. Read without the lock by a thread deciding whether
@@ -76,30 +95,40 @@ unsigned vita_pool_size(void) {
     return g.size;
 }
 
-/* Take items until there are none. Called with the lock held; returns with
- * it held. */
+/* Take items until there are none. The job cannot change under a thread
+ * that is here: the caller of vita_pool_run does not return, and so posts
+ * nothing new, while any thread is inside. */
 static void take(unsigned worker) {
-    while (g.next < g.items) {
-        unsigned item = g.next++;
-        g.running++;
-        mtx_unlock(&g.lock);
+    unsigned items = g.items;
+    for (;;) {
+        unsigned item = count_up(&g.next);
+        if (item >= items) break;
         g.fn(g.ctx, item, worker);
-        mtx_lock(&g.lock);
-        if (--g.running == 0 && g.next >= g.items) cnd_broadcast(&g.done);
+        count_down(&g.left);
     }
 }
 
 static int worker_main(void *arg) {
-    unsigned worker = (unsigned)(size_t)arg;
+    unsigned worker = (unsigned)(size_t)arg, seen = 0;
     mtx_lock(&g.lock);
     for (;;) {
-        take(worker);
-        /* nothing left: watch for the next job a while, then sleep until one is posted */
-        unsigned seen = g_posted;
+        /* a job this thread has not looked at, with something left to take: join it */
+        if (g_posted != seen) {
+            seen = g_posted;
+            if (g.next < g.items) {
+                g.inside++;
+                mtx_unlock(&g.lock);
+                take(worker);
+                mtx_lock(&g.lock);
+                if (--g.inside == 0 && g.left == 0) cnd_broadcast(&g.done);
+                continue;
+            }
+        }
+        /* nothing: watch for the next job a while, then sleep until one is posted */
         mtx_unlock(&g.lock);
         for (int i = 0; i < WATCH && g_posted == seen; i++) relax();
         mtx_lock(&g.lock);
-        while (g_posted == seen && g.next >= g.items) cnd_wait(&g.work, &g.lock);
+        while (g_posted == seen) cnd_wait(&g.work, &g.lock);
     }
     return 0;
 }
@@ -128,9 +157,16 @@ void vita_pool_run(unsigned items, void (*fn)(void *ctx, unsigned item, unsigned
     g.ctx = ctx;
     g.items = items;
     g.next = 0;
+    g.left = items;
     g_posted++;
     cnd_broadcast(&g.work);
+    mtx_unlock(&g.lock);
+
     take(0);                        /* the caller is worker 0 */
-    while (g.running || g.next < g.items) cnd_wait(&g.done, &g.lock);
+
+    /* the last items are in other hands: they are short, so look a few times before sleeping on it */
+    for (int i = 0; i < WATCH && g.left; i++) relax();
+    mtx_lock(&g.lock);
+    while (g.left || g.inside) cnd_wait(&g.done, &g.lock);
     mtx_unlock(&g.lock);
 }

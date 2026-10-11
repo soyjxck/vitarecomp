@@ -47,8 +47,8 @@ renderer, right before fast: with a scene's draws drawn together at its
 end, a tile of the target to a thread, and each fragment program run for
 sixty-four pixels at a time, a frame of the title screen or the menu takes
 about 20 ms and a frame of the opening cinematic or of play, 50,000
-triangles and five million pixels, 110 to 120 on twenty-four threads:
-eight frames a second, where the console shows thirty.
+triangles and five million pixels, 80 to 85 on twenty-four threads:
+twelve frames a second, where the console shows thirty.
 The logo movie that comes before the
 title screen is not played: the runtime has no movie library, says so when
 the title asks for it, and the title carries on as it does when a movie

@@ -56,7 +56,16 @@ static void gather(void *user, uint32_t reg, const float *coord, float texels[4]
     for (int i = 0; i < 4; i++) texels[i] = coord[0] * (float)(i + 1) + (float)(reg & 3);
     uv[0] = 0.25f; uv[1] = 0.625f;
 }
-static const usse_env ENV = { NULL, NULL, sample, gather };
+/* What memory holds: something made of the address, and like a register's
+ * word two finite halves and a finite float. */
+static uint32_t read32(void *user, uint32_t address) {
+    uint32_t bits = (address * 2654435761u) ^ 0x5BD1E995u ^ (address >> 7), lo = bits & 0xFFFF, hi = bits >> 16;
+    (void)user;
+    if ((lo & 0x7C00) == 0x7C00) lo ^= 0x4000;
+    if ((hi & 0x7C00) == 0x7C00) hi ^= 0x4000;
+    return lo | (hi << 16);
+}
+static const usse_env ENV = { NULL, read32, sample, gather };
 
 static usse_state scalar[USSE_LANES];
 static usse_wide wide;
@@ -104,8 +113,23 @@ static int same(unsigned l, const char *what) {
 static uint64_t random_word(int format) { return (rnd() & ~USSE_FORMATS[format].mask) | USSE_FORMATS[format].value; }
 
 static const int FORMATS[] = { USSE_F_VMAD2, USSE_F_V32NMAD, USSE_F_V16NMAD, USSE_F_VMAD, USSE_F_VDP, USSE_F_VCOMP, USSE_F_VMOV,
-                               USSE_F_VPCK, USSE_F_VTST, USSE_F_VTSTMSK, USSE_F_VBW, USSE_F_SMP, USSE_F_KILL, USSE_F_SMLSI };
+                               USSE_F_VPCK, USSE_F_VTST, USSE_F_VTSTMSK, USSE_F_VBW, USSE_F_SMP, USSE_F_KILL, USSE_F_SMLSI,
+                               USSE_F_I16MAD, USSE_F_I32MAD, USSE_F_VLDST };
 #define FORMAT_COUNT (sizeof(FORMATS) / sizeof(FORMATS[0]))
+
+/* The last eight of the instruction set's constants are not numbers, of two
+ * different bit patterns. An operation on two operands that are both not
+ * numbers gives back one of them, and which one is the processor's rule
+ * about the order of its operands and so the compiler's choice: the two
+ * interpreters are compiled apart and need not agree. That case, and only
+ * that one, is left out: an instruction with two such constants among its
+ * sources. One of them with a number is still tried. */
+static int two_not_numbers(const usse_insn *in) {
+    const usse_operand *src[3] = { &in->src0, &in->src1, &in->src2 };
+    int count = 0;
+    for (int i = 0; i < 3; i++) count += src[i]->bank == USSE_CONST && (src[i]->num & 63) >= 56;
+    return count >= 2;
+}
 
 static void show(const usse_insn *in) {
     char line[1024];
@@ -122,7 +146,7 @@ static void test_single(void) {
     for (int round = 0; round < 60000; round++) {
         int format = FORMATS[round % FORMAT_COUNT];
         usse_insn in;
-        if (!usse_decode(random_word(format), 0, &in) || !usse_wide_can_run(&in, 1)) continue;
+        if (!usse_decode(random_word(format), 0, &in) || !usse_wide_can_run(&in, 1) || two_not_numbers(&in)) continue;
         unsigned lanes = round % 5 == 0 ? 1 + (unsigned)(rnd() % USSE_LANES) : USSE_LANES;
         fill(lanes);
         for (unsigned l = 0; l < lanes; l++) {
@@ -153,7 +177,7 @@ static void test_programs(void) {
             int format = FORMATS[rnd() % FORMAT_COUNT];
             /* tests and predicated instructions more often than chance would have them */
             if (rnd() % 3 == 0) format = USSE_F_VTST;
-            if (!usse_decode(random_word(format), 0, &in) || !usse_wide_can_run(&in, 1)) continue;
+            if (!usse_decode(random_word(format), 0, &in) || !usse_wide_can_run(&in, 1) || two_not_numbers(&in)) continue;
             code[count++] = in;
         }
         fill(USSE_LANES);

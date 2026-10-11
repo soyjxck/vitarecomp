@@ -339,8 +339,10 @@ typedef struct {
 
     /* how the pixels go through the fragment program */
     int wide;                               /* a row of them at a time */
+    int wide_vertices;                      /* and the vertices through theirs the same way */
     int late;                               /* the program can discard: the tests come after it */
     int each;                               /* the program reads the pixel: no triangle waits on another */
+    const pixfmt_halves *stored;            /* its results go into pixels by lookup (pixfmt.h); NULL: write_colour */
 } draw;
 
 struct batch;
@@ -675,6 +677,20 @@ static void write_colour(worker *wk, int x, int y, const uint32_t *reg) {
     pixfmt_encode(&s->colour, px, c, ((mask >> 1) & 7) | ((mask & 1) << 3));
 }
 
+/* Whether a draw's results can be stored by lookup: four halves left by the
+ * program, every channel written, no blending, and a surface whose fields
+ * pixfmt has tables for. What write_colour does to such a result is what
+ * the tables were made by. Called while a draw is being made. */
+static const pixfmt_halves *stored_for(const gxm_draw_state *s) {
+    const gxm_program *fp = s->fragment;
+    const gxp_program *p = fp ? &fp->gxp : NULL;
+    if (!p || !s->has_colour || p->result_type != GXP_F16) return NULL;
+    if (p->result_components > 2 && s->colour.bytes == 8 && s->colour.fields == 2 && s->colour.f[0].kind == PIX_F32) return NULL;
+    if (((fp->blend[1] & 15) || (fp->blend[1] >> 4)) && !(p->flags & GXP_FLAG_NATIVECOLOR)) return NULL;
+    if ((fp->blend[0] & 15) != 15) return NULL;
+    return pixfmt_halves_for(&s->colour, s->colour_gamma != 0, fp->output_format == 1);
+}
+
 static int compare(unsigned func, float a, float b) {
     switch (func & 7) {
     case 0:  return 0;
@@ -780,6 +796,65 @@ struct batch {
     float    ddx[USSE_LANES][RASTER_MAX_VARYINGS], ddy[USSE_LANES][RASTER_MAX_VARYINGS];
     usse_wide w;
 };
+
+/* shade_vertex for a row of vertices: `count` of the draw's distinct ones
+ * from `first`, their attributes into rows of registers, the program once
+ * for all of them, what it leaves taken out vertex by vertex. The registers
+ * are the ones a row of pixels uses later; nothing is drawn while vertices
+ * are shaded. Each vertex comes out as shade_vertex leaves it. */
+static void shade_vertex_row(const draw *d, worker *wk, uint32_t first, unsigned count, uint32_t instance) {
+    stage *g = &wk->v;
+    const gxp_program *p = g->p;
+    usse_wide *w = &wk->b->w;
+    const uint16_t *words = d->s->vertex->words;
+    unsigned out_words = p->out_words < 8 ? 8 : p->out_words;
+    for (unsigned r = 0; r < words[0]; r++) memset(w->temp[r], 0, count * sizeof(uint32_t));
+    for (unsigned r = 0; r < words[1]; r++) memset(w->pa[r], 0, count * sizeof(uint32_t));
+    for (unsigned r = 0; r < out_words; r++) memset(w->out[r], 0, count * sizeof(uint32_t));
+    for (unsigned r = 0; r < 16; r++) memset(w->internal[r], 0, count * sizeof(uint32_t));
+    memset(w->pred, 0, sizeof(w->pred));
+
+    for (uint32_t i = 0; i < d->inputs; i++) {
+        uint32_t size = (uint32_t)ATTRIBUTE_BYTES[d->in[i].format] * d->in[i].components;
+        uint32_t (*row)[USSE_LANES] = &w->pa[d->in[i].reg];
+        int as_bytes = d->in[i].raw || d->in[i].format == 10;
+        /* the words an attribute can reach, as shade_vertex's packing reaches them */
+        unsigned reach = as_bytes ? ((size > 64 ? 64 : size) + 3) / 4 : 4;
+        for (unsigned l = 0; l < count; l++) {
+            uint32_t at = d->in[i].base + (d->in[i].per_instance ? instance : wk->vertex_index[first + l]) * d->in[i].stride;
+            const uint8_t *src = vita_mem_ptr(at, size);
+            uint32_t reg[16];
+            if (!src) continue;
+            for (unsigned k = 0; k < reach; k++) reg[k] = row[k][l];
+            if (as_bytes) {
+                memcpy(reg, src, size > 64 ? 64 : size);
+            } else {
+                float v[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+                for (unsigned k = 0; k < d->in[i].components && k < 4; k++)
+                    v[k] = attribute_value(src + k * ATTRIBUTE_BYTES[d->in[i].format], d->in[i].format);
+                for (unsigned k = 0; k < d->in[i].wanted; k++) pack(reg, d->in[i].type, k, v[k]);
+            }
+            for (unsigned k = 0; k < reach; k++) row[k][l] = reg[k];
+        }
+    }
+
+    w->sa = g->sa;
+    w->env = &g->env;
+    w->lanes = count;
+    usse_run_wide(p->primary, p->primary_count, w);
+
+    for (unsigned l = 0; l < count; l++) {
+        raster_vertex *out = &wk->vertices[first + l];
+        for (int k = 0; k < 4; k++) out->pos[k] = bits_to_float(w->out[k][l]);
+        for (unsigned slot = 0; slot < GXP_SLOTS; slot++) {
+            if (d->slot_at[slot] < 0) continue;
+            float *var = &out->var[d->slot_at[slot]];
+            for (unsigned k = 0; k < 4; k++)
+                var[k] = k < p->out_count[slot] ? bits_to_float(w->out[p->out_reg[slot] + k][l]) : (k == 3 ? 1.0f : 0.0f);
+        }
+        if (d->w_at >= 0) out->var[d->w_at] = out->pos[3];
+    }
+}
 
 /* Component k of an interpolated quantity, for each of the n pixels waiting. */
 static const float *slot_row(const draw *d, const struct batch *b, unsigned n, unsigned slot, unsigned k, float *scratch) {
@@ -1032,7 +1107,12 @@ static void flush(worker *wk) {
             if (!s->has_colour) continue;
         }
         for (int k = 0; k < 4; k++) reg[k] = result[k][l];
-        write_colour(wk, x, y, reg);
+        if (d->stored) {
+            uint8_t *px = pixel(s, x, y);
+            if (px) pixfmt_halves_store(d->stored, px, reg);
+        } else {
+            write_colour(wk, x, y, reg);
+        }
     }
     LAP(T_STORE);
 #undef LAP
@@ -1134,7 +1214,11 @@ static int collect_passed(void *user, int x, int y, float depth, int clockwise,
  * shared out, left most threads waiting through most draws: a scene is
  * hundreds of draws and most of them are small. */
 
-#define TILE 64u                        /* pixels a side: 32 was no faster on sixteen threads or on thirty */
+/* Pixels a side. Measured on twenty-four threads: at 64 a target of 720 by
+ * 408 is 84 tiles, the threads on the slower cores are still on their last
+ * when the rest have none, and the fill of a frame took 78 ms; at 32 it
+ * took 59; at 16 the taking of tiles costs more than the evenness saves, 72. */
+#define TILE 32u
 
 typedef struct {
     gxm_draw_state s;                       /* as it stood when the draw was made */
@@ -1309,6 +1393,8 @@ void gxm_draw_add(const gxm_draw_state *s, unsigned primitive, unsigned index_si
     }
 
     d->wide = fp && fp->wide && !scalar;
+    d->wide_vertices = vp->wide && !scalar;
+    d->stored = d->wide ? stored_for(&q->s) : NULL;
     d->late = fp && (fp->gxp.flags & (GXP_FLAG_DISCARD | GXP_FLAG_DEPTH)) != 0;
     d->each = fp && (fp->gxp.flags & GXP_FLAG_FRAGCOLOR) && s->has_colour;
 
@@ -1445,7 +1531,13 @@ static void prepare(void *ctx, unsigned item, unsigned index) {
             wk->slot[v - low] = used;
             wk->vertex_index[used++] = v;
         }
-        for (uint32_t i = 0; i < used; i++) shade_vertex(&q->d, &wk->v, wk->vertex_index[i], instance, &wk->vertices[i]);
+        if (q->d.wide_vertices && !wk->b) wk->b = calloc(1, sizeof(*wk->b));
+        if (q->d.wide_vertices && wk->b) {
+            for (uint32_t i = 0; i < used; i += USSE_LANES)
+                shade_vertex_row(&q->d, wk, i, used - i < USSE_LANES ? used - i : USSE_LANES, instance);
+        } else {
+            for (uint32_t i = 0; i < used; i++) shade_vertex(&q->d, &wk->v, wk->vertex_index[i], instance, &wk->vertices[i]);
+        }
         if (!instance) {
             q->first_count = used < 4 ? used : 4;
             for (unsigned i = 0; i < q->first_count; i++) memcpy(q->first[i], wk->vertices[i].pos, 4 * sizeof(float));

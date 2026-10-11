@@ -2,8 +2,8 @@
  *
  * The recompiled program runs one guest thread at a time, by design; the
  * host's other cores are idle while it does. Some of the runtime's own work
- * divides cleanly into pieces that touch different memory: the bands of a
- * render target a draw covers. This runs such pieces on a small pool of
+ * divides cleanly into pieces that touch different memory: the draws of a
+ * scene, the tiles of what it draws to. This runs such pieces on a pool of
  * host threads while the caller, which is the guest thread that made the
  * call, takes part and waits. The guest sees a call that returned.
  */

@@ -17,6 +17,7 @@
 #define VITARECOMP_PIXFMT_H
 
 #include <stdint.h>
+#include <string.h>
 
 /* What kind of number a field holds. */
 enum {
@@ -71,6 +72,43 @@ extern int pixfmt_plain;
 /* The reverse, for the channels whose bit is set in `channels` (1 red,
  * 2 green, 4 blue, 8 alpha); the others keep what the pixel had. */
 void pixfmt_encode(const pixfmt *f, uint8_t *pixel, const float rgba[4], unsigned channels);
+
+/* --- a pixel from four halves, by lookup --------------------------------------------------
+ * A colour that arrives as four sixteen-bit floats and goes into a pixel
+ * whose fields are fractions, halves or small floats: what each field gets
+ * depends on one of the four halves and on nothing else, and there are
+ * 65,536 halves. So the long way, each half widened, held to 0..1 if the
+ * writer wants that, put on the display's curve if the surface is kept on
+ * it (the three colours, not alpha), then pixfmt_encode, can be done for
+ * every half once and looked up after. */
+typedef struct {
+    pixfmt    format;
+    uint8_t   on_curve, clamped;
+    uint8_t   bytes;                        /* of a pixel */
+    unsigned  fields;                       /* fields that take a channel */
+    uint8_t   channel[4], shift[4];         /* for each: which channel (0 red .. 3 alpha), and where the field lies */
+    uint16_t *becomes[4];                   /* and what each half becomes in it */
+    uint64_t  keep;                         /* the pixel's bits that are no channel's: left as they are */
+} pixfmt_halves;
+
+/* The tables for pixels of `f`, made the first time they are asked for and
+ * kept; NULL when a field of `f` is not such a function of one half (a
+ * whole float, a shared exponent) or there is no room for another format.
+ * Not to be called from two threads at once. */
+const pixfmt_halves *pixfmt_halves_for(const pixfmt *f, int on_curve, int clamped);
+
+/* Store a colour: halves 0 and 1 are the low and high of words[0], red and
+ * green; 2 and 3 of words[1], blue and alpha. All four channels are
+ * written. */
+static inline void pixfmt_halves_store(const pixfmt_halves *t, uint8_t *pixel, const uint32_t words[2]) {
+    uint64_t bits = 0;
+    if (t->keep) { memcpy(&bits, pixel, t->bytes); bits &= t->keep; }
+    for (unsigned k = 0; k < t->fields; k++) {
+        unsigned c = t->channel[k];
+        bits |= (uint64_t)t->becomes[k][(uint16_t)(words[c >> 1] >> (16 * (c & 1)))] << t->shift[k];
+    }
+    memcpy(pixel, &bits, t->bytes);
+}
 
 /* The curve between a display's values and light. */
 float pix_srgb_to_linear(float v);

@@ -191,10 +191,13 @@ in a few places. What it took, now that it draws:
 - **The shader path is an interpreter**, not a compiler: `src/usse.c`
   runs a program's bytecode as it is, once per vertex and once per
   pixel. It is slow and it is the definition (PLAN.md, milestones D and
-  E). The same file runs a fragment program for sixty-four pixels at
-  once where the program allows it, each register a row of words; a
-  test holds that form to the first, bit for bit, on instructions made
-  at random.
+  E). The same file runs a program for sixty-four pixels or sixty-four
+  vertices at once where the program allows it, each register a row of
+  words; a test holds that form to the first, bit for bit, on
+  instructions made at random. The few instructions with no form for a
+  row, an integer multiply-add, a load from memory, are run for each
+  lane of the row by the first interpreter itself, so that a vertex
+  program that fetches four bone matrices goes by rows everywhere else.
 
 `armrecomp gxp <file.gxp>` prints what the renderer makes of a program:
 its parameters, where each input arrives, and its code.

@@ -1693,8 +1693,10 @@ uint32_t usse_run(const usse_insn *code, uint32_t count, usse_state *s) {
  * for every lane (a secondary attribute, a constant, an immediate) is read
  * by the very functions above and copied along the row; one that differs is
  * read from the rows of its register with the same arithmetic in a loop.
- * What is not handled here is refused by usse_wide_can_run, and a program
- * with any of it runs a lane at a time. */
+ * A few instructions have no such loop and are run for each lane of the
+ * row by the interpreter above itself (wide_by_lane). What is handled
+ * neither way is refused by usse_wide_can_run, and a program with any of it
+ * runs a lane at a time from end to end. */
 
 #define LANES USSE_LANES
 
@@ -1950,6 +1952,13 @@ static int wide_operand_ok(const usse_operand *op, int dest) {
            op->bank == USSE_SPECIAL || op->bank == USSE_INVALID;
 }
 
+/* An operand of an instruction that is run a lane at a time inside a row:
+ * anything but the index registers, which are a lane's own and which a row
+ * does not keep. */
+static int lane_operand_ok(const usse_operand *op) {
+    return op->bank != USSE_INDEX && op->bank != USSE_INDEXED1 && op->bank != USSE_INDEXED2 && op->bank != USSE_PREDICATE;
+}
+
 static int wide_can(const usse_insn *in) {
     if (!usse_can_run(in)) return 0;
     switch (in->op) {
@@ -1982,8 +1991,11 @@ static int wide_can(const usse_insn *in) {
         return 1;
     case USSE_OP_SMLSI:
         return in->pred == USSE_PRED_NONE;     /* the increments are the row's, not a lane's */
+    case USSE_OP_IMAD16: case USSE_OP_IMAD32: case USSE_OP_LDR:
+        /* taken a lane at a time inside the row (wide_by_lane) */
+        return lane_operand_ok(&in->src0) && lane_operand_ok(&in->src1) && lane_operand_ok(&in->src2) && in_rows(in->dest.bank);
     default:
-        return 0;                               /* branches, indices, memory: a lane at a time */
+        return 0;                               /* branches, indices, stores to memory: a lane at a time */
     }
 }
 
@@ -1992,10 +2004,65 @@ int usse_wide_can_run(const usse_insn *code, uint32_t count) {
     return 1;
 }
 
+/* An instruction with no form for a row, run for each lane by the
+ * one-at-a-time interpreter itself: the registers it can reach are taken
+ * out of the rows into a state of that interpreter's, it is executed there,
+ * and what it wrote is put back. A program that is rows of arithmetic with
+ * a few of these in it, a vertex program that works out where four
+ * matrices are and loads them, then goes a row at a time everywhere else. */
+static void wide_by_lane(usse_wide *w, const usse_insn *in, const uint8_t *exec) {
+    static _Thread_local usse_state s;
+    const usse_operand *ops[4] = { &in->dest, &in->src0, &in->src1, &in->src2 };
+    struct { uint32_t (*rows)[LANES]; uint32_t *words; unsigned lo, hi; } part[4];
+    unsigned parts = 0, n = w->lanes;
+    int writes_rows = 0;
+    s.sa = (uint32_t *)w->sa;                   /* read, never written, by what is run this way */
+    s.env = w->env;
+    memcpy(s.inc, w->inc, sizeof(s.inc));
+    s.index[0] = s.index[1] = 0;
+    for (int k = 0; k < 4; k++) {
+        const usse_operand *op = ops[k];
+        uint32_t (*rows)[LANES] = op->bank == USSE_TEMP ? w->temp : op->bank == USSE_PA ? w->pa : op->bank == USSE_OUT ? w->out : NULL;
+        if (!rows) continue;
+        /* From the register it names, at each repeat as far on as the
+         * increments in force put it: a vector and a pair's second
+         * register from there, and for a load every word it loads. */
+        int64_t reach = 8 + (k == 0 && in->op == USSE_OP_LDR ? ((int64_t)in->a * in->b + 3) / 4 : 0);
+        int64_t lo = op->num, hi = lo + reach;          /* the register itself: a load does not move with the repeats */
+        for (int r = 0; r <= in->repeat; r++) {
+            int64_t at = (int64_t)op->num + repeat_offset(&s, in, op, r);
+            if (at < lo) lo = at;
+            if (at + reach > hi) hi = at + reach;
+        }
+        if (lo < 0) lo = 0;
+        if (hi > USSE_WORDS) hi = USSE_WORDS;
+        if (lo > hi) lo = hi;
+        part[parts].rows = rows;
+        part[parts].words = op->bank == USSE_TEMP ? s.temp : op->bank == USSE_PA ? s.pa : s.out;
+        part[parts].lo = (unsigned)lo; part[parts].hi = (unsigned)hi;
+        if (k == 0) writes_rows = 1;
+        parts++;
+    }
+    for (unsigned l = 0; l < n; l++) {
+        if (exec && !exec[l]) continue;
+        for (unsigned p = 0; p < parts; p++)
+            for (unsigned r = part[p].lo; r < part[p].hi; r++) part[p].words[r] = part[p].rows[r][l];
+        for (int i = 0; i < 16; i++) s.internal[i] = w->internal[i][l];
+        for (int i = 0; i < 4; i++) s.pred[i] = w->pred[i][l];
+        s.killed = 0;
+        execute(&s, in);
+        if (writes_rows) for (unsigned r = part[0].lo; r < part[0].hi; r++) part[0].rows[r][l] = part[0].words[r];
+        else for (int i = 0; i < 16; i++) w->internal[i][l] = s.internal[i];
+    }
+}
+
 static void wide_execute(usse_wide *w, const usse_insn *in, const uint8_t *exec) {
     wvalue a, b, c, out;                            /* a kilobyte each */
     unsigned n = w->lanes;
     switch (in->op) {
+    case USSE_OP_IMAD16: case USSE_OP_IMAD32: case USSE_OP_LDR:
+        wide_by_lane(w, in, exec);
+        return;
     case USSE_OP_MAD:
         for (int r = 0; r <= in->repeat; r++) {
             wide_load(w, &in->src0, in->mask, wide_offset(w, in, &in->src0, r), &a);

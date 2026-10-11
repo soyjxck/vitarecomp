@@ -179,10 +179,10 @@ first level:
 | New Game: chapter and difficulty | 1 scene, 17 draws |
 | "Start New Campaign?" | 1 scene, 28 draws |
 | Loading `igc_snake_temple_room_start` | the loading screen again, 7 scenes |
-| The level: the opening cinematic | 13 scenes, 255 draws (227 precomputed), 38,000 triangles, 5.3 million pixels, 110 ms |
+| The level: the opening cinematic | 13 scenes, 255 draws (227 precomputed), 38,000 triangles, 5.3 million pixels, 81 ms |
 | The first playable level, its first frame | 12 scenes, 544 draws (516 precomputed), 50,000 triangles, 6 million pixels |
 | The journal, opened on that level's first frame at a tutorial page | 1 scene, 16 draws, 2.3 million pixels |
-| Play: the level, the character run through it | 13 scenes, 546 draws (516 precomputed), 50,000 triangles, 5.4 million pixels, 120 ms |
+| Play: the level, the character run through it | 13 scenes, 546 draws (516 precomputed), 50,000 triangles, 5.4 million pixels, 85 ms |
 
 The level's picture was black, and the first reason was the ARM
 instruction set: the title carries some 8,500 instructions of hand-written
@@ -209,7 +209,7 @@ corner closes it, the chapter's title fades in over the level, and the
 left stick runs the character forward until the game opens the journal
 again, at jumping and climbing.
 
-What comes next: the levels at more than eight frames a second (milestone
+What comes next: the levels at more than twelve frames a second (milestone
 E), which is now the whole of the distance between this and playing; sound
 that can be
 heard, since the title streams it and the synthesiser plays it in silence;
@@ -330,7 +330,19 @@ Not there yet, in the order the title will want them:
    ms to 123 on a machine doing other work. `VITARECOMP_GXM_PROFILE`
    says where a frame's time goes now: samples and programs level, then
    the walk and the store, and a quarter of a frame is the title's own
-   code. What is left is in milestone E.
+   code. Four more things, of a morning: a result of four halves goes
+   into its pixel by lookup, since what each field of the pixel gets
+   depends on one half and there are 65,536 of those (the store, 210 ms
+   of the threads' time to 55); vertices go through their program
+   sixty-four at a time as pixels do, the loads of bone matrices taken
+   a lane at a time inside the row (the vertices of play, 15 ms of a
+   frame to 7); tiles are 32 pixels a side and not 64, which keeps
+   twenty-four threads busy to the end of a list (the fill, 78 ms to
+   59); and the pool's threads take their items by counting, with no
+   lock. A frame of the cinematic is 81 ms and of play 85 where the
+   morning began at 123, and the two minutes of the title that first
+   took twenty-seven minutes to draw take four. What is left is in
+   milestone E.
 2. Lines and points, depth bias, the mask-update program, multisampled
    targets, the YUV textures a movie arrives in, the transfer calls.
    Each is counted or named where it is skipped, none is silent.

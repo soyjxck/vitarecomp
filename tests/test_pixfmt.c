@@ -1,6 +1,7 @@
 /* test_pixfmt.c — pixel layouts, on pixels written here byte by byte. */
 
 #include "../src/pixfmt.h"
+#include "vitarecomp/half.h"
 
 #include <assert.h>
 #include <math.h>
@@ -147,12 +148,63 @@ static void test_colour(void) {
     printf("  colour surfaces                ok\n");
 }
 
+/* A pixel from four halves by lookup is the pixel the long way gives: for
+ * surfaces of bytes, of halves, of small floats beside two bits and of
+ * five, six and five bits, on the display's curve and off it, clamped
+ * first and not, every half in every channel once and then halves at
+ * random, into pixels that are not empty. A format with a whole float in
+ * it has no tables. */
+static void test_halves(void) {
+    static const uint32_t FORMATS[] = { 0x00000000u, 0x00001000u, 0x01000000u, 0x41000000u, 0x30000000u, 0xE0800000u };
+    uint64_t seed = 0x2545F4914F6CDD1Dull;
+    unsigned tried = 0;
+    for (size_t n = 0; n < sizeof(FORMATS) / sizeof(FORMATS[0]); n++) {
+        pixfmt f;
+        if (!pixfmt_colour(FORMATS[n], &f)) continue;
+        for (int on_curve = 0; on_curve < 2; on_curve++)
+            for (int clamped = 0; clamped < 2; clamped++) {
+                const pixfmt_halves *t = pixfmt_halves_for(&f, on_curve, clamped);
+                assert(t && t == pixfmt_halves_for(&f, on_curve, clamped));
+                for (uint32_t round = 0; round < 65536 + 20000; round++) {
+                    uint16_t h[4];
+                    for (int c = 0; c < 4; c++) {
+                        seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+                        h[c] = round < 65536 ? (uint16_t)(round + (uint32_t)c * 21845u) : (uint16_t)(seed >> 20);
+                    }
+                    uint32_t words[2] = { (uint32_t)h[0] | (uint32_t)h[1] << 16, (uint32_t)h[2] | (uint32_t)h[3] << 16 };
+                    uint8_t by_table[8], long_way[8];
+                    float c[4];
+                    memset(by_table, (int)(round * 37u), sizeof(by_table));
+                    memcpy(long_way, by_table, sizeof(long_way));
+                    for (int k = 0; k < 4; k++) {
+                        c[k] = vita_f16_to_f32(h[k]);
+                        if (clamped) c[k] = !(c[k] > 0.0f) ? 0.0f : c[k] > 1.0f ? 1.0f : c[k];
+                        if (on_curve && k < 3) c[k] = pix_linear_to_srgb(c[k]);
+                    }
+                    pixfmt_encode(&f, long_way, c, 15);
+                    pixfmt_halves_store(t, by_table, words);
+                    if (memcmp(by_table, long_way, sizeof(by_table))) {
+                        fprintf(stderr, "format %08X curve %d clamp %d halves %04X %04X %04X %04X\n", FORMATS[n], on_curve, clamped,
+                                h[0], h[1], h[2], h[3]);
+                        assert(0);
+                    }
+                }
+                tried++;
+            }
+    }
+    assert(tried >= 16);
+    pixfmt whole;
+    assert(pixfmt_texture(0x12000000u, &whole) && !pixfmt_halves_for(&whole, 0, 0));       /* one whole float */
+    printf("  four halves by lookup          ok\n");
+}
+
 int main(void) {
     printf("pixfmt:\n");
     test_bytes();
     test_packed();
     test_floats();
     test_colour();
+    test_halves();
     printf("all pixfmt tests passed\n");
     return 0;
 }

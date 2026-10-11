@@ -5,6 +5,7 @@
 #include "vitarecomp/half.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* --- building a description ------------------------------------------------------ */
@@ -371,4 +372,56 @@ void pixfmt_encode(const pixfmt *f, uint8_t *pixel, const float rgba[4], unsigne
         bits = (bits & ~(field_mask(n) << f->f[i].shift)) | ((x & field_mask(n)) << f->f[i].shift);
     }
     memcpy(pixel, &bits, f->bytes);
+}
+
+/* --- a pixel from four halves, by lookup (pixfmt.h) ---------------------------------------- */
+
+static pixfmt_halves g_halves[32];
+static unsigned g_halves_count;
+
+const pixfmt_halves *pixfmt_halves_for(const pixfmt *f, int on_curve, int clamped) {
+    on_curve = on_curve != 0; clamped = clamped != 0;
+    if (f->bytes > 8) return NULL;
+    for (int i = 0; i < f->fields; i++) {
+        unsigned kind = f->f[i].kind;
+        if (f->f[i].bits > 16 || (kind != PIX_UNORM && kind != PIX_SNORM && kind != PIX_F16 && kind != PIX_UF10 && kind != PIX_UF11))
+            return NULL;
+    }
+    for (unsigned i = 0; i < g_halves_count; i++)
+        if (!memcmp(&g_halves[i].format, f, sizeof(*f)) && g_halves[i].on_curve == on_curve && g_halves[i].clamped == clamped)
+            return &g_halves[i];
+    if (g_halves_count == sizeof(g_halves) / sizeof(g_halves[0])) return NULL;
+
+    pixfmt_halves *t = &g_halves[g_halves_count];
+    uint16_t cut[4] = { 0, 0, 0, 0 };
+    uint64_t taken = 0;
+    memset(t, 0, sizeof(*t));
+    t->format = *f;
+    t->on_curve = (uint8_t)on_curve; t->clamped = (uint8_t)clamped; t->bytes = f->bytes;
+    for (int i = 0; i < f->fields; i++) {
+        int ch = -1;
+        for (int c = 0; c < 4; c++) if (f->from[c] == i) { ch = c; break; }       /* the channel pixfmt_encode gives the field */
+        if (ch < 0) continue;
+        unsigned k = t->fields++;
+        t->channel[k] = (uint8_t)ch;
+        t->shift[k] = f->f[i].shift;
+        cut[k] = (uint16_t)field_mask(f->f[i].bits);
+        taken |= field_mask(f->f[i].bits) << f->f[i].shift;
+        t->becomes[k] = malloc(65536 * sizeof(uint16_t));
+        if (!t->becomes[k]) { while (t->fields) free(t->becomes[--t->fields]); return NULL; }
+    }
+    t->keep = field_mask(8 * f->bytes) & ~taken;
+    /* every half the long way, off the curve and on it, into a pixel of nothing */
+    for (uint32_t h = 0; h < 65536; h++) {
+        float v = vita_f16_to_f32((uint16_t)h), straight[4], bent[4];
+        uint64_t plain = 0, curved = 0;
+        if (clamped) v = !(v > 0.0f) ? 0.0f : v > 1.0f ? 1.0f : v;
+        for (int c = 0; c < 4; c++) { straight[c] = v; bent[c] = pix_linear_to_srgb(v); }
+        pixfmt_encode(f, (uint8_t *)&plain, straight, 15);
+        pixfmt_encode(f, (uint8_t *)&curved, bent, 15);
+        for (unsigned k = 0; k < t->fields; k++)
+            t->becomes[k][h] = (uint16_t)(((on_curve && t->channel[k] < 3 ? curved : plain) >> t->shift[k]) & cut[k]);
+    }
+    g_halves_count++;
+    return t;
 }

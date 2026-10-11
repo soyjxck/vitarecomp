@@ -1039,3 +1039,30 @@ pass that wrote the depth, 1,984 in the pass that tested against it.
     said so took three minutes, and without a process priority above
     the machine's other work it would have said nothing: two runs of the
     same build differed by more than the change.
+
+19. **The plan was to split the big draws; the measurement said which
+    draws.** With a draw to a thread, the vertices of play took 15 ms of
+    a frame for 107 ms of work, and the reason seemed plain: a list
+    cannot finish before its longest draw. Before building vertex
+    shading in pieces, one line was printed for the largest list: its
+    time, the sum of its draws, the longest draw. The longest was 5 ms,
+    of a list that took 7, and it was not long because it was large: it
+    was a character, a thousand vertices through a program that fetches
+    four bone matrices from memory, and one load from memory was enough
+    to send a whole program a vertex at a time. Running that one kind
+    of instruction for each lane inside the row took the longest draw
+    to a third and the step to 7 ms. No draw is split.
+
+20. **A test of random instructions had been lucky in its numbers.**
+    Adding three instruction formats to the list the two interpreters
+    are compared on changed which random words came up, and an old
+    instruction failed: a multiply of two of the instruction set's
+    constants. The last eight of those constants are not numbers, in two
+    bit patterns, and a product of two operands that are both not
+    numbers is one of the two, whichever the processor's rule about
+    operand order picks, which is the compiler's choice of order and is
+    made twice, once for each interpreter. Nothing is wrong with either.
+    The test now leaves out that one case and says why; and what a load
+    from memory finds, in the test, is made finite like everything else
+    it starts from, because a value that is not a number, once in a
+    register, meets another sooner or later.
