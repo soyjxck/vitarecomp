@@ -134,6 +134,28 @@ uint32_t vita_sched_threads(uint32_t *runnable) {
     return n;
 }
 
+void vita_sched_dump(FILE *f) {
+    static const char *const WAITS[] = { "nothing", "semaphore", "mutex", "condition", "the end of thread", "the clock", "SceUlt object" };
+    init_once();
+    /* not under the lock: this runs on the thread that holds the baton, at exit */
+    uint64_t now = now_us();
+    for (int i = 0; i < MAX_THREADS; i++) {
+        const vthread *t = &g_t[i];
+        if (t->state == T_FREE) continue;
+        uint32_t pc = t == g_cur ? vita_last_pc : t->regs.last_pc;
+        fprintf(f, "  thread 0x%08X %-20s ", t->uid, t->name);
+        if (t->state == T_WAITING) {
+            int kind = t->wait_kind >= 0 && t->wait_kind <= VW_ULT ? t->wait_kind : 0;
+            fprintf(f, "waits on %s", WAITS[kind]);
+            if (kind != VW_DELAY) fprintf(f, " 0x%08X", t->wait_obj);
+            if (t->wait_until) fprintf(f, ", %llu ms more at most", (unsigned long long)(t->wait_until > now ? (t->wait_until - now) / 1000 : 0));
+        } else {
+            fprintf(f, "%s", t->state == T_RUNNING ? "running" : t->state == T_READY ? "ready" : t->state == T_NEW ? "not started" : "ended");
+        }
+        fprintf(f, ", last at 0x%08X\n", pc);
+    }
+}
+
 uint32_t vita_sched_running(char *name, uint32_t cap) {
     init_once();
     mtx_lock(&g_mtx);

@@ -179,7 +179,7 @@ first level:
 | New Game: chapter and difficulty | 1 scene, 17 draws |
 | "Start New Campaign?" | 1 scene, 28 draws |
 | Loading `igc_snake_temple_room_start` | the loading screen again, 7 scenes |
-| The level | 13 scenes, 116 draws (90 precomputed), 11,600 triangles, 5.6 million pixels, 150 ms |
+| The level: the opening cinematic | 13 scenes, 255 draws (227 precomputed), 38,000 triangles, 5.3 million pixels, 320 ms |
 
 The level's picture was black, and the first reason was the ARM
 instruction set: the title carries some 8,500 instructions of hand-written
@@ -187,16 +187,19 @@ ARM-mode NEON, vertex and matrix work by the look of it, called from Thumb
 code through `blx`, and every call was a trap (300,000 of them in the
 level's first fourteen seconds). They are translated now
 (docs/ARCHITECTURE.md, "ARM, for what is written by hand"), and the scene
-is drawn: `VITARECOMP_GXM_SCENES` shows the temple and the character in
-the 720 by 408 buffer the tone mapper leaves. The display is black all the
-same. The last scene of a frame scales that buffer to the panel, draws a
-few hundred triangles of text over it, and then one more rectangle whose
-colour is its vertices' own: black, at full alpha. That is a fade, and the
-title is holding it. What it waits for is the next thing to find; the
-streamed sound it would play under an opening is the first suspect, since
-nothing reads a file once the level has loaded. After that the movie,
-which wants SceMp4's demultiplexer and the H.264 and AAC decoders behind
-`sceAvcdec` and `sceAudiodec`.
+was drawn, under a black rectangle the title laid over it last of all: a
+fade it would not lift. It was waiting for its sound. The thread that
+streams it had been created and never started, because the runtime
+cleared a condition variable's work area at twice its size and with it
+the thread's id (docs/LESSONS.md). With that thread running the level is
+what it is meant to be, the cinematic that opens the game.
+
+What comes next: the cinematic at more than three frames a second
+(milestone E); sound that can be heard, since the title now streams it and
+the synthesiser plays it in silence; the end of the cinematic and the
+first level a player moves in; and the logo movie, which wants SceMp4's
+demultiplexer and the H.264 and AAC decoders behind `sceAvcdec` and
+`sceAudiodec`.
 
 1. Accept FAGDec-decrypted `eboot.bin` and `*.suprx` (plain SCE ELF, the
    Vita3K input format) in `armrecomp info/extract`, in addition to fself.

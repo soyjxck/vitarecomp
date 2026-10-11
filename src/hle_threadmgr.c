@@ -425,8 +425,15 @@ void vita_hle_sceKernelDeleteCond(void) {
 
 /* Lightweight condition variables live in the caller's memory, like the
  * lightweight mutexes, and wait on one of those; word 1 of the work area
- * holds that mutex's address. */
-#define LWCOND_WORK_SIZE 32
+ * holds that mutex's address.
+ *
+ * The work area is sixteen bytes, half a mutex's. It was cleared as
+ * thirty-two here once, and a title's sound library keeps a condition, a
+ * thread's id and a mutex one after another in a record: creating the
+ * condition wiped the id of the thread created the line before, the start
+ * that followed started thread 0, and the title played its first level
+ * without the thread that streams its sound. */
+#define LWCOND_WORK_SIZE 16
 
 /* int sceKernelCreateLwCond(SceKernelLwCondWork *work, const char *name, SceUInt attr,
  *                           SceKernelLwMutexWork *mutex, const void *opt) */

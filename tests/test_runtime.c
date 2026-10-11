@@ -931,6 +931,36 @@ static void test_neon_shifts(void) {
     printf("  neon shifts, widen, narrow      ok\n");
 }
 
+void vita_hle_sceKernelCreateLwCond(void);
+void vita_hle_sceKernelCreateLwMutex(void);
+
+/* The work areas of the lightweight objects are the caller's memory, and a
+ * title packs other things against them: a create touches its own sixteen
+ * or thirty-two bytes and not a byte more. */
+static void test_work_areas(void) {
+    assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
+    vita_mem_bad_access = 0;
+    sp = 0x8100F000u;
+    uint32_t rec = 0x81001000u;
+    for (uint32_t k = 0; k < 0x80; k += 4) vita_write32(rec + k, 0xA5A5A5A5u);
+    vita_write32(sp, 0);                                     /* the fifth argument of each: no options */
+
+    /* a condition at +8, then a thread's id at +24, then a mutex at +32 */
+    r0 = rec + 32; r1 = 0; r2 = 2; r3 = 0; vita_hle_sceKernelCreateLwMutex();
+    assert(r0 == 0);
+    vita_write32(rec + 24, 0x40010107u);
+    r0 = rec + 8; r1 = 0; r2 = 0; r3 = rec + 32; vita_hle_sceKernelCreateLwCond();
+    assert(r0 == 0);
+    assert(vita_read32(rec + 4) == 0xA5A5A5A5u);             /* before it */
+    assert(vita_read32(rec + 24) == 0x40010107u);            /* after its sixteen bytes */
+    assert(vita_read32(rec + 28) == 0xA5A5A5A5u);
+    assert(vita_read32(rec + 32) == 0 && vita_read32(rec + 64) == 0xA5A5A5A5u);   /* the mutex's thirty-two, and no more */
+
+    assert(vita_mem_bad_access == 0);
+    vita_mem_free();
+    printf("  work areas keep to their size  ok\n");
+}
+
 void vita_hle_sceTouchPeek(void);
 void vita_hle_sceTouchSetSamplingState(void);
 void vita_hle_sceTouchGetPanelInfo(void);
@@ -1134,6 +1164,7 @@ int main(void) {
     test_time_slice();
     test_ngs();
     test_touch();
+    test_work_areas();
     test_save_dialog();
     printf("all runtime tests passed\n");
     return 0;

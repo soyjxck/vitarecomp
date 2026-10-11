@@ -26,6 +26,7 @@
 #define VITARECOMP_SCHED_H
 
 #include <stdint.h>
+#include <stdio.h>
 
 enum {
     VW_NONE = 0,
@@ -80,5 +81,12 @@ uint32_t vita_sched_running(char *name, uint32_t cap);
 
 /* How many threads exist and how many are runnable, for the host's summary. */
 uint32_t vita_sched_threads(uint32_t *runnable);
+
+/* Every thread on a line: its name, what it is doing or waiting on, and the
+ * guest address it was last at (which needs C emitted with
+ * VITARECOMP_EMIT_PC). A program that has stopped moving is usually a
+ * thread waiting for something nobody will give it, and this says which
+ * thread and what. */
+void vita_sched_dump(FILE *f);
 
 #endif /* VITARECOMP_SCHED_H */

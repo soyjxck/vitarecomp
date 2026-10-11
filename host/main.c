@@ -31,6 +31,7 @@
 #include "vitarecomp/mem.h"
 #include "vitarecomp/recomp_rt.h"
 #include "window.h"
+#include "../src/sched.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,6 +148,12 @@ static void summary(void) {
             g.frame, vita_display_flips(), vita_trap_count(),
             vita_dispatch_hits(), vita_dispatch_misses(), vita_mem_bad_access,
             vita_heap_used(), vita_heap_size());
+    /* with the trace on, where every thread was left */
+    const char *e = getenv("VITARECOMP_TRACE");
+    if (e && *e && *e != '0') {
+        fprintf(stderr, "vita_host: threads at the end:\n");
+        vita_sched_dump(stderr);
+    }
 }
 
 static void finish(int status) {

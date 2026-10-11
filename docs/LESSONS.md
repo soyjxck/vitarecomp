@@ -921,3 +921,22 @@ pass that wrote the depth, 1,984 in the pass that tested against it.
     above nine in ten over 96 words; the false ones that read cleanly at
     all sit at one half. The rule now stands in the gap between, and the
     table that found it took less time than either guess.
+
+12. **Sixteen bytes too many, since the first day.** With everything
+    translated the level was drawn and the screen stayed black: the title
+    kept a fade down over a scene of one character standing still.
+    Nothing trapped, nothing missed, no thread spun. What found it was a
+    list of the threads at the end of the run, one line each, and one of
+    them read "not started": the thread that streams the title's sound,
+    created when the sound library came up and never run. The library
+    keeps, in one record, a condition variable, the thread's id and a
+    mutex, in that order; it creates the thread, stores the id, creates
+    the mutex and the condition, and starts the id. The runtime's
+    condition variable cleared its work area on creation, 32 bytes of
+    it, and the structure is 16. The id was in the sixteen after. So the
+    title started thread 0, was told no, and went on without sound from
+    its first minute, through every menu, until it reached something
+    that waits for the sound to begin. A structure in the title's memory
+    is the title's to pack as it likes; a call may write the bytes the
+    SDK gives the structure and no others, and there is now a test that
+    looks at the bytes either side.

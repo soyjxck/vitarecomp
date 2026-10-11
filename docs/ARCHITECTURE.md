@@ -650,7 +650,7 @@ keeps its no-dependency promise.
 
 A recompiled program that is wrong is wrong quietly: valid C, no trap, a
 pixel in the wrong place or a pointer with a plausible value. The runtime
-carries six ways of looking, all off by default and free when off:
+carries seven ways of looking, all off by default and free when off:
 
 | Tool | Switch | What it shows |
 |---|---|---|
@@ -659,6 +659,7 @@ carries six ways of looking, all off by default and free when off:
 | Bad-access reports | `VITARECOMP_TRACE=1` | the first bad guest accesses, with the PC when the C records it |
 | Write watchpoint | `VITARECOMP_WATCH=<hex>` | every store that covers an address, with value and PC |
 | Sampling profile | `VITARECOMP_PROFILE=N`, C emitted with `VITARECOMP_EMIT_PC=1` | every N seconds: the share of samples per guest thread and per function, and the instruction each function was most often at |
+| Threads at the end | `VITARECOMP_TRACE=1` | when the run ends, every thread on a line: running, ready, never started, or waiting, on what and for how much longer, and the address it was last at |
 | Discovery, one address | `VITARECOMP_WHY=<hex>` on `armrecomp discover` or `emit` | what discovery made of that address each time it met it: walked, decoded inside another function, named by a stored word, refused and why |
 
 The order they are reached for is the order above: the function trace says
@@ -667,7 +668,11 @@ watchpoint says who touched the memory it read. The nine newlib bugs in
 LESSONS.md were found that way, none of them by reading the disassembly
 first. The profile is for the other failure, a program that says nothing:
 the trace is as silent while it computes as while it spins, and the samples
-tell the two apart in one period. And a dispatch miss names an address the
+tell the two apart in one period. A program that runs and yet does not
+get on is a third: nothing is wrong where it is looked at, and something
+it is waiting for never comes. The list of threads is for that one. A
+title that drew its level and kept the screen black had ten threads, and
+one line read "not started". And a dispatch miss names an address the
 output has no function for; the last row is how to ask why.
 
 ### Seeing what was drawn
