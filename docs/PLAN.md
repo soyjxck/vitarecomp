@@ -392,30 +392,26 @@ registers translates to HLSL and compiles, a scene's list of draws is
 drawn by Direct3D 11, and drawn both ways the two results agree list for
 list through the front end and the first minute of play, once the choice
 of a texture's level is taken out of the comparison. Surfaces stay on the
-card from one list to the next, and a frame of play takes 36 to 43 ms
-against the processor's 85. It is switched on by `VITARECOMP_GXM_GPU=1`
-and is not yet the default. What is left, in the order it pays:
+card from one list to the next, a draw's geometry from one frame to the
+next, and bytes that were not written are not read again: a frame of play
+takes 23 ms against the processor's 85, which is past the console's
+thirty a second. It is switched on by `VITARECOMP_GXM_GPU=1` and is not
+yet the default. What is left:
 
-1. **A draw's vertices** are made ready on the processor, each
-   attribute read from its stream and packed as the program's registers
-   want it: ten milliseconds a frame. The streams can go to the card as
-   they are and the program's first lines do the packing.
-2. **The draws themselves**: five milliseconds for 430, in state set
-   whether or not it changed and constants sent whole.
-3. **Textures looked over.** Thirty megabytes hashed a frame to know
-   that nothing changed. The pages a texture lies in can be watched for
-   writes instead, and the same watch on a surface the card holds says
-   when the title's own code reads it, which today is known only for
+1. **The picture shown from the card.** A window reads the frame back
+   out of the title's memory to stretch it; the card has it already.
+2. **A watch on the pages of a surface the card holds**, so that the
+   title's own code reading it is noticed. Today that is known only for
    surfaces of a few pixels, by sending those back always.
-4. **Two surfaces in one piece of memory.** The first title draws its
-   geometry buffer and a later picture into the same bytes, and each
-   frame each goes to memory to make way for the other. Neither is read
-   again; knowing that takes knowing a list covers its target.
-5. **Textures in their own form.** A compressed texture goes to the card
-   as four floats a texel; the card has the compressed forms.
-6. **The picture shown from the card**, not read back to be stretched
-   by the window.
-7. A second implementation of `src/gpu.h` for hosts without Direct3D.
+3. **The rest of a frame.** Sixteen of the 23 ms are neither the card
+   nor its path: the title's code and the graphics library's handling
+   of each draw as it is made. Not yet looked at.
+4. **Textures in their own form.** A compressed texture goes to the card
+   as four floats a texel; the card has the compressed forms. It costs
+   memory and the first frame of a scene, not the frames after.
+5. A second implementation of `src/gpu.h` for hosts without Direct3D.
+6. Making it the default where there is a card, with the processor's
+   renderer for what a card's path leaves and for checking it.
 
 ## Milestone F: first title repo
 

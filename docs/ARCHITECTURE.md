@@ -948,6 +948,40 @@ bytes.
   frame off a surface 32 pixels square, in its own code, and nothing
   says when.
 
+- **Two surfaces in one piece of memory** are both the card's, each
+  with the number of the list that drew it last. The first title draws
+  its geometry buffer, eight bytes a pixel, and later a picture of four
+  bytes a pixel into the first half of the same bytes. Neither is sent
+  to memory to make way for the other: if memory is ever asked for they
+  go in the order they were drawn, and a texture that lies wholly in
+  the one drawn last is a reading of that one.
+- **A list whose first draw covers its target** fetches nothing of what
+  the target held, and a surface that lay wholly within the target's
+  memory is gone unseen. `gxm_draw_covers` says so of a draw: one or two
+  triangles over the whole target, no test or mask that could spare a
+  pixel, a program that neither reads the pixel nor can discard it,
+  every channel written. The corners are worked out by the interpreter;
+  a title clears a surface this way, having no other.
+
+Two more things are kept, for the same reason: they were made last
+frame from the same bytes.
+
+- **A draw's geometry.** What a draw's vertices come to, each attribute
+  read from its stream and packed as the program's registers want it,
+  is kept on the card and found again by where the draw's indices and
+  streams lie and how they are read. A draw whose bytes change three
+  times running, particles written anew each frame, is made each time
+  and not kept.
+- **Bytes not written are not read again.** A texture from memory and a
+  draw's geometry are known by a hash of their bytes, and hashing thirty
+  megabytes a frame to learn that nothing changed was three
+  milliseconds. The program's memory keeps count of the pages written
+  (`vita_mem_moment`, `vita_mem_written` in `mem.h`; Windows does the
+  counting, for memory allocated for it), and bytes on pages not
+  written since they were last read are not looked at. Where nothing
+  keeps count the answer is "perhaps", and the bytes are hashed as
+  before.
+
 What is not yet known is when a title's own code reads a larger surface.
 The plan for that is a watch on the pages (PLAN.md).
 
@@ -959,8 +993,9 @@ sent back, and the stage profile (`VITARECOMP_GXM_PROFILE`) has a line
 for the card: what a frame spent looking over textures' bytes, making
 textures, on targets, on vertices, in draws, waiting.
 
-A frame of play takes 36 to 43 ms so (2026-10-11, Direct3D 11, GeForce
-RTX 4090), against 85 for the processor's renderer on twenty-four
-threads. Of that the title's own code is some fifteen; making each
-draw's vertices ready is ten, the draws themselves five, and hashing
-thirty megabytes of textures three.
+A frame of play takes 23 ms so (2026-10-11, Direct3D 11, GeForce RTX
+4090, nothing else at work on the machine), against 85 for the
+processor's renderer on twenty-four threads: forty-four frames a second
+where the console shows thirty. Three of the 23 are the card's path, by
+its own line of the profile; the card's drawing is about three more;
+the rest is the title and the graphics library around it.

@@ -46,6 +46,7 @@ int gxm_gpu_mode(void) {
 /* Why a list was left to the processor: each reason once. Returns 0. */
 static uint32_t g_refused;                  /* lists left to the processor */
 static uint32_t g_list = 1;                 /* counts lists */
+static uint32_t g_now;                      /* the moment the list in hand began at (mem.h): what was written before it is known */
 
 /* What the path costs, for the stage profile (VITARECOMP_GXM_PROFILE):
  * nanoseconds since the last report, by what was being done. */
@@ -361,6 +362,7 @@ typedef struct {
     uint8_t  key[16 * 16 + 24];             /* how the draw reads its streams, where its indices are, how many */
     uint64_t indices_stamp, vertices_stamp;
     uint32_t low, high;                     /* the vertices the indices reach */
+    uint32_t moment;                        /* when its bytes were last read (mem.h) */
     gpu_mesh *mesh;
     uint32_t bytes, used;
     uint8_t  strip, held, changes;          /* changes: times running its bytes were found different */
@@ -373,8 +375,9 @@ static mesh_slot g_meshes[MESHES];
 static uint64_t g_mesh_bytes;
 
 /* A hash of the vertices the indices reach, over the streams' records: each run of bytes once, however many
- * attributes are read from it. */
-static uint64_t vertices_stamp(const draw *d, uint32_t low, uint32_t high) {
+ * attributes are read from it. With `since` not NULL nothing is hashed: the answer is whether any of those bytes
+ * may have been written since that moment. */
+static uint64_t vertices_stamp(const draw *d, uint32_t low, uint32_t high, const uint32_t *since) {
     uint32_t lo[16], hi[16], n = 0;
     uint64_t h = 0;
     for (uint32_t i = 0; i < d->inputs; i++) {
@@ -389,9 +392,10 @@ static uint64_t vertices_stamp(const draw *d, uint32_t low, uint32_t high) {
         uint32_t avail = vita_mem_avail(lo[k]), bytes = hi[k] - lo[k];
         const uint8_t *p = avail ? vita_mem_ptr(lo[k], 1) : NULL;
         if (bytes > avail) bytes = avail;
-        if (p) h = fold(h ^ lo[k], p, bytes);
+        if (p && since) { if (vita_mem_written(p, bytes, *since)) return 1; }
+        else if (p) h = fold(h ^ lo[k], p, bytes);
     }
-    return h;
+    return since ? 0 : h;
 }
 
 /* The draw's geometry on the card: kept from before, or made now and kept;
@@ -421,9 +425,19 @@ static int mesh_for(const queued *q, uint32_t pa_words, gpu_mesh **mesh, uint32_
         slot->used = g_list;
         return geometry(q, pa_words, vertices, indices, strip);
     }
-    uint64_t indices_stamp = fold(0, index_data, index_bytes);
-    if (slot->held && slot->mesh && slot->indices_stamp == indices_stamp && slot->vertices_stamp == vertices_stamp(d, slot->low, slot->high)) {
+    /* bytes not written since they were last read are what they were, and are not read again */
+    if (slot->held && slot->mesh && !vita_mem_written(index_data, index_bytes, slot->moment) &&
+        !vertices_stamp(d, slot->low, slot->high, &slot->moment)) {
         slot->used = g_list;
+        *mesh = slot->mesh;
+        *strip = slot->strip;
+        g_mesh_hits++;
+        return 1;
+    }
+    uint64_t indices_stamp = fold(0, index_data, index_bytes);
+    if (slot->held && slot->mesh && slot->indices_stamp == indices_stamp && slot->vertices_stamp == vertices_stamp(d, slot->low, slot->high, NULL)) {
+        slot->used = g_list;
+        slot->moment = g_now;
         slot->changes = 0;
         *mesh = slot->mesh;
         *strip = slot->strip;
@@ -454,7 +468,8 @@ static int mesh_for(const queued *q, uint32_t pa_words, gpu_mesh **mesh, uint32_
     slot->indices_stamp = indices_stamp;
     slot->low = low;
     slot->high = high;
-    slot->vertices_stamp = vertices_stamp(d, low, high);
+    slot->vertices_stamp = vertices_stamp(d, low, high, NULL);
+    slot->moment = g_now;
     slot->strip = (uint8_t)*strip;
     slot->bytes = *vertices * pa_words * 4 + *indices * 4;
     if (g_mesh_bytes + slot->bytes > MESH_BYTES) {
@@ -846,9 +861,11 @@ typedef struct {
     const uint8_t *lo, *hi;                 /* the memory it lies in */
     gpu_surface *card;
     int      newer;                         /* the card holds what the title's memory does not yet */
-    int      agreed;                        /* otherwise: the two held the same when `stamp` was taken of memory */
+    int      agreed;                        /* otherwise: the two held the same when `stamp` was taken of memory, */
     uint64_t stamp;
+    uint32_t moment;                        /* at this moment (mem.h) */
     uint32_t version;                       /* counts the lists drawn to it: a texture made from it is made from one of them */
+    uint32_t drawn;                         /* the list that drew to it last: of two laid over each other in memory, which is on top */
     uint32_t used;
 } colour_record;
 
@@ -900,6 +917,7 @@ static int colour_back(colour_record *r) {
     r->newer = 0;
     r->agreed = 1;
     r->stamp = fold(0, r->lo, (size_t)(r->hi - r->lo));
+    r->moment = g_now;                              /* its own writing is after that moment: the bytes are hashed once more, then no more */
     g_ns[P_OUT] += now_ns() - at;
     g_backs++;
     return 1;
@@ -908,11 +926,17 @@ static int colour_back(colour_record *r) {
 static void depth_back(depth_record *d);
 
 /* Every surface the card holds newer than the memory between `lo` and `hi`
- * goes back into it; all of them when `lo` is NULL. */
+ * goes back into it; all of them when `lo` is NULL. Two that lie over each
+ * other in memory go in the order they were drawn, so that what was drawn
+ * last is what memory ends with. */
 static void surfaces_back(const uint8_t *lo, const uint8_t *hi, const colour_record *but) {
-    for (unsigned i = 0; i < g_colour_count; i++) {
-        colour_record *r = &g_colours[i];
-        if (r != but && r->newer && (!lo || (r->lo < hi && r->hi > lo))) colour_back(r);
+    for (;;) {
+        colour_record *first = NULL;
+        for (unsigned i = 0; i < g_colour_count; i++) {
+            colour_record *r = &g_colours[i];
+            if (r != but && r->newer && (!lo || (r->lo < hi && r->hi > lo)) && (!first || r->drawn < first->drawn)) first = r;
+        }
+        if (!first || !colour_back(first)) break;
     }
     for (unsigned i = 0; i < g_depth_count; i++) {
         depth_record *d = &g_depths[i];
@@ -1410,6 +1434,7 @@ typedef struct {
     uint32_t words[4], data, palette;
     uint64_t stamp;
     uint32_t checked, used;                 /* the list it was last compared in, and drawn with */
+    uint32_t moment;                        /* when its bytes were last read (mem.h): not written since, not read again */
     gpu_texture *texture;
     const void *from;                       /* made on the card from this surface's record, not from memory; NULL otherwise */
     uint32_t from_version;                  /* as the surface stood after so many lists */
@@ -1590,9 +1615,21 @@ static gpu_texture *texture_for(const gxm_tex *t, const uint32_t words[4]) {
     for (unsigned i = 0; i < g_depth_count; i++)
         if (g_depths[i].lo <= lo && lo < g_depths[i].hi && (!within || g_depths[i].hi > within)) within = g_depths[i].hi;
     if (within && within < hi) hi = within;
+    /* Two surfaces the card holds, laid over each other where the texture reads: what it reads is what memory would
+     * hold of both. If the one drawn last holds all the texture's bytes, that is that one, and the texture is a
+     * reading of it; if not, memory is asked. */
+    colour_record *top = NULL;
+    unsigned over = 0;
     for (unsigned i = 0; i < g_colour_count; i++) {
         colour_record *r = &g_colours[i];
         if (!r->newer || r->lo >= hi || r->hi <= lo) continue;
+        over++;
+        if (!top || r->drawn > top->drawn) top = r;
+    }
+    if (over > 1 && !(top->lo <= lo && top->hi >= hi)) { surfaces_back(lo, hi, NULL); top = NULL; }
+    for (unsigned i = 0; i < g_colour_count; i++) {
+        colour_record *r = &g_colours[i];
+        if (!r->newer || r->lo >= hi || r->hi <= lo || (over > 1 && r != top)) continue;
         gpu_texture *made = view_for(slot, t, r, NULL);
         if (made) return made;
         colour_back(r);
@@ -1605,13 +1642,19 @@ static gpu_texture *texture_for(const gxm_tex *t, const uint32_t words[4]) {
         depth_back(d);
     }
 
-    /* from memory. Nothing is written while a list is being made ready: once a list is enough */
+    /* from memory. Nothing is written while a list is being made ready: once a list is enough; and bytes that have
+     * not been written since they were last read are not read again */
     if (!slot->from && slot->texture && slot->checked == g_list) return slot->texture;
+    if (!slot->from && slot->texture && !vita_mem_written(t->base, t->bytes < t->avail ? t->bytes : t->avail, slot->moment) &&
+        !(t->pal && vita_mem_written(t->pal, 1024, slot->moment))) {
+        slot->checked = g_list;
+        return slot->texture;
+    }
     uint64_t began = now_ns();
     uint64_t stamp = content_stamp(t);
     g_ns[P_HASH] += now_ns() - began;
     g_hashed += t->bytes < t->avail ? t->bytes : t->avail;
-    if (!slot->from && slot->texture && slot->stamp == stamp) { slot->checked = g_list; return slot->texture; }
+    if (!slot->from && slot->texture && slot->stamp == stamp) { slot->checked = g_list; slot->moment = g_now; return slot->texture; }
     retire(slot->texture);
     slot->from = NULL;
     began = now_ns();
@@ -1620,6 +1663,7 @@ static gpu_texture *texture_for(const gxm_tex *t, const uint32_t words[4]) {
     g_made++;
     slot->stamp = stamp;
     slot->checked = g_list;
+    slot->moment = g_now;
     return slot->texture;
 }
 
@@ -1640,6 +1684,7 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
     static uint32_t shaders_cap;
     g_aside.held = 0;
     g_list++;
+    g_now = vita_mem_moment();
     retired_go();
 
     /* --- is it a list the card's path draws as the processor's would? --- */
@@ -1698,12 +1743,35 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
         record = colour_for(s0, &way);
         if (!record) return refuse("the card would not take a target of %u by %u", width, height);
         colour = record->card;
+        /* A list whose first draw covers the target leaves nothing of what the target held: nothing is fetched for it. */
+        int covers = keeping() && shaders[0].fragment && gxm_draw_covers(list[0]);
         whole = keeping() && !record->newer ? whole_of(record) : NULL;
-        if (whole && gpu_surface_copy_corner(colour, whole->card, width, height)) whole = NULL;
-        /* the same memory in another form, held newer by the card, goes into memory before this form is read from it */
-        if (!whole) surfaces_back(record->lo, record->hi, record);
-        if (!whole && !record->newer) {
-            /* memory holds the surface: the card's is filled from it unless the two still agree */
+        if (whole && !covers && gpu_surface_copy_corner(colour, whole->card, width, height)) whole = NULL;
+        if (!whole && covers) {
+            /* Nor is anything sent to memory to make way. Another surface the card holds that lies wholly within this
+             * one's memory is gone, unseen; one that lies partly over it stays where it is, this one drawn over it, and
+             * the two go to memory in that order if memory is ever asked for. */
+            for (unsigned i = 0; i < g_colour_count; i++) {
+                colour_record *o = &g_colours[i];
+                if (o == record || !o->newer || o->lo < record->lo || o->hi > record->hi) continue;
+                o->newer = 0;
+                o->agreed = 0;
+                forget_views_of(o);
+            }
+            record->agreed = 0;
+        } else if (!whole) {
+            /* The same memory in another form, held newer by the card, goes into memory before this form is read from
+             * it; and this one with it, in its turn, if one drawn later lies over it. */
+            int under = 0;
+            for (unsigned i = 0; i < g_colour_count; i++) {
+                const colour_record *o = &g_colours[i];
+                if (o != record && o->newer && o->lo < record->hi && o->hi > record->lo && o->drawn > record->drawn) under = 1;
+            }
+            surfaces_back(record->lo, record->hi, record->newer && under ? NULL : record);
+        }
+        if (!whole && !covers && !record->newer &&
+            !(record->agreed && !vita_mem_written(record->lo, (size_t)(record->hi - record->lo), record->moment))) {
+            /* memory holds the surface, and may have been written: the card's is filled from it unless the two still agree */
             uint64_t stamp = fold(0, record->lo, (size_t)(record->hi - record->lo));
             if (!(record->agreed && stamp == record->stamp)) {
                 colour_in(s0, &way, g_colour_rows);
@@ -1715,6 +1783,7 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
             }
             record->agreed = 1;
             record->stamp = stamp;
+            record->moment = g_now;
         }
     } else if (way.mode) {
         colour = spare_for(way.format, width, height);
@@ -1890,11 +1959,13 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
     if (record && whole && !gpu_surface_copy_corner(whole->card, colour, width, height)) {
         /* drawn through the larger surface it is a corner of: that one has it, and this one holds nothing of its own */
         whole->version++;
+        whole->drawn = g_list;
         record->agreed = 0;
     } else if (record) {
         record->newer = 1;
         record->agreed = 0;
         record->version++;
+        record->drawn = g_list;
         /* A title's own code reads what it has drawn, too, and nothing says when: the brightness a frame came out at,
          * off a surface of a few pixels, to set the next frame's exposure by. What the card holds of a surface that
          * small is put in memory at once; it costs little, and there is no telling otherwise. */

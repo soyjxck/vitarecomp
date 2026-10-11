@@ -462,6 +462,101 @@ static void shade_vertex(const draw *d, stage *g, uint32_t index, uint32_t insta
     if (d->w_at >= 0) out->var[d->w_at] = out->pos[3];
 }
 
+static uint32_t index_at(const uint8_t *data, unsigned size, uint32_t i);
+
+int gxm_draw_covers(const queued *q) {
+    const gxm_draw_state *s = &q->s;
+    const gxm_program *fp = s->fragment;
+    const gxm_face *front = &s->face[0], *back = &s->face[s->two_sided ? 1 : 0];
+    const uint8_t *data = vita_mem_ptr(q->indices, q->count * q->index_size);
+    int triangles = q->primitive == GXM_TRIANGLES ? (int)q->count / 3 : (int)q->count - 2;
+    if (!s->has_colour || !fp || !data || q->instances != 1 || q->count < 3 || triangles < 1 || triangles > 2) return 0;
+    if (q->primitive != GXM_TRIANGLES && q->primitive != GXM_TRIANGLE_STRIP && q->primitive != GXM_TRIANGLE_FAN) return 0;
+    if (q->primitive == GXM_TRIANGLES && q->count % 3) return 0;
+    /* nothing that could spare a pixel, or keep any of what it held */
+    if (front->program_off || back->program_off || front->depth_func != 7 || back->depth_func != 7 ||
+        front->stencil_func != 7 || back->stencil_func != 7) return 0;
+    if (fp->gxp.flags & (GXP_FLAG_DISCARD | GXP_FLAG_FRAGCOLOR)) return 0;
+    if (!(fp->gxp.flags & GXP_FLAG_NATIVECOLOR) && ((fp->blend[1] & 15) || (fp->blend[1] >> 4))) return 0;
+    if ((fp->blend[0] & 15) != 15) return 0;
+    if (q->r.clip_x0 > 0 || q->r.clip_y0 > 0 || q->r.clip_x1 < (int)s->width || q->r.clip_y1 < (int)s->height) return 0;
+
+    /* its corners on the screen */
+    static stage v;                                 /* too large for the stack of a thread that is the title's */
+    static raster_vertex shaded;
+    float x[6], y[6], width = (float)s->width, height = (float)s->height;
+    v = q->d.v;
+    v.cache = NULL;
+    v.counters = &gxm_counters;
+    v.env.user = &v;
+    v.st.sa = v.sa;
+    v.st.env = &v.env;
+    for (uint32_t i = 0; i < q->count; i++) {
+        shade_vertex(&q->d, &v, index_at(data, q->index_size, i), 0, &shaded);
+        if (!(shaded.pos[3] > 1e-6f)) return 0;
+        x[i] = q->r.x_offset + q->r.x_scale * shaded.pos[0] / shaded.pos[3];
+        y[i] = q->r.y_offset + q->r.y_scale * shaded.pos[1] / shaded.pos[3];
+        if (x[i] != x[i] || y[i] != y[i]) return 0;
+    }
+    int corner[2][3], kept = 0;
+    for (int t = 0; t < triangles; t++) {
+        int a = q->primitive == GXM_TRIANGLES ? 3 * t : q->primitive == GXM_TRIANGLE_FAN ? 0 : t;
+        int b = q->primitive == GXM_TRIANGLES ? 3 * t + 1 : t + 1, c = q->primitive == GXM_TRIANGLES ? 3 * t + 2 : t + 2;
+        if (q->primitive == GXM_TRIANGLE_STRIP && (t & 1)) { int swap = a; a = b; b = swap; }
+        float area = (x[b] - x[a]) * (y[c] - y[a]) - (y[b] - y[a]) * (x[c] - x[a]);
+        int clockwise = area > 0.0f;
+        if (area == 0.0f) return 0;
+        if ((q->r.cull == RASTER_CULL_CW && clockwise) || (q->r.cull == RASTER_CULL_CCW && !clockwise)) return 0;
+        corner[kept][0] = a; corner[kept][1] = b; corner[kept][2] = c;
+        kept++;
+    }
+    /* one triangle that holds the target's four corners holds the target */
+    for (int t = 0; t < kept; t++) {
+        const int *k = corner[t];
+        int holds = 1;
+        for (int p = 0; p < 4 && holds; p++) {
+            float px = (p & 1) ? width : 0.0f, py = (p & 2) ? height : 0.0f, sign = 0.0f;
+            for (int e = 0; e < 3 && holds; e++) {
+                int i0 = k[e], i1 = k[(e + 1) % 3];
+                float side = (x[i1] - x[i0]) * (py - y[i0]) - (y[i1] - y[i0]) * (px - x[i0]);
+                if (side == 0.0f) continue;
+                if (sign == 0.0f) sign = side;
+                else if ((side > 0.0f) != (sign > 0.0f)) holds = 0;
+            }
+        }
+        if (holds) return 1;
+    }
+    if (kept != 2) return 0;
+    /* two that make an upright rectangle between them: four places, on two columns and two rows, each triangle
+     * three of them and the two not the same three */
+    float left = x[0], right = x[0], top = y[0], bottom = y[0];
+    for (uint32_t i = 1; i < q->count; i++) {
+        if (x[i] < left) left = x[i];
+        if (x[i] > right) right = x[i];
+        if (y[i] < top) top = y[i];
+        if (y[i] > bottom) bottom = y[i];
+    }
+    unsigned places[2] = { 0, 0 };
+    for (int t = 0; t < 2; t++)
+        for (int e = 0; e < 3; e++) {
+            float px = x[corner[t][e]], py = y[corner[t][e]];
+            int col = fabsf(px - left) < 0.01f ? 0 : fabsf(px - right) < 0.01f ? 1 : -1;
+            int row = fabsf(py - top) < 0.01f ? 0 : fabsf(py - bottom) < 0.01f ? 1 : -1;
+            if (col < 0 || row < 0) return 0;
+            places[t] |= 1u << (row * 2 + col);
+        }
+    /* three of the four each, both diagonals' ends between them, and not the same three */
+    if ((places[0] | places[1]) != 15u || places[0] == places[1] || places[0] == 15u || places[1] == 15u) return 0;
+    for (int t = 0; t < 2; t++) {
+        unsigned n = (places[t] & 1) + ((places[t] >> 1) & 1) + ((places[t] >> 2) & 1) + ((places[t] >> 3) & 1);
+        if (n != 3) return 0;
+    }
+    /* the place each lacks is opposite the other's: they meet along a diagonal */
+    unsigned lacks0 = 15u & ~places[0], lacks1 = 15u & ~places[1];
+    if (!((lacks0 == 1u && lacks1 == 8u) || (lacks0 == 8u && lacks1 == 1u) || (lacks0 == 2u && lacks1 == 4u) || (lacks0 == 4u && lacks1 == 2u))) return 0;
+    return left <= 0.01f && top <= 0.01f && right >= width - 0.01f && bottom >= height - 0.01f;
+}
+
 /* --- the fragment stage ---------------------------------------------------------------- */
 
 /* The four floats of an interpolated quantity at this pixel, and how they

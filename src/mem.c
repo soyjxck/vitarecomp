@@ -13,6 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 uint32_t vita_mem_bad_access;
 
 static uint8_t *g_mem;
@@ -48,9 +53,60 @@ static void bad(uint32_t addr, uint32_t len) {
     }
 }
 
+/* --- which pages have been written --------------------------------------------------------------
+ * Windows keeps count for memory that asks for it when it is allocated:
+ * the pages written since the count was last taken. Each taking is a
+ * moment, and a page remembers the last moment it was found written at. */
+
+#define PAGE 4096u
+
+static uint32_t *g_page_moment;             /* a page: the last moment it was found written at; NULL where nothing keeps count */
+static uint32_t  g_moment = 1;
+
+#ifdef _WIN32
+static uint8_t *region_make(size_t size) {
+    uint8_t *p = (uint8_t *)VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE);
+    if (p) g_page_moment = (uint32_t *)calloc(size / PAGE + 1, sizeof(uint32_t));
+    return p;
+}
+static void region_free(uint8_t *p) { if (p) VirtualFree(p, 0, MEM_RELEASE); }
+
+uint32_t vita_mem_moment(void) {
+    static void *written[16384];
+    if (!g_mem || !g_page_moment) return g_moment;
+    g_moment++;
+    for (;;) {
+        ULONG_PTR count = sizeof(written) / sizeof(written[0]);
+        DWORD granularity = 0;
+        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, g_mem, g_size, written, &count, &granularity)) {
+            /* the count cannot be had: nothing is known, and everything may have been written */
+            free(g_page_moment);
+            g_page_moment = NULL;
+            break;
+        }
+        for (ULONG_PTR i = 0; i < count; i++) g_page_moment[(size_t)((uint8_t *)written[i] - g_mem) / PAGE] = g_moment;
+        if (count < sizeof(written) / sizeof(written[0])) break;
+    }
+    return g_moment;
+}
+#else
+static uint8_t *region_make(size_t size) { return (uint8_t *)calloc(size, 1); }
+static void region_free(uint8_t *p) { free(p); }
+uint32_t vita_mem_moment(void) { return g_moment; }
+#endif
+
+int vita_mem_written(const void *bytes, size_t count, uint32_t since) {
+    const uint8_t *p = (const uint8_t *)bytes;
+    if (!g_page_moment || !p || p < g_mem || p + count > g_mem + g_size) return 1;
+    if (!count) return 0;
+    size_t first = (size_t)(p - g_mem) / PAGE, last = (size_t)(p - g_mem + count - 1) / PAGE;
+    for (size_t i = first; i <= last; i++) if (g_page_moment[i] > since) return 1;
+    return 0;
+}
+
 int vita_mem_init(uint32_t base, size_t size) {
     vita_mem_free();
-    g_mem = (uint8_t *)calloc(size, 1);
+    g_mem = region_make(size);
     if (!g_mem) return 1;
     g_base = base;
     g_size = size;
@@ -62,7 +118,9 @@ int vita_mem_init(uint32_t base, size_t size) {
 }
 
 void vita_mem_free(void) {
-    free(g_mem);
+    region_free(g_mem);
+    free(g_page_moment);
+    g_page_moment = NULL;
     g_mem = NULL;
     g_base = 0;
     g_size = 0;

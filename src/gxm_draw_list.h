@@ -75,4 +75,13 @@ typedef struct {
  * packed as the program's parameter says. */
 void gxm_draw_vertex_words(const draw *d, uint32_t index, uint32_t instance, uint32_t *pa);
 
+/* Whether a draw leaves no pixel of its target's colour as it was: one or
+ * two triangles that cover the target, no test, clip or mask that could
+ * spare a pixel, a program that neither reads the pixel nor can discard
+ * it, every channel written and nothing blended. A title clears a surface
+ * this way, having no other; and whoever would fetch what the surface held
+ * before such a draw need not. The corners are worked out here, by the
+ * interpreter: it is a handful of vertices. */
+int gxm_draw_covers(const queued *q);
+
 #endif /* VITARECOMP_GXM_DRAW_LIST_H */

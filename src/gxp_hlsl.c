@@ -701,7 +701,7 @@ static void emit(gen *g, const usse_insn *in) {
             }
             }
             val out = new_val(g, K_UINT);
-            { char masked[300]; snprintf(masked, sizeof(masked), "(%s) & 0x%08Xu", e, low); local(g, &out, masked); }
+            { char masked[560]; snprintf(masked, sizeof(masked), "(%s) & 0x%08Xu", e, low); local(g, &out, masked); }
             store(g, &in->dest, &out, 1, OFF(&in->dest, r));
         }
         return;

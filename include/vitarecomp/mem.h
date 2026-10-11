@@ -39,6 +39,19 @@ void *vita_mem_ptr(uint32_t addr, uint32_t len);
  * much is there is a legitimate question. */
 uint32_t vita_mem_avail(uint32_t addr);
 
+/* What has been written. Whoever keeps a copy of some of the program's
+ * memory, a texture on a graphics card, wants to know that the bytes are
+ * still what was copied without reading them all again. vita_mem_moment
+ * gives a number that grows, and brings up to date what is known of which
+ * pages have been written; vita_mem_written says whether any byte of a run
+ * may have been written since a moment was asked for. "May": where the
+ * system keeps no such count the answer is always yes, and the caller
+ * reads the bytes as it would have. So: ask for a moment, read the bytes;
+ * they are known to be the same for as long as vita_mem_written says no
+ * of that moment. */
+uint32_t vita_mem_moment(void);
+int vita_mem_written(const void *bytes, size_t count, uint32_t since);
+
 /* The reads and writes of the program itself. A recompiled title makes a
  * hundred million of them a second, so the one that lands in the region,
  * which is every one of a program that is right, is done in line: a
