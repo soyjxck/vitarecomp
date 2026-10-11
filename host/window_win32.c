@@ -14,6 +14,13 @@
  * for them: the arrows are the directional pad, W A S D the left stick and
  * I J K L the right, X cross, C circle, Z square, V triangle, Q and E the
  * shoulder buttons, Enter START and Shift (or Backspace) SELECT.
+ *
+ * A controller is read as well, when there is one: the first that XInput
+ * reports. Its buttons are added to the keyboard's and its sticks are the
+ * sticks wherever the keyboard is not holding one. The library is looked
+ * for by name when the window opens, so the host links nothing for it and
+ * runs the same where it is absent. Like the keys, a pad is listened to
+ * only while the window has the focus.
  */
 
 #include "window.h"
@@ -22,6 +29,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,6 +43,7 @@ static struct {
     volatile LONG    buttons, closed;
     volatile LONG    finger;            /* bit 31 while the button is held; y above x, eleven bits each */
     volatile LONG    tilt;              /* the eight stick keys held, a bit each */
+    volatile LONG    focused;
     char             title[256];
     LARGE_INTEGER    freq, next;
 } W;
@@ -49,6 +58,75 @@ static const struct { WPARAM key; uint32_t bit; } KEYS[] = {
 
 /* The stick keys: left, right, up, down of the left stick, then of the right. */
 static const WPARAM TILTS[8] = { 'A', 'D', 'W', 'S', 'J', 'L', 'I', 'K' };
+
+/* --- a controller --------------------------------------------------------------------
+ * XInput's state of a pad, as its header gives it; declared here so that
+ * nothing of the library is needed to build. */
+typedef struct { WORD buttons; BYTE left_trigger, right_trigger; SHORT lx, ly, rx, ry; } pad_buttons;
+typedef struct { DWORD packet; pad_buttons pad; } pad_state;
+typedef DWORD (WINAPI *pad_get_state)(DWORD, pad_state *);
+
+static struct {
+    pad_get_state get;
+    int           looked;               /* for the library */
+    int           have, slot;           /* a pad answered, and which */
+    DWORD         read_at, look_at;     /* when it was last read; when to look for one again */
+    pad_buttons   now;
+} P;
+
+static const struct { WORD pad; uint32_t bit; } PAD_BUTTONS[] = {
+    { 0x0001, VITA_CTRL_UP },       { 0x0002, VITA_CTRL_DOWN },     { 0x0004, VITA_CTRL_LEFT },
+    { 0x0008, VITA_CTRL_RIGHT },    { 0x0010, VITA_CTRL_START },    { 0x0020, VITA_CTRL_SELECT },
+    { 0x0040, VITA_CTRL_L3 },       { 0x0080, VITA_CTRL_R3 },       { 0x0100, VITA_CTRL_LTRIGGER },
+    { 0x0200, VITA_CTRL_RTRIGGER }, { 0x1000, VITA_CTRL_CROSS },    { 0x2000, VITA_CTRL_CIRCLE },
+    { 0x4000, VITA_CTRL_SQUARE },   { 0x8000, VITA_CTRL_TRIANGLE },
+};
+
+/* The pad as it is now. Read at most every other millisecond, and when
+ * none answers, looked for again once a second: asking after a pad that is
+ * not there is slow. */
+static const pad_buttons *pad_read(void) {
+    static const pad_buttons none;
+    DWORD t = GetTickCount();
+    if (!P.looked) {
+        static const char *const NAMES[] = { "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll" };
+        P.looked = 1;
+        for (int i = 0; i < 3 && !P.get; i++) {
+            HMODULE lib = LoadLibraryA(NAMES[i]);
+            if (lib) P.get = (pad_get_state)(void *)GetProcAddress(lib, "XInputGetState");
+        }
+    }
+    if (!P.get || !W.focused) return &none;
+    if (P.have && t - P.read_at < 2) return &P.now;
+    if (!P.have && (LONG)(t - P.look_at) < 0) return &none;
+    pad_state st;
+    for (int i = 0; i < 4; i++) {
+        int slot = P.have ? P.slot : i;
+        memset(&st, 0, sizeof(st));
+        if (P.get((DWORD)slot, &st) == ERROR_SUCCESS) {
+            P.now = st.pad; P.slot = slot; P.have = 1; P.read_at = t;
+            return &P.now;
+        }
+        if (P.have) break;              /* the one there was has gone */
+    }
+    P.have = 0;
+    P.look_at = t + 1000;
+    return &none;
+}
+
+/* A stick of the pad as the console reports one: 128 at rest, 0 left or up.
+ * Inside the ring a stick does not leave at rest, nothing; outside it, from
+ * nothing at the ring to all the way at the edge. */
+static void pad_stick(SHORT sx, SHORT sy, int dead, uint8_t *x, uint8_t *y) {
+    double fx = (double)sx, fy = -(double)sy, reach = sqrt(fx * fx + fy * fy);
+    *x = *y = 128;
+    if (reach <= (double)dead) return;
+    double scale = (reach - dead) / (32767.0 - dead) / reach;
+    if (scale * reach > 1.0) scale = 1.0 / reach;
+    int vx = 128 + (int)lround(fx * scale * 127.0), vy = 128 + (int)lround(fy * scale * 127.0);
+    *x = (uint8_t)(vx < 0 ? 0 : vx > 255 ? 255 : vx);
+    *y = (uint8_t)(vy < 0 ? 0 : vy > 255 ? 255 : vy);
+}
 
 static void key(WPARAM k, int down) {
     for (size_t i = 0; i < sizeof(KEYS) / sizeof(KEYS[0]); i++) {
@@ -126,7 +204,12 @@ static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         key(wp, 1);
         return 0;
     case WM_KEYUP:   key(wp, 0); return 0;
-    case WM_KILLFOCUS: InterlockedExchange(&W.buttons, 0); InterlockedExchange(&W.tilt, 0); return 0;
+    case WM_SETFOCUS: InterlockedExchange(&W.focused, 1); return 0;
+    case WM_KILLFOCUS:
+        InterlockedExchange(&W.focused, 0);
+        InterlockedExchange(&W.buttons, 0);
+        InterlockedExchange(&W.tilt, 0);
+        return 0;
     case WM_LBUTTONDOWN: SetCapture(h); finger(h, lp); return 0;
     case WM_MOUSEMOVE: if (W.finger < 0) finger(h, lp); return 0;
     case WM_LBUTTONUP: ReleaseCapture(); return 0;
@@ -243,13 +326,25 @@ void vita_window_fullscreen(void) {
     if (W.hwnd) PostMessageA(W.hwnd, WM_WHOLE_SCREEN, 0, 0);
 }
 
-uint32_t vita_window_buttons(void) { return (uint32_t)W.buttons; }
+uint32_t vita_window_buttons(void) {
+    const pad_buttons *pad = pad_read();
+    uint32_t held = (uint32_t)W.buttons;
+    for (size_t i = 0; i < sizeof(PAD_BUTTONS) / sizeof(PAD_BUTTONS[0]); i++)
+        if (pad->buttons & PAD_BUTTONS[i].pad) held |= PAD_BUTTONS[i].bit;
+    /* the console has one shoulder button a side: a pad's trigger is the same button */
+    if (pad->left_trigger > 30) held |= VITA_CTRL_LTRIGGER;
+    if (pad->right_trigger > 30) held |= VITA_CTRL_RTRIGGER;
+    return held;
+}
 
 void vita_window_sticks(uint8_t xy[4]) {
+    const pad_buttons *pad = pad_read();
     LONG held = W.tilt;
+    pad_stick(pad->lx, pad->ly, 7849, &xy[0], &xy[1]);       /* the rings XInput's header gives its sticks */
+    pad_stick(pad->rx, pad->ry, 8689, &xy[2], &xy[3]);
     for (int axis = 0; axis < 4; axis++) {
         int low = (held >> (2 * axis)) & 1, high = (held >> (2 * axis + 1)) & 1;
-        xy[axis] = (uint8_t)(low == high ? 128 : low ? 0 : 255);
+        if (low != high) xy[axis] = (uint8_t)(low ? 0 : 255);  /* a key held is the stick, whatever the pad says */
     }
 }
 

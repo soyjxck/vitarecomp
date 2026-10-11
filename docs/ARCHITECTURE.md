@@ -682,7 +682,13 @@ on the picture it is held. The picture keeps the frame's shape in a window
 of any other, with black beside it; `--window-size WxH` says how large it
 starts, `--fullscreen`, F11 or Alt and Enter put the window over the whole
 screen, `--title` names it, and its icon is the program's own when it has
-one. The core keeps its no-dependency promise.
+one. A controller is read with the keyboard: the first pad XInput reports,
+its buttons added to the keys held and its sticks the sticks wherever no
+key holds one, a trigger counted as the shoulder button above it because
+the console has one a side. The library is found by name when it is first
+wanted, so the host links nothing for it; and like the keys, a pad is
+listened to only while the window has the focus. The core keeps its
+no-dependency promise.
 
 ### Bring-up: seeing what the program did
 

@@ -314,7 +314,7 @@ static int usage(void) {
           "                 W A S D and I J K L: the sticks; X C Z V: cross circle square\n"
           "                 triangle; Q E: the shoulders; Enter: START; Shift: SELECT;\n"
           "                 the left mouse button is a finger on the screen; F11: the whole\n"
-          "                 screen and back\n"
+          "                 screen and back. A controller, if there is one, is read as well\n"
           "  --window-size WxH the size of the window's picture (960x544)\n"
           "  --fullscreen   the window over the whole screen from the start\n"
           "  --title TEXT   the window's name\n"
