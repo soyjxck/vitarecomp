@@ -4,6 +4,8 @@
 add_executable(test_container
     test_container.c
     ${CMAKE_SOURCE_DIR}/tools/armrecomp/container.c
+    ${CMAKE_SOURCE_DIR}/tools/armrecomp/extract.c
+    ${CMAKE_SOURCE_DIR}/tools/armrecomp/inflate.c
 )
 
 target_include_directories(test_container PRIVATE

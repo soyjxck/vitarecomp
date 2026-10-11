@@ -186,6 +186,31 @@ int vc_parse(const uint8_t *buf, size_t size, vc_module *out,
 /* Sniff the container kind alone, without a full parse. */
 vc_kind vc_identify(const uint8_t *buf, size_t size);
 
+/* --- a SELF as the ELF inside it -------------------------------------------- */
+
+/* How a segment got to its place in the ELF. */
+typedef enum {
+    VC_PLACED_SKIPPED = 0,       /* p_filesz 0: nothing to place */
+    VC_PLACED_INFLATED,          /* zlib, its Adler-32 checked */
+    VC_PLACED_STORED,            /* copied */
+} vc_placed;
+
+#define VC_EXTRACT_FAILED    1
+#define VC_EXTRACT_ENCRYPTED 2   /* a segment is encrypted: this toolkit has no keys and wants none */
+
+/* Reassemble the plain ELF32 a parsed SELF carries (extract.c): the ELF
+ * header and the program headers copied out, each segment inflated to the
+ * file offset its program header declares. `*elf` is malloc'd and
+ * `*elf_size` bytes; `placed`, when given, has room for VC_MAX_SEGMENTS.
+ *
+ * Every step has a value the file itself declares, so success is checked
+ * and not assumed: the inflated size against p_filesz, the Adler-32 against
+ * the segment's bytes, the total against elf_filesize. Returns 0, or one
+ * of the two above with the reason in `err`. */
+int vc_extract(const uint8_t *buf, size_t size, const vc_module *m,
+               uint8_t **elf, size_t *elf_size, vc_placed *placed,
+               char *err, size_t errsz);
+
 const char *vc_kind_name(vc_kind k);
 const char *vc_elf_type_name(uint16_t e_type);
 const char *vc_phdr_type_name(uint32_t p_type);

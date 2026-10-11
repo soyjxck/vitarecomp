@@ -13,8 +13,13 @@
 
 #include <stdint.h>
 
-/* Open the window. Returns 0, or -1 when this build has no window. */
+/* Open the window, its picture `width` by `height` pixels. The picture
+ * keeps the frame's shape whatever shape the window is given afterwards:
+ * what is over is black. Returns 0, or -1 when this build has no window. */
 int vita_window_open(const char *title, int width, int height);
+
+/* The window over the whole screen, or back to what it was: what F11 does. */
+void vita_window_fullscreen(void);
 
 /* Show a frame: `pixels` is R, G, B, A bytes, `pitch` pixels to a row. */
 void vita_window_present(const uint8_t *pixels, int width, int height, int pitch);
@@ -27,7 +32,7 @@ uint32_t vita_window_buttons(void);
 void vita_window_sticks(uint8_t xy[4]);
 
 /* Whether the left mouse button is held on the picture, and where: as a
- * finger on a panel 1920 across and 1088 down, whatever size the window is. */
+ * finger on a panel 1920 across and 1088 down, whatever size the picture is. */
 int vita_window_touch(int *x, int *y);
 
 /* Whether the window has been closed. */

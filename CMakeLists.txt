@@ -4,12 +4,13 @@
 #   1. the `vitarecomp` runtime static library — what recompiled game code links
 #      against (CPU state, memory, semantic helpers, the HLE)
 #   2. `armrecomp` — the tool that turns a Vita module into C
-#   3. optionally `vita_host`, the headless host, against one module's emitted C
+#   3. the host, as objects a program of recompiled code links, and optionally
+#      `vita_host`, the generic such program, against one module's emitted C
 #
 # A game repo consumes this repo as a git submodule and does:
 #     add_subdirectory(vitarecomp)
-#     add_subdirectory(games/<game>)
-# and links its host against the `vitarecomp` target.
+#     vitarecomp_add_game(<game> RECOMP_DIR <its emitted C> SOURCES <its own main and the rest>)
+# which is the host with the game's own main() in front (host/CMakeLists.txt).
 #
 # The core has no external dependencies on purpose. SDL2, zlib and friends only
 # ever appear behind an opt-in option, so a fresh clone builds with nothing
@@ -133,13 +134,11 @@ target_include_directories(vitarecomp PUBLIC
 
 add_subdirectory(tools/armrecomp)
 
-# --- the host, against one module's emitted C ---------------------------------
+# --- the host, and vita_host against one module's emitted C --------------------
 
 set(VITARECOMP_RECOMP_DIR "" CACHE PATH
     "Directory holding recomp_funcs.c and recomp_funcs_imports/ from `armrecomp emit`; builds vita_host against it")
-if(VITARECOMP_RECOMP_DIR)
-    add_subdirectory(host)
-endif()
+add_subdirectory(host)
 
 # --- tests (only when vitarecomp is the top-level project, not a submodule) ----
 

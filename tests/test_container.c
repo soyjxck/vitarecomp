@@ -10,6 +10,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Every check below is an assert(), and a Release build defines NDEBUG, which
@@ -209,11 +210,115 @@ static void test_rejects_malformed(void) {
     printf("  rejects malformed input        ok\n");
 }
 
+/* --- a SELF as the ELF inside it -------------------------------------------- */
+
+/* A SELF of one segment, 0x2000 bytes of it at file offset 0x1000 of an ELF
+ * 0x3000 long: as a zlib stream of one stored block, or as it is. */
+static size_t make_self(uint8_t *b, size_t cap, int zlib, int encrypted) {
+    const uint64_t elf_off = 0xA0, phdr_off = 0x100, seg_off = 0x180, data_off = 0x1000;
+    size_t n = 0x2000, at = (size_t)data_off;
+    memset(b, 0, cap);
+    wr32(b, 0x00, VC_SCE_MAGIC);
+    wr32(b, 0x04, 3);
+    wr16(b, 0x08, 0x00C0);
+    wr16(b, 0x0A, 1);
+    wr32(b, 0x0C, 0x600);
+    wr64(b, 0x10, 0x1000);
+    wr64(b, 0x18, 0x3000);       /* elf_filesize */
+    wr64(b, 0x30, 4);
+    wr64(b, 0x38, 0x80);
+    wr64(b, 0x40, elf_off);
+    wr64(b, 0x48, phdr_off);
+    wr64(b, 0x58, seg_off);
+    wr32(b, 0x80 + 0x0C, 4);
+    put_elf(b, (size_t)elf_off, (size_t)phdr_off, VC_ET_SCE_RELEXEC);
+
+    if (zlib) {
+        uint32_t a = 1, s2 = 0;
+        b[at++] = 0x78; b[at++] = 0x01;                     /* a zlib header */
+        b[at++] = 0x01;                                     /* the last block, stored */
+        wr16(b, at, (uint16_t)n); wr16(b, at + 2, (uint16_t)~n);
+        at += 4;
+        for (size_t i = 0; i < n; i++) {
+            b[at + i] = (uint8_t)(i * 7 + (i >> 5));
+            a = (a + b[at + i]) % 65521u;
+            s2 = (s2 + a) % 65521u;
+        }
+        at += n;
+        b[at++] = (uint8_t)(s2 >> 8); b[at++] = (uint8_t)s2;        /* Adler-32, high byte first */
+        b[at++] = (uint8_t)(a >> 8);  b[at++] = (uint8_t)a;
+    } else {
+        for (size_t i = 0; i < n; i++) b[at + i] = (uint8_t)(i * 7 + (i >> 5));
+        at += n;
+    }
+    wr64(b, seg_off + 0x00, data_off);
+    wr64(b, seg_off + 0x08, at - data_off);
+    wr64(b, seg_off + 0x10, zlib ? VC_COMPRESS_ZLIB : VC_COMPRESS_NONE);
+    wr64(b, seg_off + 0x18, encrypted ? VC_ENCRYPT_YES : VC_ENCRYPT_NO);
+    assert(at <= cap);
+    return at;
+}
+
+static void test_extract(void) {
+    static uint8_t b[0x4000];
+    vc_module m;
+    char err[256];
+    uint8_t *elf;
+    size_t elf_size;
+    vc_placed placed[VC_MAX_SEGMENTS];
+
+    for (int zlib = 0; zlib < 2; zlib++) {
+        size_t size = make_self(b, sizeof(b), zlib, 0);
+        assert(vc_parse(b, size, &m, err, sizeof(err)) == 0);
+        assert(vc_extract(b, size, &m, &elf, &elf_size, placed, err, sizeof(err)) == 0);
+        assert(elf && elf_size == 0x3000);
+        assert(elf[0] == 0x7F && elf[1] == 'E' && elf[2] == 'L' && elf[3] == 'F');
+        assert(memcmp(elf + 0x100, b + 0x100, 0x20) == 0);          /* the program header, where e_phoff says */
+        assert(placed[0] == (zlib ? VC_PLACED_INFLATED : VC_PLACED_STORED));
+        for (size_t i = 0; i < 0x2000; i++) assert(elf[0x1000 + i] == (uint8_t)(i * 7 + (i >> 5)));
+        free(elf);
+    }
+
+    /* one byte of the stream wrong: the Adler-32 says so, and nothing comes back */
+    {
+        size_t size = make_self(b, sizeof(b), 1, 0);
+        b[0x1000 + 7 + 0x800] ^= 0x10;
+        assert(vc_parse(b, size, &m, err, sizeof(err)) == 0);
+        assert(vc_extract(b, size, &m, &elf, &elf_size, NULL, err, sizeof(err)) == VC_EXTRACT_FAILED);
+        assert(elf == NULL && elf_size == 0 && err[0]);
+    }
+    /* a stored segment that is not the length its program header says */
+    {
+        size_t size = make_self(b, sizeof(b), 0, 0);
+        wr64(b, 0x180 + 0x08, 0x1FFF);
+        assert(vc_parse(b, size, &m, err, sizeof(err)) == 0);
+        assert(vc_extract(b, size, &m, &elf, &elf_size, NULL, err, sizeof(err)) == VC_EXTRACT_FAILED);
+    }
+    /* encrypted: named as that, and left alone */
+    {
+        size_t size = make_self(b, sizeof(b), 1, 1);
+        assert(vc_parse(b, size, &m, err, sizeof(err)) == 0);
+        assert(vc_extract(b, size, &m, &elf, &elf_size, NULL, err, sizeof(err)) == VC_EXTRACT_ENCRYPTED);
+        assert(elf == NULL);
+    }
+    /* a plain ELF has nothing to extract */
+    {
+        static uint8_t e[0x400];
+        memset(e, 0, sizeof(e));
+        put_elf(e, 0, 0x34, VC_ET_SCE_RELEXEC);
+        assert(vc_parse(e, sizeof(e), &m, err, sizeof(err)) == 0);
+        assert(vc_extract(e, sizeof(e), &m, &elf, &elf_size, NULL, err, sizeof(err)) == VC_EXTRACT_FAILED);
+    }
+
+    printf("  extract                        ok\n");
+}
+
 int main(void) {
     printf("container:\n");
     test_self_roundtrip();
     test_plain_elf();
     test_rejects_malformed();
+    test_extract();
     printf("all container tests passed\n");
     return 0;
 }

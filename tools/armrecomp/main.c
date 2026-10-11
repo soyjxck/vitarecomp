@@ -203,16 +203,7 @@ static int cmd_info(const char *path) {
 }
 
 /* --- extract: SELF -> plain ELF32 ------------------------------------------ */
-/*
- * Reassembly is mechanical once the container is parsed: the plaintext ELF
- * header and program headers are copied out of the SELF, and each segment is
- * inflated into the file offset its program header declares.
- *
- * What makes it worth doing carefully is that every step has a value the file
- * itself declares, so success is checkable rather than assumed. Three
- * independent numbers have to agree: the inflated size against `p_filesz`, the
- * Adler-32 against the segment bytes, and the total against `elf_filesize`.
- */
+/* The reassembly is extract.c's; this reads, reports and writes. */
 
 static int cmd_extract(const char *path, const char *outpath) {
     size_t size = 0;
@@ -236,98 +227,32 @@ static int cmd_extract(const char *path, const char *outpath) {
         return 1;
     }
 
-    for (int i = 0; i < m.seg_count; i++) {
-        if (m.seg[i].encryption == VC_ENCRYPT_YES) {
-            fprintf(stderr,
-                    "armrecomp: segment %d is encrypted. This toolkit does not "
-                    "ship or derive\nkey material; supply a decrypted ELF. See "
-                    "docs/DECRYPT.md.\n", i);
-            free(buf);
-            return 1;
-        }
+    uint8_t *out = NULL;
+    size_t out_size = 0;
+    vc_placed placed[VC_MAX_SEGMENTS];
+    int r = vc_extract(buf, size, &m, &out, &out_size, placed, err, sizeof(err));
+    if (r == VC_EXTRACT_ENCRYPTED) {
+        fprintf(stderr,
+                "armrecomp: %s. This toolkit does not "
+                "ship or derive\nkey material; supply a decrypted ELF. See "
+                "docs/DECRYPT.md.\n", err);
+        free(buf);
+        return 1;
     }
-
-    size_t out_size = (size_t)m.sce.elf_filesize;
-    uint8_t *out = (uint8_t *)calloc(out_size ? out_size : 1, 1);
-    if (!out) {
-        fprintf(stderr, "armrecomp: out of memory (%zu bytes)\n", out_size);
+    if (r) {
+        fprintf(stderr, "armrecomp: %s\n", err);
         free(buf);
         return 1;
     }
 
-    /* ELF header, then the program header table at the offset the ELF header
-     * itself declares. Both are plaintext inside the SELF. */
-    if (m.sce.elf_offset + 0x34 > size) {
-        fprintf(stderr, "armrecomp: ELF header past end of file\n");
-        goto fail;
-    }
-    memcpy(out, buf + m.sce.elf_offset, 0x34);
-
-    size_t ph_bytes = (size_t)m.elf.phnum * m.elf.phentsize;
-    if (m.sce.phdr_offset + ph_bytes > size || m.elf.phoff + ph_bytes > out_size) {
-        fprintf(stderr, "armrecomp: program header table does not fit\n");
-        goto fail;
-    }
-    memcpy(out + m.elf.phoff, buf + m.sce.phdr_offset, ph_bytes);
-
     printf("segments:\n");
     for (int i = 0; i < m.seg_count; i++) {
-        uint64_t src_off = m.seg[i].offset;
-        uint64_t src_len = m.seg[i].length;
-        uint32_t dst_off = m.phdr[i].offset;
-        uint32_t want    = m.phdr[i].filesz;
-
-        /* SCE_RELA and SCE_VERSION segments carry a p_offset like any other,
-         * but a p_filesz of 0 would mean nothing to place. */
-        if (want == 0) { printf("  %-3d skipped (p_filesz 0)\n", i); continue; }
-
-        if (src_off + src_len > size) {
-            fprintf(stderr, "armrecomp: segment %d source past end of file\n", i);
-            goto fail;
-        }
-        if ((uint64_t)dst_off + want > out_size) {
-            fprintf(stderr, "armrecomp: segment %d does not fit in the output\n", i);
-            goto fail;
-        }
-
-        if (m.seg[i].compression == VC_COMPRESS_ZLIB) {
-            size_t produced = want;
-            inf_status st = inf_zlib(buf + src_off, (size_t)src_len,
-                                     out + dst_off, &produced);
-            if (st != INF_OK) {
-                fprintf(stderr, "armrecomp: segment %d: %s\n", i, inf_strerror(st));
-                goto fail;
-            }
-            /* The inflated size must match what the program header declares.
-             * A stream that decompresses cleanly to the wrong length means the
-             * segment table and the program headers disagree, which means the
-             * container is being misread. */
-            if (produced != want) {
-                fprintf(stderr,
-                        "armrecomp: segment %d inflated to %zu, p_filesz says %u\n",
-                        i, produced, want);
-                goto fail;
-            }
-            printf("  %-3d %8llu -> %-9u zlib, adler ok\n",
-                   i, (unsigned long long)src_len, want);
-        } else {
-            if (src_len != want) {
-                fprintf(stderr,
-                        "armrecomp: segment %d stored length %llu != p_filesz %u\n",
-                        i, (unsigned long long)src_len, want);
-                goto fail;
-            }
-            memcpy(out + dst_off, buf + src_off, want);
-            printf("  %-3d %8llu -> %-9u stored\n",
-                   i, (unsigned long long)src_len, want);
-        }
-    }
-
-    /* Independent sanity checks on the result, in increasing order of what
-     * they would catch. */
-    if (!(out[0] == 0x7F && out[1] == 'E' && out[2] == 'L' && out[3] == 'F')) {
-        fprintf(stderr, "armrecomp: reassembled file is not an ELF\n");
-        goto fail;
+        if (placed[i] == VC_PLACED_SKIPPED)
+            printf("  %-3d skipped (p_filesz 0)\n", i);
+        else if (placed[i] == VC_PLACED_INFLATED)
+            printf("  %-3d %8llu -> %-9u zlib, adler ok\n", i, (unsigned long long)m.seg[i].length, m.phdr[i].filesz);
+        else
+            printf("  %-3d %8llu -> %-9u stored\n", i, (unsigned long long)m.seg[i].length, m.phdr[i].filesz);
     }
 
     /* e_entry is NOT an absolute virtual address on Vita.
@@ -354,7 +279,9 @@ static int cmd_extract(const char *path, const char *outpath) {
     FILE *f = fopen(outpath, "wb");
     if (!f) {
         fprintf(stderr, "armrecomp: cannot write %s\n", outpath);
-        goto fail;
+        free(out);
+        free(buf);
+        return 1;
     }
     fwrite(out, 1, out_size, f);
     fclose(f);
@@ -372,11 +299,6 @@ static int cmd_extract(const char *path, const char *outpath) {
     free(out);
     free(buf);
     return entry_in_exec ? 0 : 1;
-
-fail:
-    free(out);
-    free(buf);
-    return 1;
 }
 
 /* --- cover: how much of a module do we actually understand? ---------------- */

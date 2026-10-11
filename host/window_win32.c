@@ -5,7 +5,10 @@
  * handler stretches over the client area; the keyboard is tracked from the
  * window's own key messages, so it reads nothing while another window has
  * the focus. The left mouse button is a finger on the front panel: where it
- * is held on the picture is where the panel is touched.
+ * is held on the picture is where the panel is touched. The picture keeps
+ * the frame's shape in a window of any other, centred, and F11 or Alt and
+ * Enter put the window over the whole screen and back. The window's icon
+ * is the program's resource 101, when it has one: a game's program does.
  *
  * The keys are where a player of this console's games on a keyboard looks
  * for them: the arrows are the directional pad, W A S D the left stick and
@@ -60,12 +63,28 @@ static void key(WPARAM k, int down) {
     }
 }
 
+/* Where in the client area the picture is: as large as fits at the frame's
+ * shape, in the middle. */
+static void picture(HWND h, RECT *p) {
+    RECT rc;
+    GetClientRect(h, &rc);
+    LONGLONG fw = W.fw > 0 ? W.fw : 960, fh = W.fh > 0 ? W.fh : 544;
+    LONG w = rc.right, t = rc.bottom;
+    if (w * fh > t * fw) w = (LONG)(t * fw / fh);
+    else                 t = (LONG)(w * fh / fw);
+    p->left = (rc.right - w) / 2;
+    p->top = (rc.bottom - t) / 2;
+    p->right = p->left + w;
+    p->bottom = p->top + t;
+}
+
 /* The mouse at a client position, as a place on the panel. */
 static void finger(HWND h, LPARAM lp) {
     RECT rc;
-    GetClientRect(h, &rc);
-    if (rc.right <= 0 || rc.bottom <= 0) return;
-    int x = (int)(short)LOWORD(lp) * 1920 / rc.right, y = (int)(short)HIWORD(lp) * 1088 / rc.bottom;
+    picture(h, &rc);
+    if (rc.right <= rc.left || rc.bottom <= rc.top) return;
+    int x = ((int)(short)LOWORD(lp) - rc.left) * 1920 / (rc.right - rc.left);
+    int y = ((int)(short)HIWORD(lp) - rc.top) * 1088 / (rc.bottom - rc.top);
     if (x < 0) x = 0;
     if (x > 1919) x = 1919;
     if (y < 0) y = 0;
@@ -73,9 +92,39 @@ static void finger(HWND h, LPARAM lp) {
     InterlockedExchange(&W.finger, (LONG)(0x80000000u | ((uint32_t)y << 11) | (uint32_t)x));
 }
 
+/* Over the whole of the screen the window is on, without a frame; or back
+ * to where and what it was. */
+static void fullscreen(HWND h) {
+    static WINDOWPLACEMENT before;
+    DWORD style = (DWORD)GetWindowLongA(h, GWL_STYLE);
+    if (style & WS_OVERLAPPEDWINDOW) {
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof(mi));
+        mi.cbSize = sizeof(mi);
+        before.length = sizeof(before);
+        if (!GetWindowPlacement(h, &before) || !GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY), &mi)) return;
+        SetWindowLongA(h, GWL_STYLE, (LONG)(style & ~(DWORD)WS_OVERLAPPEDWINDOW));
+        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    } else {
+        SetWindowLongA(h, GWL_STYLE, (LONG)(style | WS_OVERLAPPEDWINDOW));
+        SetWindowPlacement(h, &before);
+        SetWindowPos(h, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
+}
+
+#define WM_WHOLE_SCREEN (WM_APP + 1)
+
 static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_KEYDOWN: key(wp, 1); return 0;
+    case WM_WHOLE_SCREEN: fullscreen(h); return 0;
+    case WM_SYSKEYDOWN:
+        if (wp == VK_RETURN && !(lp & (1L << 30))) { fullscreen(h); return 0; }     /* Alt and Enter, not its repeat */
+        break;
+    case WM_KEYDOWN:
+        if (wp == VK_F11) { if (!(lp & (1L << 30))) fullscreen(h); return 0; }
+        key(wp, 1);
+        return 0;
     case WM_KEYUP:   key(wp, 0); return 0;
     case WM_KILLFOCUS: InterlockedExchange(&W.buttons, 0); InterlockedExchange(&W.tilt, 0); return 0;
     case WM_LBUTTONDOWN: SetCapture(h); finger(h, lp); return 0;
@@ -86,9 +135,10 @@ static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
-        RECT rc;
+        RECT rc, pic;
         GetClientRect(h, &rc);
         EnterCriticalSection(&W.lock);
+        picture(h, &pic);
         if (W.frame && W.fw > 0 && W.fh > 0) {
             BITMAPINFO bi;
             memset(&bi, 0, sizeof(bi));
@@ -99,7 +149,13 @@ static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             bi.bmiHeader.biBitCount = 32;
             bi.bmiHeader.biCompression = BI_RGB;
             SetStretchBltMode(dc, COLORONCOLOR);
-            StretchDIBits(dc, 0, 0, rc.right, rc.bottom, 0, 0, W.fw, W.fh, W.frame, &bi, DIB_RGB_COLORS, SRCCOPY);
+            StretchDIBits(dc, pic.left, pic.top, pic.right - pic.left, pic.bottom - pic.top, 0, 0, W.fw, W.fh,
+                          W.frame, &bi, DIB_RGB_COLORS, SRCCOPY);
+            /* what the picture leaves, at the sides or above and below */
+            RECT bar = rc;
+            HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
+            if (pic.left > 0) { bar.right = pic.left; FillRect(dc, &bar, black); bar = rc; bar.left = pic.right; FillRect(dc, &bar, black); }
+            if (pic.top > 0)  { bar = rc; bar.bottom = pic.top; FillRect(dc, &bar, black); bar = rc; bar.top = pic.bottom; FillRect(dc, &bar, black); }
         } else {
             FillRect(dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
         }
@@ -124,6 +180,7 @@ static DWORD WINAPI ui_thread(LPVOID arg) {
     memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = proc;
     wc.hInstance = GetModuleHandleA(NULL);
+    wc.hIcon = LoadIconA(wc.hInstance, MAKEINTRESOURCEA(101));     /* the program's own, if it has one */
     wc.hCursor = LoadCursorA(NULL, (LPCSTR)IDC_ARROW);
     wc.lpszClassName = "vitarecomp_host";
     RegisterClassA(&wc);
@@ -180,6 +237,10 @@ void vita_window_present(const uint8_t *pixels, int width, int height, int pitch
     }
     LeaveCriticalSection(&W.lock);
     InvalidateRect(W.hwnd, NULL, FALSE);
+}
+
+void vita_window_fullscreen(void) {
+    if (W.hwnd) PostMessageA(W.hwnd, WM_WHOLE_SCREEN, 0, 0);
 }
 
 uint32_t vita_window_buttons(void) { return (uint32_t)W.buttons; }
