@@ -806,3 +806,106 @@ list had the answer in one column: a pass drawn with the depth test
 "equal" kept half the pixels of the pass that had laid that depth down
 (LESSONS.md).
 
+### The same draws on a graphics card
+
+The renderer above is the definition, and a frame of play takes it a
+twelfth of a second. `VITARECOMP_GXM_GPU=1` hands each scene's list of
+draws to the host's graphics card instead; `VITARECOMP_GXM_GPU=check`
+draws every list both ways and says where the two results differ. Unset,
+none of it runs. The card is Direct3D 11 for now, which is Windows:
+elsewhere the switch finds no card and every list stays the processor's.
+
+Three files, each knowing less of the console than the one before.
+
+- `src/gxm_gpu.c` takes a list as `gxm_draw.c` keeps it
+  (`src/gxm_draw_list.h`) and decides whether the card can draw it as
+  the processor would. If it can, the target goes to the card as the
+  title's memory holds it, the draws follow, and the target comes back:
+  nothing above knows which way a list was drawn. A list it cannot do is
+  left to the processor whole, and the reason is said once: a depth
+  surface of sixteen bits, a draw of several instances, a draw whose two
+  faces are tested differently, a region drawn outside of, a mask that
+  turns pixels away, a program that does not translate.
+- `src/gxp_hlsl.c` writes a program of the title's as HLSL: the
+  interpreter's steps as text, a block to an instruction, the registers
+  still banks of 32-bit words, so that what a program does to its bits
+  it does there too. `armrecomp hlsl <file.gxp>` prints the translation
+  of a dumped program.
+- `src/gpu.h` is a card as far as the rest needs one: shaders as text,
+  textures as rows of texels, a draw as buffers and state.
+  `src/gpu_d3d11.c` is the one implementation, `src/gpu_none.c` what is
+  linked where there is none.
+
+A card left to itself does several things another way than the
+interpreter, and wherever the check found one the translation now does
+the interpreter's thing in so many words:
+
+- **Halves.** A float is made a half by rounding to the nearest. The
+  card's own conversion cuts the bits off, and a texture coordinate a
+  step short samples somewhere else: `h16()` in the shader's prelude
+  takes the card's answer and puts it right from its neighbour.
+- **Corners.** A vertex lands on a sixteenth of a pixel, where
+  `src/raster.c` puts it. A card's steps are sixteen times finer, and
+  everything interpolated across a triangle follows its corners.
+- **The texel a point falls in.** A title that draws a target half a
+  texture's size samples exactly on the line between two texels, and
+  cards differ on which side of the line that is. A texture read with no
+  filter has its texel chosen by the program's own arithmetic
+  (`texel_at`), on 256 steps to a texel, and `src/gxm_tex.c` chooses on
+  the same steps; a gathering sample likewise (`gather_at`).
+- **Cubes.** A cube is six flat faces: the face a direction points at is
+  worked out by the program (`cube_at`, which is `gxm_tex.c`'s
+  `cube_face`) and a sample near the edge of a face is of that face.
+  A card blends across the edge.
+- **A program that blends for itself** is handed the target itself, to
+  read and write a pixel at a time in the order its triangles come
+  (`gpu_ordered`): two triangles of one draw that lie over each other
+  each find what the last one left. A card without the means, or a
+  program the fixed blend follows or that can discard, gets the target
+  as it stood before the draw.
+- **Depth.** A surface of twenty-four bits is one on the card too, the
+  same whole numbers, so a draw that passes only where the depth equals
+  what an earlier draw left finds it equal.
+- **Textures** are known to be unchanged by a hash of all their bytes.
+  A title writes into its textures where it pleases, and a scene's depth
+  is a later scene's texture.
+
+What the check calls a difference is measured in what rounding alone can
+leave: a step and a half of the least a pixel's field can tell apart,
+ten bits of a float in a surface of three small floats, a byte's step
+elsewhere. A list differs when more than a two-hundredth of the pixels
+it drew are over four times that apart, or a third are apart at all;
+depth and stencil are held against the surface. While lists are checked
+each begins on the card from what the processor has, except its depth,
+which is the card's own from the list before: the processor's arithmetic
+never equals the card's to the last bit, and "equal" has to mean the
+card's.
+
+One difference is left alone. Which level of a texture a sample falls on
+comes from how fast the coordinate changes from pixel to pixel, which
+the processor has exactly and a card measures from neighbouring pixels;
+where a surface is seen edge on they choose differently and both are
+right. `VITARECOMP_GXM_ONE_LEVEL=1` reads every texture from its first
+level, in both renderers, and with it the two agree list for list
+through the first title's front end and its first minute of play.
+
+| Tool | Switch | What it shows |
+|---|---|---|
+| Both ways, compared | `VITARECOMP_GXM_GPU=check` | each list that differs: how many pixels, how far, where the worst is and what both hold there; each draw's programs, the pixels it drew on the card and on the processor, its tests; and at the end how many lists were checked, differed, were not the card's |
+| The lists that differ | `VITARECOMP_GXM_GPU_DUMP=<dir>`, with the check | the first twenty-four as pictures: both colours, both depths, and where the colours are apart, grey within rounding, yellow to four times that, red beyond |
+| Their numbers | `VITARECOMP_GXM_GPU_DUMP_RAW=1`, with the dump | both results as the card holds them, the first draw's textures as floats, its secondary attributes: for working a pixel out by hand |
+| A program part-way | `VITARECOMP_GXM_PROBE=<name>:<count>:<from>:<to>` | the program of that name runs only its first `count` instructions and then moves the register `from` (a half of it with `.x` to `.w`) into `to`: with `to` its result register, the check compares what `from` held there, and so finds the first instruction two renderers part at |
+| One level | `VITARECOMP_GXM_ONE_LEVEL=1` | every texture read from its first level, in both renderers |
+| The shaders | `VITARECOMP_GXM_GPU_SHADERS=<dir>` | each program's HLSL as it was compiled |
+| Textures made | `VITARECOMP_GXM_GPU_LOG=1` | each texture handed to the card: size, levels, format, filters |
+| Another card | `VITARECOMP_GPU_WARP=1`, `VITARECOMP_GPU_DEBUG=1` | the system's own rasteriser in place of the card; Direct3D's checking layer |
+
+`VITARECOMP_GXM_AT_ONCE=1` makes a list of every draw, which is how a
+difference in a scene of two hundred draws is brought down to one.
+
+Drawn this way a frame is not yet faster. Every list carries its target
+to the card and back, and a surface one scene draws and the next samples
+goes through the title's memory in between, converted both ways on the
+processor: a frame of play takes 177 ms so, against 85 for the
+processor's own renderer. What the card is for begins when surfaces stay
+on it (PLAN.md, milestone E).

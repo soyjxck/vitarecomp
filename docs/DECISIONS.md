@@ -36,20 +36,35 @@ DECRYPT.md. The procedure (`tools/vita3k-decrypt.ps1`,
 `tools/import-vita3k.sh`) is in PLAN.md under milestone C, and the first
 title through it is *Uncharted: Golden Abyss*.
 
-## 3. Host graphics API (open; not needed for a first picture)
+## 3. Host graphics API (decided 2026-10-11: Direct3D 11 first, behind an interface)
 
 The first renderer is software and writes into the title's own surfaces,
-so it needs none. The question returns with speed (PLAN.md, milestone E).
+so it needed none. The question came back with speed (PLAN.md, milestone
+E), and the recommendation that stood here, Vulkan because a shader
+translator's SPIR-V would land there, did not survive two things that
+turned out otherwise.
 
-| Option | Notes |
-|---|---|
-| Vulkan | Vita3K's primary back end; its shader output is SPIR-V, so a GPLv2 graphics component would drop straight in. Verbose; needs a window system layer (SDL). |
-| OpenGL 4.x | Simplest for the first triangles; also SPIR-V capable via `GL_ARB_gl_spirv`. Deprecated on macOS. |
-| D3D12 | Known from dod3-recomp; Windows only; needs SPIR-V to DXIL (SPIRV-Cross can emit HLSL). |
+The translator does not make SPIR-V. A program is written out as the
+interpreter's own steps in a shading language's text (`src/gxp_hlsl.c`),
+which is what makes it checkable against the interpreter instruction by
+instruction, and text wants a compiler. On Windows that compiler and
+Direct3D 11 are part of the system: nothing is added to the build, to
+what a game ships, or to what a player installs. Vulkan would have
+brought a loader, a shader compiler library and a window layer for the
+same picture.
 
-Recommendation: write milestone D's pipeline against an internal interface
-and implement it first on **Vulkan**, because that is where the shader
-translator's output lands with no further conversion.
+And the interface turned out small. `src/gpu.h` is shaders as text,
+textures as rows, a draw as buffers and state, a target handed over and
+taken back: a page. A second implementation is a second file, and the
+translator's text is close enough to GLSL and to Metal's language that a
+second dialect is a matter of spelling.
+
+So: Direct3D 11 first, because the first title's player is on Windows
+and it costs nothing there; Vulkan or Metal when a host that has neither
+wants the speed. What the first implementation leans on that the others
+must find an equal for is one thing: a fragment program reading and
+writing the target in the order its triangles come (ARCHITECTURE.md,
+"The same draws on a graphics card").
 
 ## 4. NID database handling (open)
 

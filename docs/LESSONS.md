@@ -1066,3 +1066,70 @@ pass that wrote the depth, 1,984 in the pass that tested against it.
     from memory finds, in the test, is made finite like everything else
     it starts from, because a value that is not a number, once in a
     register, meets another sooner or later.
+
+## What a second renderer found in the first (2026-10-11)
+
+The title's draws were handed to a graphics card and every list was
+drawn both ways and compared. Six things the card did were not what
+the interpreter does, and the comparison itself was wrong in four ways
+before it could say so.
+
+1. **The comparison has to be fair before it is strict.** The first
+   reports were of thousands of pixels in every list. A surface of
+   signed bytes was being compared byte by byte without knowing that 255
+   is one step from 0; a surface of three ten-bit floats against the
+   card's full floats, which differ by rounding at a third of the
+   pixels; a surface of one channel on four. Each was the checker's own
+   mistake. A difference is now counted in what rounding can leave in
+   the surface's own fields, and nothing was learned about the card
+   until it was.
+2. **"Equal" has to mean the card's own.** A pass drawn where the depth
+   equals an earlier pass's drew a ninth of its pixels. The check was
+   starting each list from the processor's depth, and two rasterisers
+   never agree to the last bit. Carrying the card's own depth from list
+   to list fixed it, at the second attempt: the first kept it by the
+   address of the planes, and every scene's depth is worked on in the
+   same planes. Before that was found, a theory about compilers joining
+   a multiply to an add was built, tested and dropped. Drawing
+   the same draw twice on the card, the second time under "equal", is
+   what cleared the card: all its pixels passed.
+3. **A conversion's rounding is part of the arithmetic.** A pass that
+   shrinks a picture by four samples came out blurred differently. The
+   card makes a half of a float by cutting bits off; the interpreter
+   rounds. One step in a texture coordinate at one corner of the screen
+   is a third of a texel in the middle.
+4. **The reference had sixteen steps to a pixel and the card 256.**
+   With the comparison fair, a fifth of a textured draw's pixels were
+   still a few steps apart, in patches. Giving the processor's
+   rasteriser the card's precision for one run made them vanish, which
+   said what it was; the card was then given the processor's, because
+   that is the console's.
+5. **A sample on the line between two texels.** A pass at half size
+   reads a full-size surface with no filter, at points that fall exactly
+   between texels. The processor took whichever side the last bit of a
+   float fell on, the card always the same one, and a pass that compares
+   depths with its neighbours' differed at every edge in the picture.
+   Neither was a rule. The rule now is 256 steps to a texel, in both,
+   and the card's shader chooses the texel itself.
+6. **A draw whose triangles overlap, in a program that blends for
+   itself.** A shaft of light is two sheets crossed, drawn by a program
+   that reads the pixel and adds to it. The processor gives the second
+   sheet what the first left. The card was given a copy of the target
+   made before the draw. Found by stopping the program after each of its
+   four instructions in both renderers: every input agreed, and the sum
+   did not.
+7. **A cube is six textures.** The card blends across the edge of a
+   cube's face; the console and the interpreter do not, and an ambient
+   pass was four times too bright along the seams.
+8. **A hash of some of a texture is a hash the change can miss.** A
+   pass read the depth an earlier scene had stored; the texture was
+   known by 256 places in it, and a small object turning in the middle
+   of the screen changed none of them. The difference grew a little
+   every frame, which is what a stale copy looks like.
+
+The tool that did most of this is one switch: stop a named program after
+n instructions and move a register into its result. It changes the
+program both renderers run, so neither has to be taught to show its
+insides, and the check that already compares pictures then compares
+registers.
+

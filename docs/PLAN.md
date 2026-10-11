@@ -386,6 +386,33 @@ samples at a time some of another third: together perhaps a frame and a
 half where there is one. Thirty frames a second is not on that route.
 It is on the second.
 
+The second is begun (2026-10-11; ARCHITECTURE.md, "The same draws on a
+graphics card"). Every fragment and vertex program the first title
+registers translates to HLSL and compiles, a scene's list of draws is
+drawn by Direct3D 11, and drawn both ways the two results agree list for
+list through the front end and the first minute of play, once the choice
+of a texture's level is taken out of the comparison. It is switched on
+by `VITARECOMP_GXM_GPU=1` and is not the default, because it is not yet
+faster: 177 ms a frame of play against the processor's 85. All of that
+is the road between the card and the title's memory, which every list
+travels twice. What is left, in the order it pays:
+
+1. **Surfaces that stay on the card.** A colour or depth surface a list
+   has drawn is the card's until something off the card needs its bytes:
+   a list the processor draws, the display, the title's own code. The
+   next list that draws to it or samples it finds it there. A surface
+   sampled in another form than it was drawn in, the geometry buffer's
+   two words read as bytes, is converted on the card.
+2. **Sixteen bits of depth**, so that the shadow maps are the card's
+   too and no list of play is the processor's.
+3. **Textures in their own form.** A compressed texture goes to the card
+   compressed where the card has the format, not as four floats a
+   texel; and a texture's bytes are hashed only when the pages they lie
+   in were written.
+4. **The picture shown from the card**, not read back to be stretched
+   by the window.
+5. A second implementation of `src/gpu.h` for hosts without Direct3D.
+
 ## Milestone F: first title repo
 
 A per-game repo consuming this one as a submodule, as upstream intended:

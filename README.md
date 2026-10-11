@@ -48,7 +48,11 @@ end, a tile of the target to a thread, and each fragment program run for
 sixty-four pixels at a time, a frame of the title screen or the menu takes
 about 20 ms and a frame of the opening cinematic or of play, 50,000
 triangles and five million pixels, 80 to 85 on twenty-four threads:
-twelve frames a second, where the console shows thirty.
+twelve frames a second, where the console shows thirty. The same draws
+can be handed to the host's graphics card instead, each program written
+out as HLSL and drawn by Direct3D 11 (`VITARECOMP_GXM_GPU=1`, or `check`
+to draw both ways and compare): the pictures agree, and the speed is the
+work in hand (docs/PLAN.md, milestone E).
 The logo movie that comes before the
 title screen is not played: the runtime has no movie library, says so when
 the title asks for it, and the title carries on as it does when a movie
