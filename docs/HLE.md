@@ -89,6 +89,22 @@ the place the title checks before it relies on it, and that is found by
 reading the title's code, not by guessing an error code for the first
 call that happens to trap.
 
+## Services that are not there
+
+A title is written for a console with a network, neighbours and a shop,
+and asks after all of them. The near-field service (`src/hle_near.c`) is
+the pattern for what to do: every function of it says there is no such
+service, the title's own start of it fails, and the title carries on as it
+does on a console where the service is switched off. Two things are worth
+keeping from how that was found. The functions have no names here: the
+title links a version of the library whose numbers no table carries, so
+they are answered by number. And the second of them only appeared when
+the title left its menus, and only stopped the run when the trace was
+off: with the trace on, an import nobody implements returns and the run
+goes on, which is the point of the trace and is also how a run that looks
+healthy can be one that nobody could reproduce without it. The summary
+line counts traps for that reason, and the count wanted is zero.
+
 ## Pad and panels
 
 `src/hle_ctrl.c` and `src/hle_touch.c` are snapshots of what the host says

@@ -34,8 +34,3 @@ void vita_hle_nid_05474AF0(void) {
 
 /* int sceMp4StartFileStreaming(handle, ...): there is never a handle to start */
 void vita_hle_nid_30E49E4D(void) { r0 = SCE_ERROR_ERRNO_ENOSYS; }
-
-/* The near-field sharing service, asked to start with a work area of the
- * title's: there is no such service on this machine, and saying so makes
- * the title give its work area back and carry on without. */
-void vita_hle_nid_A412E9CA(void) { r0 = SCE_ERROR_ERRNO_ENOSYS; }

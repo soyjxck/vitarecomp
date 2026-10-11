@@ -233,29 +233,65 @@ float pix_linear_to_srgb(float v) {
 
 static uint64_t field_mask(int bits) { return bits >= 64 ? ~0ull : (1ull << bits) - 1; }
 
+/* What one field is worth, worked out. */
+static float field_value(unsigned kind, int n, uint32_t x, uint64_t bits) {
+    switch (kind) {
+    case PIX_UNORM: return (float)x / (float)field_mask(n);
+    case PIX_SNORM: {
+        int32_t s = (int32_t)(x << (32 - n)) >> (32 - n);
+        float t = (float)s / (float)((1u << (n - 1)) - 1);
+        return t < -1.0f ? -1.0f : t;
+    }
+    case PIX_RAW:  return bits_to_float(x);
+    case PIX_F16:  return vita_f16_to_f32((uint16_t)x);
+    case PIX_F32:  return bits_to_float(x);
+    case PIX_F32M: return bits_to_float(x & 0x7FFFFFFFu);
+    case PIX_UF11: return small_to_float(x, 6);
+    case PIX_UF10: return small_to_float(x, 5);
+    default:       return ldexpf((float)x, (int)((bits >> 27) & 31) - 24);                 /* the shared exponent */
+    }
+}
+
+/* A field of few bits has few values, and what most of them cost is a
+ * division or a scaling by a power of two, done again for every texel a
+ * frame reads: nine million times a frame, in a title's cinematic. So the
+ * values are worked out once, by the arithmetic above, and looked up
+ * after: every fraction of up to eight bits, the signed bytes, every half,
+ * and the two small unsigned floats. What a table gives is what the
+ * arithmetic gave. */
+int pixfmt_plain;
+static float g_unorm[9][256], g_snorm8[256], g_half[65536], g_uf11[2048], g_uf10[1024];
+static int g_tabled;
+
+static void tables(void) {
+    /* Safe from several threads at once: each writes the same values, and
+     * none reads before it has seen the mark that all of them are written. */
+    if (g_tabled) return;
+    for (int n = 1; n <= 8; n++)
+        for (uint32_t x = 0; x < (1u << n); x++) g_unorm[n][x] = field_value(PIX_UNORM, n, x, 0);
+    for (uint32_t x = 0; x < 256; x++) g_snorm8[x] = field_value(PIX_SNORM, 8, x, 0);
+    for (uint32_t x = 0; x < 65536; x++) g_half[x] = field_value(PIX_F16, 16, x, 0);
+    for (uint32_t x = 0; x < 2048; x++) g_uf11[x] = field_value(PIX_UF11, 11, x, 0);
+    for (uint32_t x = 0; x < 1024; x++) g_uf10[x] = field_value(PIX_UF10, 10, x, 0);
+    g_tabled = 1;
+}
+
 void pixfmt_decode(const pixfmt *f, const uint8_t *pixel, float rgba[4]) {
     uint64_t bits = 0;
     float v[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     memcpy(&bits, pixel, f->bytes);
+    if (!g_tabled) tables();
     for (int i = 0; i < f->fields; i++) {
         int n = f->f[i].bits;
+        unsigned kind = f->f[i].kind;
         uint32_t x = (uint32_t)((bits >> f->f[i].shift) & field_mask(n));
-        switch (f->f[i].kind) {
-        case PIX_UNORM: v[i] = (float)x / (float)field_mask(n); break;
-        case PIX_SNORM: {
-            int32_t s = (int32_t)(x << (32 - n)) >> (32 - n);
-            float t = (float)s / (float)((1u << (n - 1)) - 1);
-            v[i] = t < -1.0f ? -1.0f : t;
-            break;
-        }
-        case PIX_RAW:  v[i] = bits_to_float(x); break;
-        case PIX_F16:  v[i] = vita_f16_to_f32((uint16_t)x); break;
-        case PIX_F32:  v[i] = bits_to_float(x); break;
-        case PIX_F32M: v[i] = bits_to_float(x & 0x7FFFFFFFu); break;
-        case PIX_UF11: v[i] = small_to_float(x, 6); break;
-        case PIX_UF10: v[i] = small_to_float(x, 5); break;
-        default:       v[i] = ldexpf((float)x, (int)((bits >> 27) & 31) - 24); break;      /* the shared exponent */
-        }
+        if (pixfmt_plain)                          v[i] = field_value(kind, n, x, bits);
+        else if (kind == PIX_UNORM && n <= 8)      v[i] = g_unorm[n][x];
+        else if (kind == PIX_F16)                  v[i] = g_half[x];
+        else if (kind == PIX_SNORM && n == 8)      v[i] = g_snorm8[x];
+        else if (kind == PIX_UF10)                 v[i] = g_uf10[x];
+        else if (kind == PIX_UF11)                 v[i] = g_uf11[x];
+        else                                       v[i] = field_value(kind, n, x, bits);
     }
     for (int c = 0; c < 4; c++)
         rgba[c] = f->from[c] == PIX_ZERO ? 0.0f : f->from[c] == PIX_ONE ? 1.0f : v[f->from[c]];

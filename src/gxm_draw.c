@@ -504,7 +504,8 @@ static int sample_input(worker *wk, const gxp_input *in, const gxm_tex *t, float
             v[k] *= q;
         }
     }
-    gxm_tex_sample(t, &wk->cache[in->unit], v, t->cube ? 0.0f : gxm_tex_footprint(t, dx[0], dx[1], dy[0], dy[1]), rgba);
+    /* a texture of one level is sampled the same whatever its footprint, and a logarithm is not free */
+    gxm_tex_sample(t, &wk->cache[in->unit], v, t->cube || t->levels == 1 ? 0.0f : gxm_tex_footprint(t, dx[0], dx[1], dy[0], dy[1]), rgba);
     return t->pf.components;
 }
 

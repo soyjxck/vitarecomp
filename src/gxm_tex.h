@@ -46,6 +46,8 @@ typedef struct {
     uint8_t  no_chain;                      /* declared without a mip chain */
     uint8_t  pvrtc_version, pvrtc_bits;     /* which PVRTC: generation 1 or 2, 2 or 4 bits a texel */
     uint8_t  bytes8;                        /* every field of a texel is one unsigned byte */
+    uint8_t  chan_shift[4];                 /* then, for red, green, blue and alpha: which byte of the texel, */
+    const float *chan_table[4];             /* and the 256 numbers that byte can stand for */
     pixfmt   pf;                            /* a texel; for blocks and palettes, what they decode to */
     uint32_t level_w[GXM_TEX_LEVELS], level_h[GXM_TEX_LEVELS];      /* texels */
     uint32_t store_w[GXM_TEX_LEVELS], store_h[GXM_TEX_LEVELS];      /* units, as laid out */
@@ -70,6 +72,11 @@ typedef struct {
     uint32_t key[64];                       /* which block each slot holds */
     uint32_t texels[64][32];
 } gxm_tex_cache;
+
+/* Set, every texel is fetched and converted by itself, through the general
+ * path; clear, the common layouts are read as rows of words. For a test to
+ * hold the second way to the first. */
+extern int gxm_tex_plain_paths;
 
 /* Forget what a cache holds: before it is used for another texture, or
  * when the texture's bytes may have changed. */

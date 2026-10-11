@@ -57,6 +57,11 @@ uint32_t pixfmt_colour_texture(uint32_t format);
 /* One pixel's bytes as red, green, blue and alpha. */
 void pixfmt_decode(const pixfmt *f, const uint8_t *pixel, float rgba[4]);
 
+/* Set, every field is worked out afresh; clear, the fields with few values
+ * are looked up in tables made by the same arithmetic. For a test to hold
+ * the second way to the first. */
+extern int pixfmt_plain;
+
 /* The reverse, for the channels whose bit is set in `channels` (1 red,
  * 2 green, 4 blue, 8 alpha); the others keep what the pixel had. */
 void pixfmt_encode(const pixfmt *f, uint8_t *pixel, const float rgba[4], unsigned channels);

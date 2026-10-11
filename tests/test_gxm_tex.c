@@ -218,12 +218,128 @@ static void test_cube(void) {
     printf("  cube maps                      ok\n");
 }
 
+/* --- the fast ways against the general way ------------------------------------------------
+ * A sample has a general way, which asks for each texel by itself and works
+ * each field out, and faster ways for what a scene mostly reads: a field
+ * looked up in a table, a level read as rows of words. They have to give
+ * the same bits. So: textures of the kinds a title samples, filled at
+ * random; samples at random places and levels of detail, wrapped every way;
+ * each taken both ways and compared. */
+
+static uint64_t g_seed = 0x243F6A8885A308D3ull;
+static uint32_t rnd(void) {
+    g_seed ^= g_seed << 13; g_seed ^= g_seed >> 7; g_seed ^= g_seed << 17;
+    return (uint32_t)(g_seed >> 16);
+}
+static float rnd_between(float lo, float hi) { return lo + (hi - lo) * (float)(rnd() & 0xFFFFFF) / 16777215.0f; }
+
+static uint32_t plain_store[1 << 16];
+
+/* Every level of a compressed texture decoded, as a draw keeps them. */
+static void decode_levels(void) {
+    uint32_t *at = plain_store;
+    unsigned faces = t.cube ? 6 : 1;
+    for (unsigned level = 0; level < t.levels; level++) {
+        t.plain[level] = at;
+        for (unsigned face = 0; face < faces; face++) {
+            assert((size_t)(at - plain_store) + t.level_w[level] * t.level_h[level] <= sizeof(plain_store) / 4);
+            gxm_tex_unpack(&t, face, level, 0, t.store_h[level], at);
+            at += t.level_w[level] * t.level_h[level];
+        }
+    }
+}
+
+static void compare_ways(const char *what, unsigned rounds, int cube) {
+    for (unsigned i = 0; i < rounds; i++) {
+        float coord[3] = { rnd_between(-2.5f, 3.5f), rnd_between(-2.5f, 3.5f), rnd_between(-1.0f, 1.0f) };
+        float lod = (i & 3) ? rnd_between(-2.0f, 9.0f) : 0.0f, fast[4], slow[4];
+        if (cube) { coord[0] -= 0.5f; coord[1] -= 0.5f; }
+        gxm_tex_plain_paths = 0; pixfmt_plain = 0;
+        gxm_tex_sample(&t, &cache, coord, lod, fast);
+        gxm_tex_plain_paths = 1; pixfmt_plain = 1;
+        gxm_tex_cache_reset(&cache);
+        gxm_tex_sample(&t, &cache, coord, lod, slow);
+        gxm_tex_plain_paths = 0; pixfmt_plain = 0;
+        if (memcmp(fast, slow, sizeof(fast))) {
+            fprintf(stderr, "%s: at (%g, %g, %g) level %g the fast way gives %g %g %g %g, the general way %g %g %g %g\n", what,
+                    (double)coord[0], (double)coord[1], (double)coord[2], (double)lod,
+                    (double)fast[0], (double)fast[1], (double)fast[2], (double)fast[3],
+                    (double)slow[0], (double)slow[1], (double)slow[2], (double)slow[3]);
+            assert(0);
+        }
+    }
+}
+
+static void test_fast_ways(void) {
+    uint32_t w[4];
+    for (size_t i = 0; i < sizeof(store); i++) store[i] = (uint8_t)rnd();
+
+    /* four bytes a texel in rows, as a title's own colour buffers are: nearest
+     * and filtered, every way of wrapping, plain and on the display's curve */
+    for (uint32_t address = 0; address < 4; address++)
+        for (uint32_t filter = 0; filter < 2; filter++)
+            for (uint32_t gamma = 0; gamma < 2; gamma++) {
+                words(w, GXM_TEX_LINEAR, 0x0C000000u | (address << 12), 37, 21, 1, filter, address);
+                w[0] |= gamma << 27;
+                open_texture(w);
+                assert(t.bytes8 && t.kind == GXM_TEX_PLAIN);
+                compare_ways("four bytes in rows", 4000, 0);
+            }
+    /* the same when not all of it can be read: the general way answers zero past the end, and so must the fast */
+    words(w, GXM_TEX_LINEAR, 0x0C000000u, 64, 64, 1, 1, 0);
+    open_texture(w);
+    t.avail = 64 * 4 * 40;
+    compare_ways("four bytes in rows, cut short", 4000, 0);
+
+    /* a compressed texture with its levels decoded, as most of a scene's
+     * materials are: all three block kinds that matter and a PVRTC, with
+     * and without blending between levels */
+    static const uint32_t PACKED[] = { 0x85000000u, 0x87000000u, 0x86000000u, 0x83000000u };
+    for (size_t k = 0; k < sizeof(PACKED) / sizeof(PACKED[0]); k++)
+        for (uint32_t mip = 0; mip < 2; mip++)
+            for (uint32_t address = 0; address < 3; address++) {
+                memset(&t, 0, sizeof(t));
+                words(w, GXM_TEX_SWIZZLED, PACKED[k], 64, 32, 6, 1, address);
+                w[0] |= mip << 9;
+                open_texture(w);
+                assert(gxm_tex_is_packed(&t) && t.levels == 6);
+                decode_levels();
+                compare_ways("decoded blocks", 4000, 0);
+            }
+    /* a cube of them */
+    memset(&t, 0, sizeof(t));
+    words(w, GXM_TEX_CUBE, 0x87000000u, 16, 16, 3, 1, 2);
+    open_texture(w);
+    decode_levels();
+    compare_ways("a decoded cube", 4000, 1);
+    memset(&t, 0, sizeof(t));
+
+    /* and the formats whose fields are looked up: halves in tiles, the small
+     * floats, signed bytes, depth beside a byte of something else, in rows of a given length */
+    words(w, GXM_TEX_TILED, 0x1B000000u, 64, 32, 1, 1, 2);
+    open_texture(w);
+    compare_ways("halves in tiles", 4000, 0);
+    words(w, GXM_TEX_LINEAR, 0x1A000000u, 48, 16, 1, 1, 2);
+    open_texture(w);
+    compare_ways("small floats", 4000, 0);
+    words(w, GXM_TEX_LINEAR, 0x0D000000u, 48, 16, 1, 1, 0);
+    open_texture(w);
+    compare_ways("signed bytes", 4000, 0);
+    words(w, GXM_TEX_LINEAR_STRIDED, 0x15000000u, 40, 12, 1, 1, 2);
+    w[0] = (w[0] & ~((7u << 9) | (0x3FFu << 17) | (3u << 1))) | ((39u & 7) << 9) | ((39u >> 3) << 17);
+    open_texture(w);
+    assert(t.stride == 160);
+    compare_ways("depth in rows of a given length", 4000, 0);
+    printf("  the fast ways and the general  ok\n");
+}
+
 int main(void) {
     printf("gxm_tex:\n");
     test_layouts();
     test_blocks_and_palettes();
     test_samples();
     test_cube();
+    test_fast_ways();
     printf("all gxm_tex tests passed\n");
     return 0;
 }

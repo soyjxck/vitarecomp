@@ -14,7 +14,9 @@ void gxm_tex_cache_reset(gxm_tex_cache *c) { memset(c->key, 0xFF, sizeof(c->key)
 
 /* A byte as a fraction, and as light when it was kept on the display's
  * curve: the two conversions nearly every texel goes through, looked up. */
-static float g_unorm8[256], g_srgb8[256];
+static float g_unorm8[256], g_srgb8[256], g_zero8[256], g_one8[256];
+
+int gxm_tex_plain_paths;
 
 static void tables(void) {
     static int made;
@@ -22,18 +24,28 @@ static void tables(void) {
     for (int i = 0; i < 256; i++) {
         g_unorm8[i] = (float)i / 255.0f;
         g_srgb8[i] = pix_srgb_to_linear(g_unorm8[i]);
+        g_zero8[i] = 0.0f;
+        g_one8[i] = 1.0f;
     }
     made = 1;
 }
 
-/* A texel whose fields are whole bytes, through the tables. */
-static void bytes_texel(const gxm_tex *t, uint32_t px, float rgba[4]) {
+/* For a texel whose fields are whole bytes: which byte each channel is, and
+ * the table that says what the byte stands for. A channel the format lacks
+ * gets a table that says the same thing whatever the byte. */
+static void channels(gxm_tex *t) {
     for (int c = 0; c < 4; c++) {
         int from = t->pf.from[c];
         /* light, for the colour channels of a texture kept on the curve: all three, or the two a two-channel format has */
         const float *table = t->gamma && (c < 2 || (c == 2 && t->gamma != 3)) ? g_srgb8 : g_unorm8;
-        rgba[c] = from == PIX_ZERO ? 0.0f : from == PIX_ONE ? 1.0f : table[(px >> (8 * from)) & 255];
+        t->chan_table[c] = from == PIX_ZERO ? g_zero8 : from == PIX_ONE ? g_one8 : table;
+        t->chan_shift[c] = from < 0 ? 0 : (uint8_t)(8 * from);
     }
+}
+
+/* A texel whose fields are whole bytes, through the tables. */
+static void bytes_texel(const gxm_tex *t, uint32_t px, float rgba[4]) {
+    for (int c = 0; c < 4; c++) rgba[c] = t->chan_table[c][(px >> t->chan_shift[c]) & 255];
 }
 
 /* --- the control words ------------------------------------------------------------ */
@@ -103,6 +115,7 @@ int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
     for (int i = 0; i < t->pf.fields; i++)
         if (t->pf.f[i].kind != PIX_UNORM || t->pf.f[i].bits != 8 || t->pf.f[i].shift != 8 * i) t->bytes8 = 0;
     if (t->kind == GXM_TEX_PVRTC) { t->unit_w = t->pvrtc_bits == 2 ? 8 : 4; t->unit_h = 4; }
+    channels(t);
 
     /* no more levels than the shorter side can be halved */
     uint32_t shorter = t->width < t->height ? t->width : t->height, most = 1;
@@ -292,6 +305,7 @@ void gxm_tex_unpack(const gxm_tex *t, unsigned face, unsigned level, uint32_t ro
 static int wrap(int i, int n, int mode) {
     switch (mode) {
     case 0: case 4:                             /* repeat */
+        if (!(n & (n - 1))) return i & (n - 1); /* the same, when the side is a power of two: no division */
         i %= n;
         return i < 0 ? i + n : i;
     case 1:                                     /* mirror: every other period runs backwards */
@@ -306,18 +320,64 @@ static int wrap(int i, int n, int mode) {
     }
 }
 
+/* Where a level's texels lie, when they can be read as rows of four-byte
+ * words with nothing asked of each: a compressed level that has been
+ * decoded, or rows of four whole bytes a texel all of which are readable.
+ * That is most of what a scene samples, its materials and its own colour
+ * buffers. NULL for anything else, which goes texel by texel through
+ * gxm_tex_texel. `stride` is in words. */
+static const uint8_t *word_rows(const gxm_tex *t, unsigned face, unsigned level, uint32_t *stride) {
+    uint32_t w = t->level_w[level], h = t->level_h[level];
+    if (gxm_tex_plain_paths || level >= t->levels || !t->base || t->kind == GXM_TEX_UNKNOWN) return NULL;
+    if (t->plain[level]) {
+        *stride = w;
+        return (const uint8_t *)(t->plain[level] + (size_t)face * h * w);
+    }
+    if (t->kind == GXM_TEX_PLAIN && t->type == GXM_TEX_LINEAR && t->bytes8 && t->pf.bytes == 4) {
+        uint64_t at = (uint64_t)face * t->face_bytes + t->level_at[level];
+        if (at + ((uint64_t)(h - 1) * t->store_w[level] + w) * 4 > t->avail) return NULL;
+        *stride = t->store_w[level];
+        return t->base + at;
+    }
+    return NULL;
+}
+
+static uint32_t word_at(const uint8_t *rows, uint32_t stride, int x, int y) {
+    uint32_t word;
+    memcpy(&word, rows + ((size_t)y * stride + (size_t)x) * 4, 4);
+    return word;
+}
+
 static void sample_level(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsigned level, float u, float v,
                          int linear, float rgba[4]) {
     int w = (int)t->level_w[level], h = (int)t->level_h[level];
     int um = t->cube ? 2 : t->u_mode, vm = t->cube ? 2 : t->v_mode;
+    uint32_t stride = 0;
+    const uint8_t *rows = word_rows(t, face, level, &stride);
     if (!linear) {
-        gxm_tex_texel(t, cache, face, level, wrap((int)floorf(u * (float)w), w, um), wrap((int)floorf(v * (float)h), h, vm), rgba);
+        int px = wrap((int)floorf(u * (float)w), w, um), py = wrap((int)floorf(v * (float)h), h, vm);
+        if (rows) bytes_texel(t, word_at(rows, stride, px, py), rgba);
+        else gxm_tex_texel(t, cache, face, level, px, py, rgba);
         return;
     }
     float x = u * (float)w - 0.5f, y = v * (float)h - 0.5f;
     float fx0 = floorf(x), fy0 = floorf(y), fx = x - fx0, fy = y - fy0;
     int x0 = wrap((int)fx0, w, um), x1 = wrap((int)fx0 + 1, w, um);
     int y0 = wrap((int)fy0, h, vm), y1 = wrap((int)fy0 + 1, h, vm);
+    if (rows) {
+        /* the four words, and for each channel its four numbers and their blend */
+        uint32_t wa = word_at(rows, stride, x0, y0), wb = word_at(rows, stride, x1, y0);
+        uint32_t wc = word_at(rows, stride, x0, y1), wd = word_at(rows, stride, x1, y1);
+        for (int i = 0; i < 4; i++) {
+            const float *table = t->chan_table[i];
+            unsigned shift = t->chan_shift[i];
+            float ca = table[(wa >> shift) & 255], cb = table[(wb >> shift) & 255];
+            float cc = table[(wc >> shift) & 255], cd = table[(wd >> shift) & 255];
+            float top = ca + (cb - ca) * fx, bottom = cc + (cd - cc) * fx;
+            rgba[i] = top + (bottom - top) * fy;
+        }
+        return;
+    }
     float a[4], b[4], c[4], d[4];
     gxm_tex_texel(t, cache, face, level, x0, y0, a);
     gxm_tex_texel(t, cache, face, level, x1, y0, b);

@@ -282,7 +282,14 @@ Not there yet, in the order the title will want them:
    at a time as they are sampled; and the fragment program run for
    sixty-four pixels at a time (30 ms). The scene behind the health
    warning, 45,000 triangles and five million pixels, went from a second
-   to about 350 ms. What is left is in milestone E.
+   to about 350 ms. Then the texture samples, which were over half of
+   what a frame of the opening cinematic costs, nine million of them: a
+   field's value looked up where it has few values (a half, a small
+   float, a byte) in place of a division or a scaling each time, and a
+   level read as rows of words where it is rows of words, which took a
+   quarter off them. `VITARECOMP_GXM_PROFILE` says where a frame's time
+   goes now: samples still first, then the programs, the walk over the
+   triangles, the store. What is left is in milestone E.
 2. Lines and points, depth bias, the mask-update program, multisampled
    targets, the YUV textures a movie arrives in, the transfer calls.
    Each is counted or named where it is skipped, none is silent.
