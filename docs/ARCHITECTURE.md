@@ -819,20 +819,20 @@ Three files, each knowing less of the console than the one before.
 
 - `src/gxm_gpu.c` takes a list as `gxm_draw.c` keeps it
   (`src/gxm_draw_list.h`) and decides whether the card can draw it as
-  the processor would. If it can, the target goes to the card as the
-  title's memory holds it, the draws follow, and the target comes back:
-  nothing above knows which way a list was drawn. A list it cannot do is
-  left to the processor whole, and the reason is said once: a depth
-  surface of sixteen bits, a draw of several instances, a draw whose two
-  faces are tested differently, a region drawn outside of, a mask that
-  turns pixels away, a program that does not translate.
+  the processor would. If it can, the card draws it, to surfaces it
+  keeps (below). A list it cannot do is left to the processor whole,
+  and the reason is said once: a draw of several instances, a draw
+  whose two faces are tested differently, a region drawn outside of, a
+  mask that turns pixels away, a stencil test beside sixteen bits of
+  depth, a program that does not translate.
 - `src/gxp_hlsl.c` writes a program of the title's as HLSL: the
   interpreter's steps as text, a block to an instruction, the registers
   still banks of 32-bit words, so that what a program does to its bits
   it does there too. `armrecomp hlsl <file.gxp>` prints the translation
   of a dumped program.
 - `src/gpu.h` is a card as far as the rest needs one: shaders as text,
-  textures as rows of texels, a draw as buffers and state.
+  textures as rows of texels, surfaces it draws to and keeps, a draw as
+  buffers and state.
   `src/gpu_d3d11.c` is the one implementation, `src/gpu_none.c` what is
   linked where there is none.
 
@@ -897,15 +897,70 @@ through the first title's front end and its first minute of play.
 | A program part-way | `VITARECOMP_GXM_PROBE=<name>:<count>:<from>:<to>` | the program of that name runs only its first `count` instructions and then moves the register `from` (a half of it with `.x` to `.w`) into `to`: with `to` its result register, the check compares what `from` held there, and so finds the first instruction two renderers part at |
 | One level | `VITARECOMP_GXM_ONE_LEVEL=1` | every texture read from its first level, in both renderers |
 | The shaders | `VITARECOMP_GXM_GPU_SHADERS=<dir>` | each program's HLSL as it was compiled |
-| Textures made | `VITARECOMP_GXM_GPU_LOG=1` | each texture handed to the card: size, levels, format, filters |
+| What travels | `VITARECOMP_GXM_GPU_LOG=1` | each texture made from memory: size, levels, format, filters; each surface filled from memory or sent back to it |
+| The long way round | `VITARECOMP_GXM_GPU_KEEP=0` | every surface back in memory after every list |
 | Another card | `VITARECOMP_GPU_WARP=1`, `VITARECOMP_GPU_DEBUG=1` | the system's own rasteriser in place of the card; Direct3D's checking layer |
 
 `VITARECOMP_GXM_AT_ONCE=1` makes a list of every draw, which is how a
 difference in a scene of two hundred draws is brought down to one.
 
-Drawn this way a frame is not yet faster. Every list carries its target
-to the card and back, and a surface one scene draws and the next samples
-goes through the title's memory in between, converted both ways on the
-processor: a frame of play takes 177 ms so, against 85 for the
-processor's own renderer. What the card is for begins when surfaces stay
-on it (PLAN.md, milestone E).
+#### Surfaces stay on the card
+
+A frame of play is twenty lists to a dozen surfaces, and most of what a
+list samples is what an earlier list drew. Carried through the title's
+memory between them, converted both ways on the processor, that was 177
+ms a frame, twice the processor's own renderer. So a surface a list has
+drawn stays where it was drawn, and for each of the title's surfaces
+`gxm_gpu.c` knows which holds what the surface is: the card, or memory,
+and if memory, whether the card's copy still agrees, by a hash of the
+bytes.
+
+- **A list's target** is found on the card if the card holds it, and
+  filled from memory only if memory is the newer.
+- **A texture whose bytes lie in a surface the card holds** is made
+  from that surface on the card, by a program written for the reading
+  (`view_text`): for a texel of the texture, which bytes of the
+  surface's memory it would be, which pixel of the card's surface
+  holds them, the words those were, and the texel's fields out of the
+  words as `pixfmt.c` reads them. A geometry buffer of two words a
+  pixel read as a texture twice as wide of four bytes a texel, and
+  again from four bytes further on; depth read as a number; a surface
+  the card holds as floats read in the surface's own form, as that form
+  would have kept it. A texture is a reading of the surface it begins
+  in and of no other, whatever its layout rounds its size up to.
+- **A scene's depth** is where the scene's lists left it. A scene that
+  ends on the card with a depth surface to keep leaves it there as that
+  surface's; one that begins by reading a surface the card holds starts
+  from it there, from a copy if the scene is not to change it, from its
+  corner if the scene's surface is the corner of a larger one (which
+  the first title does: a half-size pass tested against the top left of
+  the full-size depth).
+- **A surface that is the corner of another's memory**, a half-size
+  picture drawn into a full-size surface's rows, is drawn through the
+  larger: fetched from its corner before the list and put back after,
+  on the card.
+- **Bytes go back to memory** when something off the card wants them:
+  a list the processor draws, the display (`vita_display_current`), a
+  scene that reads a surface the card cannot hand over, a texture no
+  program can be written for (each reason said once), the same memory
+  about to be drawn as a surface of another form. And at once for a
+  surface of a few pixels: the first title reads the brightness of its
+  frame off a surface 32 pixels square, in its own code, and nothing
+  says when.
+
+What is not yet known is when a title's own code reads a larger surface.
+The plan for that is a watch on the pages (PLAN.md).
+
+`VITARECOMP_GXM_GPU_KEEP=0` sends every surface back at the end of every
+list: the same arithmetic by the same card, the long way round, for
+telling a fault in the keeping from a fault in the drawing.
+`VITARECOMP_GXM_GPU_LOG=1` says each surface filled from memory and each
+sent back, and the stage profile (`VITARECOMP_GXM_PROFILE`) has a line
+for the card: what a frame spent looking over textures' bytes, making
+textures, on targets, on vertices, in draws, waiting.
+
+A frame of play takes 36 to 43 ms so (2026-10-11, Direct3D 11, GeForce
+RTX 4090), against 85 for the processor's renderer on twenty-four
+threads. Of that the title's own code is some fifteen; making each
+draw's vertices ready is ten, the draws themselves five, and hashing
+thirty megabytes of textures three.

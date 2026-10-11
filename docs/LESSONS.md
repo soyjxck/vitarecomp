@@ -1133,3 +1133,46 @@ program both renderers run, so neither has to be taught to show its
 insides, and the check that already compares pictures then compares
 registers.
 
+## Keeping surfaces on the card (2026-10-11)
+
+The card drew every list right and a frame took twice as long as on the
+processor, all of it in carrying surfaces to the card and back. Leaving
+them there went wrong five ways before it went right, and each time the
+picture was nearly right.
+
+1. **A texture was freed under the list that had been handed it.** A
+   list is made ready before it is drawn: its textures first. One
+   texture was made from a surface on the card and handed to an early
+   draw; a later draw's texture could not be, sent the surface back to
+   memory, and the first texture, asked for again, was made anew from
+   memory and the old one freed. The early draw still held it. What a
+   list replaces is now freed when the next list begins.
+2. **A texture's size is not where its bytes end.** Layouts round up: a
+   tiled texture of 720 by 408 is said to occupy four megabytes, and the
+   surface it reads ends after two and a third, where the next surface
+   begins. Every such texture "overlapped" its neighbour, and the
+   neighbour was sent back to memory to be read. A texture that begins
+   in a surface is a reading of that surface.
+3. **A half-size scene tested against the corner of the full-size
+   depth.** The same depth memory is described twice, at 720 by 408 and
+   at 360 by 204 with the same rows. The card held the first; the second
+   was read from memory, which was a frame old, and a sheet of mist that
+   should have been behind a wall was in front of it.
+4. **The title's own code reads a surface.** With everything else right
+   the whole picture was one or two parts in a hundred too bright. The
+   exposure of a frame is set from the brightness of the last, and the
+   title reads that off a surface 32 pixels square with its processor,
+   not with a shader. Memory was never told. Found by sending back only
+   the surfaces under some size and watching the difference from the
+   long way round vanish.
+5. **A texture larger than the surface it was made from.** With one way
+   of keeping two surfaces in one memory switched off, to find another
+   fault, the picture got worse: a full-size texture was being made
+   from the half-size surface in its corner, and what lay outside the
+   corner came out as nothing. A reading is made on the card only when
+   every texel of it is a pixel of the surface.
+
+`VITARECOMP_GXM_GPU_KEEP=0` is what made each of these findable: the
+same card, the same shaders, every surface through memory. Whatever
+differs between the two is the keeping.
+
