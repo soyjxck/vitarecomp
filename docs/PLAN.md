@@ -311,10 +311,16 @@ Not there yet, in the order the title will want them:
    triangles, then a tile of the target to a thread, the fullest tiles
    first. A frame of the cinematic went from 350 ms and more to about
    110 on twenty-four threads, and two minutes of the title that took
-   twenty-seven minutes to draw took six. `VITARECOMP_GXM_PROFILE` says
-   where a frame's time goes now: the threads are busy, and what they
-   are busy with is samples first, then the programs, the walk over the
-   triangles, the store. What is left is in milestone E.
+   twenty-seven minutes to draw took six. Then the walk over the
+   triangles, which covers 8.6 million pixels a frame to shade 4.8: a
+   pixel's varyings are worked out four at a time, their rates of change
+   only where a texture with smaller copies is placed by them, and the
+   stencil and depth tests are made in the walk itself, before either,
+   for the draws where a pixel that fails changes nothing. A fifth off
+   the walk. `VITARECOMP_GXM_PROFILE` says where a frame's time goes
+   now: the threads are busy, and what they are busy with is samples
+   first, then the programs, the walk, the store. What is left is in
+   milestone E.
 2. Lines and points, depth bias, the mask-update program, multisampled
    targets, the YUV textures a movie arrives in, the transfer calls.
    Each is counted or named where it is skipped, none is silent.
@@ -338,6 +344,13 @@ were (`VITARECOMP_GXM_SCALAR=1` is the interpreter one pixel at a time).
 A per-game repo consuming this one as a submodule, as upstream intended:
 host executable, game-specific HLE overrides, patches, packaging. The toolkit
 stays game-agnostic.
+
+The first exists, for the reference title: this repository as a submodule,
+a CMake file of twenty lines that hands it the translated code and names
+the program, and three scripts, to build from a copy of the title, to play,
+and to draw the first frames and compare them. It has needed no override
+and no patch: nothing in it is the title's but its name, the name of its
+module and three frame hashes.
 
 ## Housekeeping, ongoing
 

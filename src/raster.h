@@ -17,6 +17,8 @@
 #define VITARECOMP_RASTER_H
 
 #include <stddef.h>
+#include <math.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define RASTER_MAX_VARYINGS 64
@@ -50,6 +52,14 @@ typedef struct {
     int    width, height;                   /* in pixels */
     int    clip_x0, clip_y0, clip_x1, clip_y1;   /* the rectangle drawn into: x0 <= x < x1 */
     float *depth;                           /* width * height, or NULL for no depth buffer */
+    uint32_t depth_bits;                    /* the buffer keeps integers of so many bits: 0 for floats as they are */
+    /* A byte a pixel, or NULL, that a pixel is turned away by before
+     * anything else is asked of it: the pixel goes on when `stencil_ref`
+     * compared with its byte, both under `stencil_mask`, satisfies
+     * `stencil_func` (RASTER_*, the reference on the left). The plane is
+     * only read. */
+    const uint8_t *stencil;
+    uint8_t stencil_func, stencil_ref, stencil_mask;
 
     /* the viewport: window = offset + scale * (clip / w) */
     float  x_offset, x_scale, y_offset, y_scale, z_offset, z_scale;
@@ -59,7 +69,8 @@ typedef struct {
     int    clamp_depth;                     /* what is not cut is held to 0..1 */
     int    depth_func;                      /* RASTER_* */
     int    depth_write;
-    int    want_derivatives;                /* fill ddx and ddy */
+    uint64_t derivatives;                   /* a bit for each varying whose ddx and ddy are wanted, in fours:
+                                             * one of a four asked for, all of the four are given */
     int    varyings;                        /* floats per vertex in use */
 
     raster_shade shade;
@@ -68,6 +79,16 @@ typedef struct {
     /* counted for whoever asks */
     uint32_t triangles_in, triangles_drawn, pixels_shaded;
 } raster;
+
+/* A depth as a buffer of `bits`-bit integers keeps it: the nearest step,
+ * as a float again. A surface of integers compares and keeps integers;
+ * without this a surface stored and loaded again would never equal the
+ * depth of the same geometry drawn a second time. */
+static inline float raster_whole_depth(uint32_t bits, float depth) {
+    if (!bits) return depth;
+    double top = (double)((1u << bits) - 1), steps = floor((double)depth * top + 0.5);
+    return (float)((steps > top ? top : steps > 0.0 ? steps : 0.0) / top);
+}
 
 /* Draw one triangle. The vertices are not modified. */
 void raster_triangle(raster *r, const raster_vertex *a, const raster_vertex *b, const raster_vertex *c);

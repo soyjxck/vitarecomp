@@ -5,6 +5,14 @@
 #include <math.h>
 #include <string.h>
 
+/* Four varyings at a time where the processor has the means as a matter of
+ * course. The arithmetic is the same arithmetic in the same order, so a
+ * pixel's numbers do not depend on which way they were worked out. */
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+#include <emmintrin.h>
+#define RASTER_FOURS 1
+#endif
+
 #define W_MIN      1e-6f
 #define GUARD      4096.0f          /* clip x and y to this many viewport widths, so fixed point holds */
 #define SUB        16               /* sub-pixel steps per pixel */
@@ -134,7 +142,7 @@ static int setup(raster *r, const screen_vertex *a, const screen_vertex *b, cons
     float lc_dx = (float)(-(by - ay) * SUB) * inv_area, lc_dy = (float)((bx - ax) * SUB) * inv_area;
     t->q_dx = t->qb * lb_dx + t->qc * lc_dx;
     t->q_dy = t->qb * lb_dy + t->qc * lc_dy;
-    if (r->want_derivatives) {
+    if (r->derivatives) {
         float *u_dx = planes + 3 * nvar, *u_dy = planes + 4 * nvar;
         for (int i = 0; i < nvar; i++) {
             u_dx[i] = ub[i] * lb_dx + uc[i] * lc_dx;
@@ -173,26 +181,47 @@ uint32_t raster_walk_rect(const raster *r, const raster_piece *t, const float *p
     const float *u_dx = planes + 3 * nvar, *u_dy = planes + 4 * nvar;
     uint32_t shaded = 0;
 
-    float var[RASTER_MAX_VARYINGS], ddx[RASTER_MAX_VARYINGS], ddy[RASTER_MAX_VARYINGS];
+    /* what is not asked for is handed over as nothing */
+    float var[RASTER_MAX_VARYINGS], ddx[RASTER_MAX_VARYINGS] = { 0.0f }, ddy[RASTER_MAX_VARYINGS] = { 0.0f };
+    uint64_t wanted = r->derivatives;
     for (int64_t y = py0; y <= py1; y++) {
         int64_t w_ab = e_ab, w_bc = e_bc, w_ca = e_ca;
         float *depth_row = r->depth ? r->depth + (size_t)y * (size_t)r->width : NULL;
+        const uint8_t *stencil_row = r->stencil ? r->stencil + (size_t)y * (size_t)r->width : NULL;
         for (int64_t x = px0; x <= px1; x++, w_ab += ab_dx, w_bc += bc_dx, w_ca += ca_dx) {
             if ((w_ab | w_bc | w_ca) < 0) continue;
+            if (stencil_row && !depth_passes(r->stencil_func, (float)(r->stencil_ref & r->stencil_mask),
+                                             (float)(stencil_row[x] & r->stencil_mask))) continue;
             /* the weights of b and c, from the edges opposite them, without the bias */
             float lb = (float)(w_ca + bias_ca) * inv_area;
             float lc = (float)(w_ab + bias_ab) * inv_area;
             float z = za + zb * lb + zc * lc;
             if (r->clamp_depth) z = z < 0.0f ? 0.0f : z > 1.0f ? 1.0f : z;
-            if (depth_row && !depth_passes(r->depth_func, z, depth_row[x])) continue;
+            if (depth_row) {
+                /* tested here, before the varyings are worked out: most of what the walk does for a pixel */
+                z = raster_whole_depth(r->depth_bits, z);
+                if (!depth_passes(r->depth_func, z, depth_row[x])) continue;
+            }
             float q = qa + qb * lb + qc * lc;
             float w = 1.0f / q;
-            for (int i = 0; i < nvar; i++) var[i] = (ua[i] + ub[i] * lb + uc[i] * lc) * w;
-            if (r->want_derivatives)
-                for (int i = 0; i < nvar; i++) {
-                    ddx[i] = (u_dx[i] - var[i] * q_dx) * w;
-                    ddy[i] = (u_dy[i] - var[i] * q_dy) * w;
-                }
+            int i = 0;
+#ifdef RASTER_FOURS
+            __m128 lb4 = _mm_set1_ps(lb), lc4 = _mm_set1_ps(lc), w4 = _mm_set1_ps(w);
+            for (; i + 4 <= nvar; i += 4) {
+                __m128 v = _mm_mul_ps(_mm_add_ps(_mm_add_ps(_mm_loadu_ps(ua + i), _mm_mul_ps(_mm_loadu_ps(ub + i), lb4)),
+                                                 _mm_mul_ps(_mm_loadu_ps(uc + i), lc4)), w4);
+                _mm_storeu_ps(var + i, v);
+                if (!((wanted >> i) & 15)) continue;
+                _mm_storeu_ps(ddx + i, _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(u_dx + i), _mm_mul_ps(v, _mm_set1_ps(q_dx))), w4));
+                _mm_storeu_ps(ddy + i, _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(u_dy + i), _mm_mul_ps(v, _mm_set1_ps(q_dy))), w4));
+            }
+#endif
+            for (; i < nvar; i++) {
+                var[i] = (ua[i] + ub[i] * lb + uc[i] * lc) * w;
+                if (!((wanted >> (i & ~3)) & 15)) continue;
+                ddx[i] = (u_dx[i] - var[i] * q_dx) * w;
+                ddy[i] = (u_dy[i] - var[i] * q_dy) * w;
+            }
             shaded++;
             if (shade && !shade(user, (int)x, (int)y, z, t->clockwise, var, ddx, ddy)) continue;
             if (depth_row && r->depth_write) depth_row[x] = z;

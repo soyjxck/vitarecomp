@@ -705,13 +705,15 @@ frames:
 | Registers read unwritten | `VITARECOMP_GXM_UNWRITTEN=1` | each fragment program that reads a register nothing wrote, with the instruction and the register, and whether any of it reaches the program's result or its verdict on a pixel: every row of pixels is run twice on two fills and the two compared. The frames drawn in this mode are not pictures |
 
 Three switches are for time, not for looking. `VITARECOMP_GXM_PROFILE=<n>`
-prints, every n frames, what a frame cost by stage: the drawing thread's
-own time in making the draws and in the three steps of drawing a scene's
-list of them (vertices and triangles, sorting into tiles, the fill), and,
-summed over the threads that take part, the vertices and triangles again
-and, in the fill, the fragment programs' inputs, their texture samples,
-the programs, the tests and the store, with how many pixels went through a
-program in rows and how many one at a time. `VITARECOMP_GXM_SKIP=<first>-<last>`
+prints, every n frames, what a frame cost by stage: what it took from one
+frame to the next, all told, which has the title's own work in it; the
+drawing thread's own time in making the draws and in the three steps of
+drawing a scene's list of them (vertices and triangles, sorting into
+tiles, the fill); and, summed over the threads that take part, the
+vertices and triangles again and, in the fill, the fragment programs'
+inputs, their texture samples, the programs, the tests and the store,
+with how many pixels a triangle covered, how many went through a program
+in rows and how many one at a time. `VITARECOMP_GXM_SKIP=<first>-<last>`
 counts the draws of those frames and draws none of them, which takes a
 title past a screen it holds for a fixed time, a health warning over a
 costly scene, in seconds. What those frames would have left in any

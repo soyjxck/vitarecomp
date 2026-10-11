@@ -1024,3 +1024,18 @@ pass that wrote the depth, 1,984 in the pass that tested against it.
     gets a directory nothing has written to. Before two runs are
     compared they have to be known to start in the same place, and "the
     same command" is not that.
+
+18. **Asking first cost more than it saved.** Nearly half the pixels a
+    scene's triangles cover are turned away by the depth or stencil
+    test, after the walk has worked out every varying they would have
+    had. So the walk was given a second callback, asked before the
+    varyings: the tests moved into it, and the pixels that failed were
+    spared the arithmetic. The walk got slower by a twelfth. A call
+    through a pointer for every covered pixel costs more than four
+    varyings four at a time, and the pixels that pass now paid for two
+    calls. What worked was no callback: the walk reads the stencil byte
+    and the depth itself, for the draws whose state lets a failed pixel
+    go without a trace, and calls nobody for it. The measurement that
+    said so took three minutes, and without a process priority above
+    the machine's other work it would have said nothing: two runs of the
+    same build differed by more than the change.

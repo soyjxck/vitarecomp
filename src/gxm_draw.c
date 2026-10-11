@@ -359,6 +359,7 @@ typedef struct {
     struct batch *b;                        /* the pixels waiting for the program, when they go in rows */
     uint64_t ns[T_WORKER];                  /* for the profile */
     uint64_t in_rows, alone;                /* program runs: pixels that went in rows, and one at a time */
+    uint64_t covered;                       /* pixels some triangle covered, whatever became of them */
 } worker;
 
 static const uint8_t ATTRIBUTE_BYTES[11] = { 1, 1, 2, 2, 1, 1, 2, 2, 2, 4, 4 };
@@ -704,11 +705,7 @@ static void stencil_update(uint8_t *stored, unsigned op, const gxm_face *f) {
 /* A depth surface of integers compares and keeps integers: without this
  * a surface stored and loaded again would never equal the depth of the
  * same geometry drawn a second time. */
-static float whole_depth(const gxm_draw_state *s, float depth) {
-    if (!s->depth_bits) return depth;
-    double top = (double)((1u << s->depth_bits) - 1), steps = floor((double)depth * top + 0.5);
-    return (float)((steps > top ? top : steps > 0.0 ? steps : 0.0) / top);
-}
+static float whole_depth(const gxm_draw_state *s, float depth) { return raster_whole_depth(s->depth_bits, depth); }
 
 /* The stencil test and then the depth test, and what the outcome does to
  * the stencil and to the depth kept for the pixel. Whether it is drawn. */
@@ -1014,6 +1011,46 @@ static int collect_pixel(void *user, int x, int y, float depth, int clockwise,
     return 1;
 }
 
+/* Whether a draw's stencil and depth tests can be left to the walk, which
+ * makes them before a pixel's varyings are worked out: nearly half the
+ * pixels a scene's triangles cover fail one or the other. They can when a
+ * pixel that fails changes nothing and nothing is asked first that would:
+ * one state for both faces, a program that has no say in the tests, and
+ * nothing done to the stencil where either test fails. (The mask is asked
+ * first, but a masked pixel changes nothing either way: it is dropped
+ * after the tests here, before anything is kept.) */
+static int tests_in_the_walk(const draw *d) {
+    const gxm_draw_state *s = d->s;
+    const gxm_face *f = &s->face[0];
+    return d->wide && !d->late && !s->two_sided && !f->program_off &&
+           (!s->stencil || !f->write_mask || (!f->stencil_fail && (!s->depth || !f->depth_fail)));
+}
+
+/* collect_pixel for such a draw: the pixel has passed both tests, with the
+ * depth it will be kept at, and the walk keeps it. */
+static int collect_passed(void *user, int x, int y, float depth, int clockwise,
+                          const float *var, const float *ddx, const float *ddy) {
+    worker *wk = user;
+    const draw *d = wk->d;
+    gxm_draw_state *s = d->s;
+    size_t at = (size_t)y * s->width + (size_t)x;
+    (void)clockwise;
+    if (s->mask && !s->mask[at]) return 0;
+    if (!s->depth) depth = whole_depth(s, depth);       /* the walk has done it where there is a depth to test */
+    if (s->stencil) stencil_update(&s->stencil[at], s->face[0].depth_pass, &s->face[0]);
+    wk->pixels++;
+    if (!s->has_colour) return 1;
+
+    struct batch *b = wk->b;
+    unsigned n = b->n;
+    b->x[n] = x; b->y[n] = y; b->depth[n] = depth; b->back[n] = 0;
+    for (int i = 0; i < d->varyings; i++) b->var[i][n] = var[i];
+    memcpy(b->ddx[n], ddx, (size_t)d->varyings * sizeof(float));
+    memcpy(b->ddy[n], ddy, (size_t)d->varyings * sizeof(float));
+    if (++b->n == USSE_LANES) flush(wk);
+    return 1;
+}
+
 /* --- a scene's draws ---------------------------------------------------------------------
  * A draw is not drawn when it is made. Its state is copied, its uniforms
  * and its textures are read, and it is put on a list; the list is drawn
@@ -1066,28 +1103,34 @@ static float g_first[4][4];
 static unsigned g_first_count;
 
 static void profile_report(void) {
-    uint64_t ns[T_WORKER] = { 0 }, in_rows = 0, alone = 0;
+    uint64_t ns[T_WORKER] = { 0 }, in_rows = 0, alone = 0, covered = 0;
     for (unsigned w = 0; g_workers && w < vita_pool_size(); w++) {
         worker *wk = &g_workers[w];
         for (int k = 0; k < T_WORKER; k++) ns[k] += wk->ns[k];
         in_rows += wk->in_rows;
         alone += wk->alone;
+        covered += wk->covered;
         memset(wk->ns, 0, sizeof(wk->ns));
-        wk->in_rows = wk->alone = 0;
+        wk->in_rows = wk->alone = wk->covered = 0;
     }
     double per = 1e-6 / (double)g_profile;              /* nanoseconds over the frames, to milliseconds a frame */
     uint64_t batched = ns[T_INPUTS] + ns[T_SAMPLES] + ns[T_PROGRAM] + ns[T_STORE];
-    fprintf(stderr, "gxm time, ms a frame over %u frames to %u: draws begun %.1f, vertices and triangles %.1f, "
+    /* and what a frame took from one to the next, all told: the title's own work is in that and in nothing below */
+    static uint64_t last;
+    uint64_t now = now_ns();
+    fprintf(stderr, "gxm time, ms a frame over %u frames to %u: %.1f from one frame to the next; draws begun %.1f, vertices and triangles %.1f, "
                     "sorting %.1f, fill %.1f; summed over %u threads: vertices and triangles %.1f, and in the fill "
                     "inputs %.1f, samples %.1f, programs %.1f, tests and store %.1f, "
-                    "the walk and pixels shaded alone %.1f; %.0f pixels a frame in rows, %.0f alone\n",
-            g_profile, g_frame - 1, (double)g_main_ns[T_BEGIN] * per, (double)g_main_ns[T_VERTICES] * per,
+                    "the walk and pixels shaded alone %.1f; %.0f pixels a frame covered by a triangle, %.0f shaded in rows, %.0f alone\n",
+            g_profile, g_frame - 1, last ? (double)(now - last) * per : 0.0,
+            (double)g_main_ns[T_BEGIN] * per, (double)g_main_ns[T_VERTICES] * per,
             (double)g_main_ns[T_SETUP] * per, (double)g_main_ns[T_FILL] * per, vita_pool_size(),
             (double)ns[T_PREPARE] * per,
             (double)ns[T_INPUTS] * per, (double)ns[T_SAMPLES] * per, (double)ns[T_PROGRAM] * per, (double)ns[T_STORE] * per,
             (double)(ns[T_BAND] > batched ? ns[T_BAND] - batched : 0) * per,
-            (double)in_rows / (double)g_profile, (double)alone / (double)g_profile);
+            (double)covered / (double)g_profile, (double)in_rows / (double)g_profile, (double)alone / (double)g_profile);
     memset(g_main_ns, 0, sizeof(g_main_ns));
+    last = now;
 }
 
 unsigned gxm_draw_positions(float (*out)[4], unsigned max) {
@@ -1237,8 +1280,16 @@ void gxm_draw_add(const gxm_draw_state *s, unsigned primitive, unsigned index_si
     r->clip_z = RASTER_CLIP_FAR;            /* nearer than the near plane is drawn, at depth 0 */
     r->clamp_depth = 1;
     r->depth_func = RASTER_ALWAYS;          /* the tests are made here, with the stencil */
-    r->want_derivatives = 1;
     r->varyings = d->varyings;
+    /* The rate of change of a varying is wanted where it places a sample of
+     * a texture that has smaller copies of itself to choose among. */
+    r->derivatives = 0;
+    for (uint32_t i = 0; fp && i < fp->gxp.input_count; i++) {
+        const gxp_input *in = &fp->gxp.inputs[i];
+        const gxm_tex *t = in->has_texture && in->unit < GXP_TEXTURE_UNITS ? d->f.tex[in->unit] : NULL;
+        if (!t || t->cube || t->levels == 1 || in->coord >= GXP_SLOTS || d->slot_at[in->coord] < 0) continue;
+        r->derivatives |= 15ull << d->slot_at[in->coord];
+    }
     g_queued++;
     if (g_profile) g_main_ns[T_BEGIN] += now_ns() - began;
     if (at_once || own) gxm_draw_flush();
@@ -1447,14 +1498,32 @@ static void fill_tile(void *ctx, unsigned item, unsigned index) {
         const queued *q = g_queue[which];
         size_t per = raster_plane_floats(&q->r);
         raster_shade shade = shade_pixel;
+        raster r = q->r;                    /* this thread's, to say how the pixels are to be taken */
         worker_for(&q->d, index);
         if (q->d.wide) {
             if (!wk->b) wk->b = calloc(1, sizeof(*wk->b));
             if (wk->b) shade = collect_pixel;
+            if (wk->b && tests_in_the_walk(&q->d)) {
+                const gxm_draw_state *s = &q->s;
+                const gxm_face *f = &s->face[0];
+                shade = collect_passed;
+                if (s->stencil && (f->stencil_func & 7) != 7) {
+                    r.stencil = s->stencil;
+                    r.stencil_func = f->stencil_func & 7;
+                    r.stencil_ref = f->stencil_ref;
+                    r.stencil_mask = f->compare_mask;
+                }
+                if (s->depth) {
+                    r.depth = s->depth;
+                    r.depth_bits = s->depth_bits;
+                    r.depth_func = f->depth_func & 7;
+                    r.depth_write = f->depth_write;
+                }
+            }
         }
         for (; at < end && g_refs[at].draw == which; at++) {
             uint32_t k = g_refs[at].piece;
-            raster_walk_rect(&q->r, &q->pieces[k], q->planes + (size_t)k * per, row0, row0 + side, col0, col0 + side, shade, wk);
+            wk->covered += raster_walk_rect(&r, &q->pieces[k], q->planes + (size_t)k * per, row0, row0 + side, col0, col0 + side, shade, wk);
             if (q->d.each) flush(wk);
         }
         flush(wk);                          /* nothing waits beyond its draw, or its tile */

@@ -42,7 +42,7 @@ static void setup(raster *r, float *depth) {
     r->x_scale = r->y_scale = r->z_scale = 1.0f;
     r->depth_func = RASTER_ALWAYS;
     r->varyings = 4;
-    r->want_derivatives = 1;
+    r->derivatives = ~0ull;
     r->shade = shade;
     memset(g_count, 0, sizeof(g_count));
     memset(g_var, 0, sizeof(g_var));
@@ -162,6 +162,52 @@ static void test_depth(void) {
     raster_triangle(&r, &a, &b, &c);
     assert(g_count[2][2] == 2 && depth[2 * W + 2] == 0.25f);
     assert(g_count[1][2] == 1 && depth[1 * W + 2] == 0.5f);
+
+    /* A buffer of integers: what is compared and what is kept is the
+     * nearest of its steps. Sixteen steps of depth, 0.5 falls between two
+     * and is kept as 8/15; a triangle at 0.52 is the same step and does not
+     * pass "less", and one a step nearer does. */
+    setup(&r, depth);
+    for (int i = 0; i < W * H; i++) depth[i] = 1.0f;
+    r.depth_func = RASTER_LESS;
+    r.depth_write = 1;
+    r.depth_bits = 4;
+    a.pos[2] = b.pos[2] = c.pos[2] = 0.5f;
+    raster_triangle(&r, &a, &b, &c);
+    assert(g_count[1][1] == 1 && depth[1 * W + 1] == 8.0f / 15.0f);
+    a.pos[2] = b.pos[2] = c.pos[2] = 0.52f;
+    raster_triangle(&r, &a, &b, &c);
+    assert(g_count[1][1] == 1);
+    a.pos[2] = b.pos[2] = c.pos[2] = 0.47f;
+    raster_triangle(&r, &a, &b, &c);
+    assert(g_count[1][1] == 2 && depth[1 * W + 1] == 7.0f / 15.0f);
+    assert(raster_whole_depth(0, 0.3f) == 0.3f && raster_whole_depth(24, 1.0f) == 1.0f && raster_whole_depth(24, -0.5f) == 0.0f);
+
+    /* A plane of bytes turns pixels away before anything else: "not equal
+     * to 5, under a mask of 7" lets through every pixel whose byte is not
+     * 5 or 13, and the rest are not shaded and keep their depth. */
+    {
+        static uint8_t plane[W * H];
+        for (int i = 0; i < W * H; i++) plane[i] = (uint8_t)(i % 3 == 0 ? 13 : i % 3 == 1 ? 5 : 6);
+        setup(&r, depth);
+        for (int i = 0; i < W * H; i++) depth[i] = 1.0f;
+        r.depth_func = RASTER_LESS;
+        r.depth_write = 1;
+        r.stencil = plane;
+        r.stencil_func = RASTER_NOT_EQUAL;
+        r.stencil_ref = 5;
+        r.stencil_mask = 7;
+        a.pos[2] = b.pos[2] = c.pos[2] = 0.5f;
+        raster_triangle(&r, &a, &b, &c);
+        int through = 0, kept = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                int i = y * W + x;
+                if (i % 3 == 2) { through += g_count[y][x]; assert(!g_count[y][x] || depth[i] == 0.5f); }
+                else { assert(g_count[y][x] == 0 && depth[i] == 1.0f); kept++; }
+            }
+        assert(through > 20 && kept > 100);
+    }
     printf("  depth test                     ok\n");
 }
 
@@ -227,6 +273,33 @@ static void test_tiles(void) {
     assert(!memcmp(count, g_count, sizeof(count)));
     assert(!memcmp(var, g_var, sizeof(var)));
     assert(!memcmp(ddx, g_ddx, sizeof(ddx)));
+
+    /* Rates of change are worked out for the varyings they are asked for,
+     * a four at a time, and for no others; what is asked for comes out as
+     * it does when everything is. Five varyings: a four and one over. */
+    {
+        static float all[H][W][4], part[H][W][4];
+        raster five;
+        raster_piece piece[RASTER_MAX_PIECES];
+        float plane[RASTER_MAX_PIECES * 5 * 5];
+        setup(&five, NULL);
+        five.varyings = 5;
+        a.var[2] = 3.0f; b.var[2] = -1.0f; c.var[2] = 0.5f;
+        a.var[4] = 7.0f; b.var[4] = 9.0f; c.var[4] = 8.0f;
+        for (int pass = 0; pass < 2; pass++) {
+            five.derivatives = pass ? 1ull << 2 : ~0ull;            /* one varying of the first four */
+            memset(g_ddx, 0, sizeof(g_ddx));
+            int m = raster_setup(&five, &a, &b, &c, piece, plane);
+            for (int i = 0; i < m; i++) raster_walk(&five, &piece[i], plane + (size_t)i * raster_plane_floats(&five), 0, H, shade, NULL);
+            memcpy(pass ? part : all, g_ddx, sizeof(all));
+        }
+        assert(!memcmp(all, part, sizeof(all)));
+        int moving = 0;
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) moving += all[y][x][2] != 0.0f;
+        assert(moving > 40);
+        setup(&r, NULL);                                             /* as it was, for what follows */
+        n = raster_setup(&r, &a, &b, &c, pieces, planes);
+    }
 
     /* and a rectangle the triangle does not reach hands over nothing */
     assert(raster_walk_rect(&r, &pieces[0], planes, 0, H, W - 1, W, shade, NULL) == 0 || g_count[0][W - 1] >= 0);
