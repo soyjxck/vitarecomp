@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 extern uint32_t vita_mem_bad_access;
 
@@ -38,12 +39,60 @@ void *vita_mem_ptr(uint32_t addr, uint32_t len);
  * much is there is a legitimate question. */
 uint32_t vita_mem_avail(uint32_t addr);
 
-uint32_t vita_read32(uint32_t addr);
-uint16_t vita_read16(uint32_t addr);
-uint8_t  vita_read8 (uint32_t addr);
+/* The reads and writes of the program itself. A recompiled title makes a
+ * hundred million of them a second, so the one that lands in the region,
+ * which is every one of a program that is right, is done in line: a
+ * subtraction, a comparison, the bytes. Anything else goes to the function
+ * of the same name with _slow on it, which counts it as a bad access; and
+ * every write goes there while a write watchpoint is set (the room for
+ * writes is then nothing).
+ *
+ * Unaligned access is legal on ARMv7 for ordinary loads and stores, so the
+ * bytes go through memcpy rather than a cast. */
+extern uint8_t *vita_mem_host;              /* the host's bytes for the region's first address */
+extern uint32_t vita_mem_first;             /* that address */
+extern uint64_t vita_mem_read_room;         /* bytes from it that may be read, */
+extern uint64_t vita_mem_write_room;        /* and that may be written in line */
 
-void vita_write32(uint32_t addr, uint32_t v);
-void vita_write16(uint32_t addr, uint16_t v);
-void vita_write8 (uint32_t addr, uint8_t  v);
+uint32_t vita_read32_slow(uint32_t addr);
+uint16_t vita_read16_slow(uint32_t addr);
+uint8_t  vita_read8_slow (uint32_t addr);
+void vita_write32_slow(uint32_t addr, uint32_t v);
+void vita_write16_slow(uint32_t addr, uint16_t v);
+void vita_write8_slow (uint32_t addr, uint8_t  v);
+
+static inline uint32_t vita_read32(uint32_t addr) {
+    uint32_t at = addr - vita_mem_first, v;
+    if ((uint64_t)at + 4 > vita_mem_read_room) return vita_read32_slow(addr);
+    memcpy(&v, vita_mem_host + at, 4);
+    return v;
+}
+static inline uint16_t vita_read16(uint32_t addr) {
+    uint32_t at = addr - vita_mem_first;
+    uint16_t v;
+    if ((uint64_t)at + 2 > vita_mem_read_room) return vita_read16_slow(addr);
+    memcpy(&v, vita_mem_host + at, 2);
+    return v;
+}
+static inline uint8_t vita_read8(uint32_t addr) {
+    uint32_t at = addr - vita_mem_first;
+    if ((uint64_t)at + 1 > vita_mem_read_room) return vita_read8_slow(addr);
+    return vita_mem_host[at];
+}
+static inline void vita_write32(uint32_t addr, uint32_t v) {
+    uint32_t at = addr - vita_mem_first;
+    if ((uint64_t)at + 4 > vita_mem_write_room) { vita_write32_slow(addr, v); return; }
+    memcpy(vita_mem_host + at, &v, 4);
+}
+static inline void vita_write16(uint32_t addr, uint16_t v) {
+    uint32_t at = addr - vita_mem_first;
+    if ((uint64_t)at + 2 > vita_mem_write_room) { vita_write16_slow(addr, v); return; }
+    memcpy(vita_mem_host + at, &v, 2);
+}
+static inline void vita_write8(uint32_t addr, uint8_t v) {
+    uint32_t at = addr - vita_mem_first;
+    if ((uint64_t)at + 1 > vita_mem_write_room) { vita_write8_slow(addr, v); return; }
+    vita_mem_host[at] = v;
+}
 
 #endif /* VITARECOMP_MEM_H */

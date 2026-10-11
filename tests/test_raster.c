@@ -182,6 +182,22 @@ static void test_depth(void) {
     raster_triangle(&r, &a, &b, &c);
     assert(g_count[1][1] == 2 && depth[1 * W + 1] == 7.0f / 15.0f);
     assert(raster_whole_depth(0, 0.3f) == 0.3f && raster_whole_depth(24, 1.0f) == 1.0f && raster_whole_depth(24, -0.5f) == 0.0f);
+    /* the rounding, against the definition: the floor of depth * top + 1/2, clamped, over the top */
+    {
+        static const uint32_t BITS[] = { 4, 16, 24 };
+        uint64_t seed = 0x9E3779B97F4A7C15ull;
+        for (int k = 0; k < 3; k++) {
+            double top = (double)((1u << BITS[k]) - 1);
+            for (int i = 0; i < 400000; i++) {
+                seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+                float d = i < 8 ? (float[]){ 0.0f, 1.0f, -0.0f, 2.0f, -3.0f, 0.5f, 1e-30f, NAN }[i]
+                                : (float)((double)(seed >> 11) / 9007199254740992.0 * 1.25 - 0.125);
+                double steps = floor((double)d * top + 0.5);
+                float want = (float)((steps > top ? top : steps > 0.0 ? steps : 0.0) / top);
+                assert(raster_whole_depth(BITS[k], d) == want);
+            }
+        }
+    }
 
     /* A plane of bytes turns pixels away before anything else: "not equal
      * to 5, under a mask of 7" lets through every pixel whose byte is not

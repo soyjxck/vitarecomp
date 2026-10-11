@@ -86,8 +86,14 @@ typedef struct {
  * depth of the same geometry drawn a second time. */
 static inline float raster_whole_depth(uint32_t bits, float depth) {
     if (!bits) return depth;
-    double top = (double)((1u << bits) - 1), steps = floor((double)depth * top + 0.5);
-    return (float)((steps > top ? top : steps > 0.0 ? steps : 0.0) / top);
+    /* The steps below depth * top + 1/2, held to those there are. Said so
+     * that nothing is called: a number between nothing and the top is
+     * rounded down by being made a whole number, and this is done for
+     * every pixel a triangle covers. */
+    double top = (double)((1u << bits) - 1), scaled = (double)depth * top + 0.5;
+    if (!(scaled > 0.0)) return 0.0f;                   /* behind the nearest step, or no number at all */
+    if (scaled >= top + 1.0) return 1.0f;
+    return (float)((double)(uint32_t)scaled / top);
 }
 
 /* Draw one triangle. The vertices are not modified. */

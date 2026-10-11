@@ -19,6 +19,13 @@ static uint8_t *g_mem;
 static uint32_t g_base;
 static size_t   g_size;
 
+/* what the reads and writes done in line go by (mem.h) */
+uint8_t *vita_mem_host;
+uint32_t vita_mem_first;
+uint64_t vita_mem_read_room, vita_mem_write_room;
+
+static int watching(void);
+
 /* The first bad accesses are named under VITARECOMP_TRACE, because "24 bad
  * accesses" says something went wrong and nothing about what: the addresses
  * do. After the first few the count alone is kept, so a loop reading garbage
@@ -47,6 +54,10 @@ int vita_mem_init(uint32_t base, size_t size) {
     if (!g_mem) return 1;
     g_base = base;
     g_size = size;
+    vita_mem_host = g_mem;
+    vita_mem_first = base;
+    vita_mem_read_room = size;
+    vita_mem_write_room = watching() ? 0 : size;       /* a watched write is looked at, every one */
     return 0;
 }
 
@@ -55,6 +66,9 @@ void vita_mem_free(void) {
     g_mem = NULL;
     g_base = 0;
     g_size = 0;
+    vita_mem_host = NULL;
+    vita_mem_first = 0;
+    vita_mem_read_room = vita_mem_write_room = 0;
 }
 
 void *vita_mem_ptr(uint32_t addr, uint32_t len) {
@@ -72,25 +86,27 @@ uint32_t vita_mem_avail(uint32_t addr) {
     return (uint32_t)(g_size - off);
 }
 
-/* Unaligned access is legal on ARMv7 for ordinary loads and stores, so these
- * go through memcpy rather than a cast. A cast would be undefined behaviour on
+/* What the reads and writes in line leave: the access that is not in the
+ * region, counted and reported, and the write that is watched. Unaligned
+ * access is legal on ARMv7 for ordinary loads and stores, so these go
+ * through memcpy rather than a cast. A cast would be undefined behaviour on
  * an unaligned address and would fault outright on some hosts. */
 
-uint32_t vita_read32(uint32_t a) {
+uint32_t vita_read32_slow(uint32_t a) {
     void *p = vita_mem_ptr(a, 4);
     uint32_t v = 0;
     if (p) memcpy(&v, p, 4);
     return v;
 }
 
-uint16_t vita_read16(uint32_t a) {
+uint16_t vita_read16_slow(uint32_t a) {
     void *p = vita_mem_ptr(a, 2);
     uint16_t v = 0;
     if (p) memcpy(&v, p, 2);
     return v;
 }
 
-uint8_t vita_read8(uint32_t a) {
+uint8_t vita_read8_slow(uint32_t a) {
     void *p = vita_mem_ptr(a, 1);
     return p ? *(uint8_t *)p : 0;
 }
@@ -101,28 +117,32 @@ uint8_t vita_read8(uint32_t a) {
  * "who overwrote this stack slot", which no other trace can. */
 static uint32_t g_watch, g_watch_set = (uint32_t)-1;
 
-static void watch(uint32_t a, uint32_t len, uint32_t v) {
+static int watching(void) {
     if (g_watch_set == (uint32_t)-1) {
         const char *e = getenv("VITARECOMP_WATCH");
         g_watch_set = (e && *e) ? 1 : 0;
         if (g_watch_set) g_watch = (uint32_t)strtoul(e, NULL, 16);
     }
-    if (g_watch_set && g_watch >= a && g_watch < a + len)
+    return (int)g_watch_set;
+}
+
+static void watch(uint32_t a, uint32_t len, uint32_t v) {
+    if (watching() && g_watch >= a && g_watch < a + len)
         fprintf(stderr, "TRACE watch   write 0x%08X (%u bytes) = 0x%08X  at pc 0x%08X\n",
                 a, len, v, vita_last_pc);
 }
 
-void vita_write32(uint32_t a, uint32_t v) {
+void vita_write32_slow(uint32_t a, uint32_t v) {
     void *p = vita_mem_ptr(a, 4);
     if (p) { watch(a, 4, v); memcpy(p, &v, 4); }
 }
 
-void vita_write16(uint32_t a, uint16_t v) {
+void vita_write16_slow(uint32_t a, uint16_t v) {
     void *p = vita_mem_ptr(a, 2);
     if (p) { watch(a, 2, v); memcpy(p, &v, 2); }
 }
 
-void vita_write8(uint32_t a, uint8_t v) {
+void vita_write8_slow(uint32_t a, uint8_t v) {
     void *p = vita_mem_ptr(a, 1);
     if (p) { watch(a, 1, v); *(uint8_t *)p = v; }
 }

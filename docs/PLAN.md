@@ -341,8 +341,15 @@ Not there yet, in the order the title will want them:
    59); and the pool's threads take their items by counting, with no
    lock. A frame of the cinematic is 81 ms and of play 85 where the
    morning began at 123, and the two minutes of the title that first
-   took twenty-seven minutes to draw take four. What is left is in
-   milestone E.
+   took twenty-seven minutes to draw take four. One thing after those:
+   the title keeps its depth from scene to scene, so a third of a
+   million depths were read from its surface and written back to it
+   several times a frame, by one thread; the rows are now shared out
+   sixteen at a time, and a frame of play measured that afternoon at
+   99 ms was 90 after it. The title's own reads and writes of memory
+   are done in line, a comparison and the bytes, which is the usual
+   thing to do and has measured nothing here yet: its code is a sixth
+   of a frame. What is left is in milestone E.
 2. Lines and points, depth bias, the mask-update program, multisampled
    targets, the YUV textures a movie arrives in, the transfer calls.
    Each is counted or named where it is skipped, none is silent.

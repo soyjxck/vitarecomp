@@ -33,6 +33,7 @@
 #include "vitarecomp/hle.h"
 #include "vitarecomp/recomp_rt.h"
 #include "gxm_draw.h"
+#include "pool.h"
 #include "gxm_tex.h"
 #include "hle_sysmem.h"
 
@@ -1281,21 +1282,26 @@ static int depth_has_stencil_bytes(uint32_t format) { return format == 0x0002200
 /* Depth, stencil and mask between the scene's planes and the title's
  * surface, in the surface's format: floats, floats with the mask bit on
  * top, 24 bits under 8 of stencil, or 16 bits. */
-static void depth_transfer(int store) {
-    uint32_t control = g_scene.depth_surface[0], format = control & DS_FORMAT_BITS;
-    uint32_t stride = (((control >> 3) & 0xFF) + 1) * 32, layout = (control & DS_TILED) == DS_TILED ? GXM_SURFACE_TILED : GXM_SURFACE_LINEAR;
-    uint32_t depth_at = g_scene.depth_surface[1], stencil_at = g_scene.depth_surface[2];
-    uint32_t width = g_state.width, height = g_state.height;
-    uint32_t bytes = format == 0x02444000u ? 2 : 4;
-    uint32_t depth_avail = depth_at ? vita_mem_avail(depth_at) : 0, stencil_avail = stencil_at ? vita_mem_avail(stencil_at) : 0;
-    uint8_t *depth = depth_avail && depth_has_depth(format) ? vita_mem_ptr(depth_at, 1) : NULL;
-    uint8_t *stencil = stencil_avail && depth_has_stencil_bytes(format) ? vita_mem_ptr(stencil_at, 1) : NULL;
-    if (width > stride) width = stride;
-    for (uint32_t y = 0; y < height; y++)
-        for (uint32_t x = 0; x < width; x++) {
+#define DEPTH_ROWS 16            /* rows of a depth surface a thread loads or stores at a time */
+
+typedef struct {
+    int store;
+    uint32_t format, stride, layout, width, height, bytes, depth_avail, stencil_avail;
+    uint8_t *depth, *stencil;
+} depth_job;
+
+static void depth_rows(void *ctx, unsigned item, unsigned worker) {
+    const depth_job *j = ctx;
+    uint32_t format = j->format, bytes = j->bytes, first = item * DEPTH_ROWS, last = first + DEPTH_ROWS;
+    uint8_t *depth = j->depth, *stencil = j->stencil;
+    int store = j->store;
+    (void)worker;
+    if (last > j->height) last = j->height;
+    for (uint32_t y = first; y < last; y++)
+        for (uint32_t x = 0; x < j->width; x++) {
             size_t i = (size_t)y * g_state.width + x;
-            uint32_t at = gxm_pixel_offset(layout, x, y, stride, height, stride, 1);
-            if (depth && at * bytes + bytes <= depth_avail) {
+            uint32_t at = gxm_pixel_offset(j->layout, x, y, j->stride, j->height, j->stride, 1);
+            if (depth && at * bytes + bytes <= j->depth_avail) {
                 uint8_t *p = depth + at * bytes;
                 uint32_t w = 0;
                 float f;
@@ -1323,10 +1329,32 @@ static void depth_transfer(int store) {
                     }
                 }
             }
-            if (stencil && at < stencil_avail) {
+            if (stencil && at < j->stencil_avail) {
                 if (store) stencil[at] = g_stencil[i]; else g_stencil[i] = stencil[at];
             }
         }
+}
+
+/* The scene's depth, stencil and mask to the title's depth surface, or
+ * from it: a pixel at a time, each row's pixels nobody else's, so the rows
+ * are shared out. A title that keeps its depth from scene to scene does
+ * this several times a frame, to a third of a million pixels. */
+static void depth_transfer(int store) {
+    uint32_t control = g_scene.depth_surface[0], depth_at = g_scene.depth_surface[1], stencil_at = g_scene.depth_surface[2];
+    depth_job j;
+    j.store = store;
+    j.format = control & DS_FORMAT_BITS;
+    j.stride = (((control >> 3) & 0xFF) + 1) * 32;
+    j.layout = (control & DS_TILED) == DS_TILED ? GXM_SURFACE_TILED : GXM_SURFACE_LINEAR;
+    j.width = g_state.width > j.stride ? j.stride : g_state.width;
+    j.height = g_state.height;
+    j.bytes = j.format == 0x02444000u ? 2 : 4;
+    j.depth_avail = depth_at ? vita_mem_avail(depth_at) : 0;
+    j.stencil_avail = stencil_at ? vita_mem_avail(stencil_at) : 0;
+    j.depth = j.depth_avail && depth_has_depth(j.format) ? vita_mem_ptr(depth_at, 1) : NULL;
+    j.stencil = j.stencil_avail && depth_has_stencil_bytes(j.format) ? vita_mem_ptr(stencil_at, 1) : NULL;
+    if (!j.depth && !j.stencil) return;
+    vita_pool_run((j.height + DEPTH_ROWS - 1) / DEPTH_ROWS, depth_rows, &j);
 }
 
 /* int sceGxmBeginScene(context, flags, const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion,
