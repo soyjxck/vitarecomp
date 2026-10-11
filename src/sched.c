@@ -61,6 +61,8 @@ static mtx_t    g_mtx;
 static vthread *g_cur;
 static int      g_init;
 
+int32_t vita_slice = VITA_SLICE;
+
 static uint64_t now_us(void) {
     struct timespec t;
     timespec_get(&t, TIME_UTC);
@@ -135,6 +137,16 @@ uint32_t vita_sched_threads(uint32_t *runnable) {
     return n;
 }
 
+uint32_t vita_sched_running(char *name, uint32_t cap) {
+    init_once();
+    mtx_lock(&g_mtx);
+    const vthread *t = g_cur;
+    uint32_t uid = t->state == T_RUNNING ? t->uid : 0;
+    if (name && cap) snprintf(name, cap, "%s", uid ? t->name : "(idle)");
+    mtx_unlock(&g_mtx);
+    return uid;
+}
+
 /* Timed waiters whose time has come become runnable; returns the earliest
  * time still pending, or 0. */
 static uint64_t expire(uint64_t now) {
@@ -196,6 +208,7 @@ static void switch_to(vthread *cur, vthread *next) {
     while (!cur->go) cnd_wait(&cur->wake, &g_mtx);
     cur->go = 0;
     cur->state = T_RUNNING;
+    vita_slice = VITA_SLICE;
 }
 
 /* A new guest thread's host thread: waits for its first turn, then runs the
@@ -207,6 +220,7 @@ static int thread_main(void *arg) {
     while (!t->go) cnd_wait(&t->wake, &g_mtx);
     t->go = 0;
     t->state = T_RUNNING;
+    vita_slice = VITA_SLICE;
     mtx_unlock(&g_mtx);
 
     vita_dispatch(0, t->entry);
@@ -375,6 +389,68 @@ void vita_sched_yield(void) {
     vthread *next = pick_next(cur);
     switch_to(cur, next);
     mtx_unlock(&g_mtx);
+}
+
+/* The running thread's slice ran out: the other runnable threads go, each
+ * for a slice of its own, and this one resumes when the round comes back.
+ * Timed waits that have come due count as runnable, so a thread that
+ * computes without a firmware call no longer holds a sleeper past its time. */
+void vita_slice_end(void) {
+    vita_slice = VITA_SLICE;
+    if (!g_init) return;                   /* one thread, and no one to give way to */
+    mtx_lock(&g_mtx);
+    vthread *cur = g_cur;
+    (void)expire(now_us());
+    int start = (int)(cur - g_t);
+    for (int k = 1; k < MAX_THREADS; k++) {
+        vthread *t = &g_t[(start + k) % MAX_THREADS];
+        if (t->state != T_READY) continue;
+        cur->state = T_READY;
+        switch_to(cur, t);
+        break;
+    }
+    mtx_unlock(&g_mtx);
+}
+
+/* The running thread is in a loop that only another thread can end (see
+ * recomp_rt.h). Another runnable thread goes at once. With none, a sleeper
+ * on the clock may still end it, so the host sleeps a little and the loop
+ * looks again; with none of those either nothing can ever change the word,
+ * which is a deadlock and is said. */
+void vita_spin_wait(uint32_t addr) {
+    init_once();
+    mtx_lock(&g_mtx);
+    vthread *cur = g_cur;
+    uint64_t now = now_us(), earliest = expire(now);
+    int start = (int)(cur - g_t);
+    for (int k = 1; k < MAX_THREADS; k++) {
+        vthread *t = &g_t[(start + k) % MAX_THREADS];
+        if (t->state != T_READY) continue;
+        cur->state = T_READY;
+        switch_to(cur, t);
+        mtx_unlock(&g_mtx);
+        return;
+    }
+    if (!earliest) {
+        uint32_t n = vita_sched_threads(NULL);
+        fprintf(stderr, "vitarecomp: \"%s\" waits at 0x%08X on memory that no thread can change (%u threads, the rest waiting); the program is deadlocked\n",
+                cur->name, addr, n);
+        for (int i = 0; i < MAX_THREADS; i++)
+            if (g_t[i].state == T_WAITING)
+                fprintf(stderr, "  %s (0x%08X) waits on kind %d object 0x%08X\n",
+                        g_t[i].name, g_t[i].uid, g_t[i].wait_kind, g_t[i].wait_obj);
+        mtx_unlock(&g_mtx);
+        vita_trap_unimpl(addr, n, "deadlock: a spin on memory no thread can change");
+        vita_host_exit(3);
+        return;
+    }
+    mtx_unlock(&g_mtx);
+    uint64_t d = earliest > now ? earliest - now : 0;
+    if (d > 1000) d = 1000;
+    if (d) {
+        struct timespec ts = { 0, (long)(d * 1000ull) };
+        thrd_sleep(&ts, NULL);
+    }
 }
 
 void vita_sched_delay(uint32_t us) {

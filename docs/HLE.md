@@ -36,6 +36,35 @@ a type's type_info against the runtime's `__si_class_type_info` by address.
 it, and the loader writes the address at every site the module's relocation
 blocks name (docs/ARCHITECTURE.md, "Variables are bound like functions").
 
+## Audio: the graph without the signal
+
+SceNgs, the synthesiser, is a graph the title builds and then reads back:
+racks of voices, each voice a fixed chain of modules (a sample player, an
+envelope, filters), patched output to input up to a master buss, and mixed
+one block per `sceNgsSystemUpdate`. A sound engine is a heavy reader of its
+own writes. It locks a voice's parameter block, fills it, and later locks it
+again and expects the same bytes; it polls how far a voice has played; it
+frees a voice when the callback says the sample has finished. A stub that
+accepts every call and remembers nothing breaks all three.
+
+`src/hle_ngs.c` keeps the graph and leaves out the sound. A rack lives in
+the block the title passes to `sceNgsRackInit`, sized by what
+`sceNgsRackGetRequiredMemorySize` asked for, so nothing is allocated behind
+the title's back: voice handles, patch handles and each module's parameter
+block are addresses in that block, and the host keeps what they mean. Each
+update moves every playing voice on by the block's samples at the voice's
+own rate, converted to bytes for 16-bit PCM, ADPCM or ATRAC9 from the
+stream's configuration word, through the buffer chain with its loop counts.
+A voice that reaches the end of its data, or was keyed off, finishes at that
+update and its callback runs on the thread that asked for the update. The
+audio output port takes as long to accept a block as the block lasts, which
+is what paces the thread. A decoder and a mixer can replace the silence
+without the title seeing a difference in anything but the samples.
+
+The voice definitions' module chains and the parameter structures' sizes
+are the console's interface, taken from Vita3K's documentation of it
+(`vita3k/ngs`).
+
 ## SceGxm is 107 functions, and that number is misleading
 
 `SceGxm` is the largest single import — over a fifth of everything. But the

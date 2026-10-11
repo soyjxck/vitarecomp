@@ -17,19 +17,27 @@ QA build to retail titles.
 through `armrecomp emit`, link against the runtime's HLE, and run in the
 headless host with zero traps, pixel-exact, exiting through firmware on a
 scripted START. `tools/e2e.sh` repeats both in CI on Windows and Linux and
-hash-checks the frames. The newlib sample needed a kernel, file and C-runtime
+hash-checks the frames, with a third sample, `samples/threads`, whose threads
+wait for each other by spinning. The newlib sample needed a kernel, file and C-runtime
 HLE surface, the NEON a retail title's own code asked for, jump tables, and fixes for nine emitter
 bugs that only running could find (docs/LESSONS.md).
 
-**Status, measured on this machine (2026-10-10):**
+**A retail title runs its frame loop (2026-10-11).** *Uncharted: Golden
+Abyss*, recompiled from its decrypted module, starts in the headless host,
+loads its front end and flips a frame every second vertical blank, with no
+dispatch miss and no bad access. Nothing is drawn yet: `sceGxm` is accepted
+and discarded, and the synthesiser plays in silence. Milestone D is the GPU.
+
+**Status, measured on this machine (2026-10-11):**
 
 | Check | Result |
 |---|---|
 | `tools/e2e.sh`: `samples/fbdemo` SELF to pixels | extract, emit (one function, 163 instructions, all translated), build `vita_host`, run 200 frames: 0 traps, 0 bad accesses, frame hash matches |
-| `tools/e2e.sh`: `samples/hello`, a newlib-linked program | 52 KB SELF, 54 imports across 11 libraries, all implemented on its path; 136 of 764 discovered functions emitted (the rest nothing can reach), 99.96 % translated; runs 60 frames with 0 traps and 0 bad accesses: `sceClibPrintf` reaches the console, `snprintf`/`malloc` output is drawn on screen with its own font, frame hash matches |
+| `tools/e2e.sh`: `samples/hello`, a newlib-linked program | 52 KB SELF, 54 imports across 11 libraries, all implemented on its path; 132 of 764 discovered functions emitted (the rest nothing can reach), 99.96 % translated; runs 60 frames with 0 traps and 0 bad accesses: `sceClibPrintf` reaches the console, `snprintf`/`malloc` output is drawn on screen with its own font, frame hash matches |
+| `tools/e2e.sh`: `samples/threads`, threads that never call the kernel to wait | two workers and the main thread wait for each other by spinning on memory, and share a test-and-set spinlock for 4,000 increments; the frame shows every check green and the counter exact, however the threads were interleaved |
 | `armrecomp emit` on VitaShell, whole module | 21,555 functions discovered (251 jump tables, 23,243 tail-call targets, 1,033 MOVW/MOVT pointers), 8,137 emitted: what an entry point, an export or a stored pointer can reach; 4.47 M instructions, 99.89 % translated, 395 MB of C; what still traps is NEON forms not yet claimed (0.09 %) and 581 branches to addresses discovery never registered |
-| *Uncharted: Golden Abyss* (retail, PCSA00029), decrypted by Vita3K from a NoNpDrm dump with its own licence | `ET_SCE_EXEC`, 9.43 MB of code, 3.33 M Thumb instructions, 5.34 % SIMD; 78,158 functions discovered (19,222 of them from MOVW/MOVT pairs), 483 jump tables, 83.0 % covered; 618 imports across 42 libraries, 585 named (SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34); 23,298 functions emitted, 2.37 M instructions at 99.98 % translated, 291 MB of C in 12 parts; 432 trapped instructions, 7 of them computed transfers |
-| *Golden Abyss* running in `vita_host` with Vita3K's decrypted data mounted as `app0:` | `module_start` allocates its memory, initialises FIOS2 and SceUlt, reads the 3 GB archive's index, starts its worker threads on the runtime's scheduler, finds its resources by their CRC, initialises `sceGxm` against the null driver, and reaches the parsing of its input tables |
+| *Uncharted: Golden Abyss* (retail, PCSA00029), decrypted by Vita3K from a NoNpDrm dump with its own licence | `ET_SCE_EXEC`, 9.43 MB of code, 3.33 M Thumb instructions, 5.34 % SIMD; 78,327 functions discovered (19,705 of them from MOVW/MOVT pairs), 508 jump tables, 83.1 % covered; 618 imports across 42 libraries, 585 named (SceGxm 122, SceLibc 79, SceFios2 42, SceLibm 39, SceLibKernel 39, SceNgs 34); 23,480 functions emitted, 2.37 M instructions at 99.98 % translated, 290 MB of C in 12 parts; 385 trapped instructions, 7 of them computed transfers; 66,689 backward branches carry the time slice |
+| *Golden Abyss* running in `vita_host` with Vita3K's decrypted data mounted as `app0:` | `module_start` allocates its memory, initialises FIOS2 and SceUlt, reads the 3 GB archive's index, starts its worker threads on the runtime's scheduler, finds its resources by their CRC, initialises `sceGxm` against the null driver, parses its input tables, builds its sound engine's eight racks on the silent synthesiser, loads its front end (`LOAD LEVEL( /frontend.bsp )`, `LEVEL START` in its own log) and runs its frame loop: 3,000 vertical blanks, 1,500 flips, 6.4 million indirect calls with no miss, no bad access, and three traps, each an import of the video and Near libraries that is not implemented |
 | Build (MSVC 14.50, CMake 4.3, Ninja) | `armrecomp.exe` + `vitarecomp.lib` build clean |
 | `ctest` | 5 / 5 suites pass (container, inflate, decode, reloc, runtime) |
 | `armrecomp info / extract / cover` on VitaShell 2.02 `eboot.bin` (homebrew, no keys) | 3 segments inflated, Adler-32 ok, ELF 4,882,182 bytes as declared; Thumb-2 dominant, 0.22 % unknown, 2.01 % SIMD |

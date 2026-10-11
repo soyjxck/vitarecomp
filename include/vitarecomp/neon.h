@@ -297,6 +297,23 @@ static inline int64_t vita_neon_asr64(int64_t v, int n) {
     return v < 0 ? (int64_t)~((uint64_t)~v >> n) : (int64_t)((uint64_t)v >> n);
 }
 
+/* VSHL by register: each lane of `a` shifted by the signed low byte of the
+ * same lane of `by`. A positive count shifts left and a negative one right,
+ * arithmetically for the signed form; a count as wide as the lane or wider
+ * leaves nothing but, shifting a signed value right, its sign. */
+static inline uint64_t vita_neon_shl_reg(uint64_t a, uint64_t by, int size, int is_unsigned) {
+    uint64_t r = 0, m = vita_lane_mask(size);
+    for (int i = 0; i * size < 64; i++) {
+        int n = (int8_t)(uint8_t)(by >> (i * size));
+        uint64_t v = vita_neon_lane(a, i, size), out;
+        if (n >= 0)          out = n >= size ? 0 : (v << n) & m;
+        else if (is_unsigned) out = -n >= size ? 0 : v >> -n;
+        else                 out = (uint64_t)vita_neon_asr64(vita_neon_slane(a, i, size), -n) & m;
+        r |= out << (i * size);
+    }
+    return r;
+}
+
 static inline uint64_t vita_neon_shr(uint64_t a, int size, int n, int is_unsigned) {
     uint64_t r = 0, m = vita_lane_mask(size);
     for (int i = 0; i * size < 64; i++) {

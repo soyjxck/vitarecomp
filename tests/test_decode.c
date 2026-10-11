@@ -729,6 +729,21 @@ static void test_vfp(void) {
     in = dec(ARM_T32, BASE);
     assert(in.op == OP_VMOV_D_TO_C && !in.vfp_dp && in.vm == 0);
 
+    /* vcvtb.f16.f32 s0, s0 / vcvtb.f16.f32 s1, s1 / vcvtb.f32.f16 s0, s0 /
+     * vcvtt.f32.f16 s0, s0: half precision, T in bit 7 of the low halfword. */
+    put16(0, 0xEEB3); put16(2, 0x0A40);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_F32_F16 && in.vd == 0 && in.vm == 0 && in.imm == 0);
+    put16(0, 0xEEF3); put16(2, 0x0A60);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_F32_F16 && in.vd == 1 && in.vm == 1 && in.imm == 0);
+    put16(0, 0xEEB2); put16(2, 0x0A40);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_F16_F32 && in.vd == 0 && in.vm == 0 && in.imm == 0);
+    put16(0, 0xEEB2); put16(2, 0x0AC0);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_F16_F32 && in.imm == 1);
+
     /* vcvt.f64.u32 d1, s0 and vcvt.f64.s32 d1, s0: the signedness is bit 7
      * of the second halfword. vcvt.f32.u32 s0, s1 likewise. */
     put16(0, 0xEEB8); put16(2, 0x1B40);
@@ -1160,6 +1175,61 @@ static void test_neon_structure_loads(void) {
     printf("  neon structure loads           ok\n");
 }
 
+/* VSHL by register: the value is Vm and the counts are Vn. */
+static void test_neon_shift_by_register(void) {
+    memset(code, 0, sizeof(code));
+    arm_insn in;
+
+    put16(0, 0xEF21); put16(2, 0x1402);     /* vshl.s32 d1, d2, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL_REG && in.vd == 1 && in.vn == 1 && in.vm == 2);
+    assert(in.neon_size == 32 && !in.vfp_unsigned && !in.neon_q);
+
+    put16(0, 0xFF6A); put16(2, 0x94A9);     /* vshl.u32 d25, d25, d26 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL_REG && in.vd == 25 && in.vn == 26 && in.vm == 25);
+    assert(in.neon_size == 32 && in.vfp_unsigned);
+
+    printf("  neon shift by register         ok\n");
+}
+
+/* The 32-bit PC-relative loads. Rn = 15 is the literal form, with a 12-bit
+ * offset whose sign is bit 7 of the first halfword: the bit the other forms
+ * use to pick the 12-bit immediate. Read the ordinary way, a negative
+ * offset becomes a register offset of zero, and the "literal" is the next
+ * instruction's bytes: a retail title's vector capacity came out as 69
+ * elements in a buffer of 30 that way. */
+static void test_pc_relative_loads(void) {
+    memset(code, 0, sizeof(code));
+    arm_insn in;
+
+    put16(0, 0xF85F); put16(2, 0x2020);     /* ldr.w r2, [pc, #-32] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDR && in.rn == 15 && in.rt == 2 && in.has_imm && in.imm == 32 && !in.mem_add);
+
+    put16(0, 0xF8DF); put16(2, 0x2020);     /* ldr.w r2, [pc, #32] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDR && in.rn == 15 && in.has_imm && in.imm == 32 && in.mem_add);
+
+    put16(0, 0xF83F); put16(2, 0x1004);     /* ldrh.w r1, [pc, #-4] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDRH && in.rn == 15 && in.rt == 1 && in.imm == 4 && !in.mem_add);
+
+    put16(0, 0xF91F); put16(2, 0x3010);     /* ldrsb.w r3, [pc, #-16] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDRSB && in.rn == 15 && in.rt == 3 && in.imm == 16 && !in.mem_add);
+
+    put16(0, 0xF81F); put16(2, 0xF020);     /* pld [pc, #-32]: a hint, nothing */
+    assert(dec(ARM_T32, BASE).op == OP_NOP);
+
+    /* The positive 16-bit form is unchanged: ldr r0, [pc, #8] */
+    put16(0, 0x4802);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDR && in.rn == 15 && in.imm == 8 && in.mem_add);
+
+    printf("  pc-relative loads              ok\n");
+}
+
 static void test_simd_identified(void) {
     memset(code, 0, sizeof(code));
 
@@ -1234,6 +1304,8 @@ int main(void) {
     test_arm_cond_f();
     test_simd_identified();
     test_neon_structure_loads();
+    test_pc_relative_loads();
+    test_neon_shift_by_register();
     test_vfp();
     test_neon_operands();
     test_exclusive();

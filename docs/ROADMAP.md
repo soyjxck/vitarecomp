@@ -262,7 +262,12 @@ measured on its own fixtures:
       snprintf, malloc and a 5x7 font on screen
 - [x] **Bring-up tools in the runtime**: function-entry trace with names
       from an `nm` listing, per-instruction register trace in a window,
-      write watchpoints, bad accesses reported with their PC
+      write watchpoints, bad accesses reported with their PC, a sampling
+      profile per thread and function; `VITARECOMP_WHY` for what discovery
+      made of one address
+- [x] **Threads that wait by spinning** (`samples/threads`): a time slice
+      counted at backward branches, and an immediate hand-over in a loop
+      that can only be ended by another thread
 - [ ] A windowed host (SDL2 behind an option)
 - [ ] Threads for real: `sceKernelCreateThread`, and a scheduler model
 

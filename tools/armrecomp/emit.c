@@ -65,6 +65,55 @@ static int fb_has_label(const fbody *b, uint32_t addr) {
     return 0;
 }
 
+/* A loop that only waits: loads, compares, and a conditional branch back to
+ * its top, every register it reads either untouched by the loop or loaded
+ * earlier in the same turn. Nothing in it writes memory and nothing carries
+ * from one turn to the next, so what it reads can change only by another
+ * thread's doing: `ldr r0, [sp]; cmp r0, #0; bne` waiting for a queued
+ * spinlock's holder to clear the waiter's word. The registers are what make
+ * this exact rather than a guess: `ldr r1, [r1]; cmp r1, #0; bne` walks a
+ * list, reads a register the previous turn wrote, and is not one. */
+static int reg_settled(uint32_t written, uint32_t done, int8_t r) {
+    return r < 0 || r > 15 || !((written >> r) & 1) || ((done >> r) & 1);
+}
+
+static int fb_wait_loop(const fbody *b, const arm_insn *br) {
+    if (br->cls != A_BRANCH || br->cond == ARM_COND_AL || !br->has_target || br->target >= br->addr)
+        return 0;
+    uint32_t k = (uint32_t)(br - b->v), s = k;
+    while (s > 0 && k - s < 8 && b->v[s - 1].addr >= br->target &&
+           b->v[s - 1].addr + b->v[s - 1].width == b->v[s].addr)
+        s--;
+    if (s == k || b->v[s].addr != br->target) return 0;
+
+    uint32_t written = 0, done = 0;
+    int loads = 0, compares = 0;
+    for (uint32_t i = s; i < k; i++) {
+        const arm_insn *p = &b->v[i];
+        if (p->cond != ARM_COND_AL) return 0;
+        if (p->op == OP_NOP) continue;
+        if (p->op == OP_CMP || p->op == OP_TST) { compares++; continue; }
+        if (p->op != OP_LDR && p->op != OP_LDRB && p->op != OP_LDRH &&
+            p->op != OP_LDRSB && p->op != OP_LDRSH) return 0;
+        if (p->cls != A_LOAD || p->writeback || p->mem_post || p->rt < 0 || p->rt > 12) return 0;
+        written |= 1u << p->rt;
+        loads++;
+    }
+    if (!loads || !compares) return 0;
+    for (uint32_t i = s; i < k; i++) {
+        const arm_insn *p = &b->v[i];
+        if (p->op == OP_NOP) continue;
+        if (p->op == OP_CMP || p->op == OP_TST) {
+            if (!reg_settled(written, done, p->rn != ARM_NO_REG ? p->rn : p->rd)) return 0;
+            if (!p->has_imm && !reg_settled(written, done, p->rm)) return 0;
+            continue;
+        }
+        if (!reg_settled(written, done, p->rn) || !reg_settled(written, done, p->rm)) return 0;
+        done |= 1u << p->rt;
+    }
+    return 1;
+}
+
 /* Collect a function by FOLLOWING ITS CONTROL FLOW, not by sweeping its extent.
  *
  * The distinction is the difference between a usable output and a 2.4 GB one.
@@ -415,7 +464,10 @@ static int address(char *dst, size_t cap, const arm_insn *in) {
          * that does not compile. That is the good failure — the bad one is a
          * `pc` that exists and holds something plausible. */
         uint32_t pc = (in->addr + 4) & ~3u;
-        snprintf(dst, cap, "0x%08X", in->mem_add ? pc + in->imm : pc - in->imm);
+        if (in->rm != ARM_NO_REG && !in->has_imm)
+            snprintf(dst, cap, "0x%08X + (%s << %u)", pc, src_name(in, in->rm), in->shift_amt);
+        else
+            snprintf(dst, cap, "0x%08X", in->mem_add ? pc + in->imm : pc - in->imm);
         return 1;
     }
     /* The U bit is not decoration: the T32 8-bit form encodes [rN, #-imm]
@@ -960,6 +1012,14 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             }
             break;
 
+        /* The value is Vm and the shift counts are Vn: the operands are
+         * written the other way round from every other three-register form. */
+        case OP_NEON_SHL_REG:
+            for (int q = 0; q <= in->neon_q; q++)
+                fprintf(f, "    vita_d_set(%d, vita_neon_shl_reg(vita_d_get(%d), vita_d_get(%d), %u, %d));\n",
+                        in->vd + q, in->vm + q, in->vn + q, in->neon_size, in->vfp_unsigned ? 1 : 0);
+            break;
+
         case OP_NEON_MAX: case OP_NEON_MIN: case OP_NEON_CGT: case OP_NEON_CGE: {
             const char *fn3 = in->op == OP_NEON_MAX ? "vita_neon_max" : in->op == OP_NEON_MIN ? "vita_neon_min"
                             : in->op == OP_NEON_CGT ? "vita_neon_cgt" : "vita_neon_cge";
@@ -1106,6 +1166,22 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        case OP_VCVT_F16_F32:
+            if (in->vd == ARM_NO_REG || in->vm == ARM_NO_REG) { ok = 0; break; }
+            fprintf(f, "    vfp_setf(%d, vita_f16_to_f32((uint16_t)(vfp_getu(%d) >> %u)));\n",
+                    in->vd, in->vm, in->imm ? 16u : 0u);
+            break;
+
+        case OP_VCVT_F32_F16:
+            if (in->vd == ARM_NO_REG || in->vm == ARM_NO_REG) { ok = 0; break; }
+            if (in->imm)
+                fprintf(f, "    vfp_setu(%d, (vfp_getu(%d) & 0x0000FFFFu) | ((uint32_t)vita_f32_to_f16(vfp_getf(%d)) << 16));\n",
+                        in->vd, in->vd, in->vm);
+            else
+                fprintf(f, "    vfp_setu(%d, (vfp_getu(%d) & 0xFFFF0000u) | vita_f32_to_f16(vfp_getf(%d)));\n",
+                        in->vd, in->vd, in->vm);
+            break;
+
         case OP_VCVT_FF:
             if (in->vd == ARM_NO_REG || in->vm == ARM_NO_REG) { ok = 0; break; }
             if (in->vfp_dp) fprintf(f, "    vfp_setf(%d, (float)vfp_getd(%d));\n", in->vd, in->vm);
@@ -1138,11 +1214,14 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
              * translation time and becomes a constant rather than a memory
              * access. This is also what stops the pool from being mistaken for
              * code later. */
-            if (in->rn == 15) {
+            if (in->rn == 15 && in->has_imm) {
                 uint32_t pc = (in->addr + 4) & ~3u;
+                /* The offset has a sign: the constant may sit before the
+                 * code that uses it. */
+                uint32_t at = in->mem_add ? pc + in->imm : pc - in->imm;
                 /* A literal word the loader fills with an imported variable's
                  * address holds a placeholder in the image. */
-                const vsite *vs = in->op == OP_LDR ? vsite_find(pc + in->imm) : NULL;
+                const vsite *vs = in->op == OP_LDR ? vsite_find(at) : NULL;
                 if (vs && vs->code == 2) {
                     char vsym[96];
                     var_symbol(vsym, sizeof(vsym), db, &mod->vars[vs->var]);
@@ -1150,7 +1229,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
                     st->var_refs++;
                     break;
                 }
-                const uint8_t *p = vm_va(img, pc + in->imm, 4);
+                const uint8_t *p = vm_va(img, at, 4);
                 if (p) {
                     uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
                                | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -1325,9 +1404,26 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
 
         case OP_B:
             if (fb_has_label(b, in->target)) {
-                if (in->cond == ARM_COND_AL) fprintf(f, "    goto L_%08X;\n", in->target);
-                else fprintf(f, "    if (vita_cond(%u)) goto L_%08X;\n",
-                             in->cond, in->target);
+                if (in->target > in->addr) {
+                    if (in->cond == ARM_COND_AL) fprintf(f, "    goto L_%08X;\n", in->target);
+                    else fprintf(f, "    if (vita_cond(%u)) goto L_%08X;\n",
+                                 in->cond, in->target);
+                } else if (fb_wait_loop(b, in)) {
+                    /* Only another thread can end this loop: let one run. */
+                    fprintf(f, "    if (vita_cond(%u)) { vita_spin_wait(0x%08Xu); goto L_%08X; }\n",
+                            in->cond, in->addr, in->target);
+                    st->back_edges++;
+                    st->wait_loops++;
+                } else {
+                    /* A backward branch is where a loop goes round, and where
+                     * the running thread's time slice is counted down. */
+                    if (in->cond == ARM_COND_AL)
+                        fprintf(f, "    { vita_back_edge(); goto L_%08X; }\n", in->target);
+                    else
+                        fprintf(f, "    if (vita_cond(%u)) { vita_back_edge(); goto L_%08X; }\n",
+                                in->cond, in->target);
+                    st->back_edges++;
+                }
             } else if (in->target < img->seg_vaddr ||
                        in->target >= img->seg_vaddr + img->seg_len) {
                 /* Outside the segment entirely. This is not a branch the

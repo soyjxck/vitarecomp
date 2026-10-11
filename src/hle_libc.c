@@ -16,6 +16,7 @@
 #include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
 #include "hle_format.h"
+#include "hle_sysmem.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -267,6 +268,79 @@ void vita_hle_strcat(void) {
     if (d && s) memcpy(d, s, ls + 1);
 }
 
+/* size_t strcspn(const char *s, const char *reject) / strspn / strpbrk:
+ * the span functions, each over the guest's own bytes. */
+static uint32_t span(uint32_t s_addr, uint32_t set_addr, int in_set, const char *who) {
+    uint32_t ls = gstrlen(s_addr, who), lset = gstrlen(set_addr, who);
+    const uint8_t *s = (const uint8_t *)gp(s_addr, ls + 1, who);
+    const uint8_t *set = (const uint8_t *)gp(set_addr, lset + 1, who);
+    if (!s || !set) return 0;
+    uint32_t n = 0;
+    for (; n < ls; n++) {
+        int hit = memchr(set, s[n], lset) != NULL;
+        if (hit != in_set) break;
+    }
+    return n;
+}
+void vita_hle_strcspn(void) { r0 = span(r0, r1, 0, "strcspn"); }
+void vita_hle_strspn(void)  { r0 = span(r0, r1, 1, "strspn"); }
+void vita_hle_strpbrk(void) {
+    uint32_t base = r0, n = span(r0, r1, 0, "strpbrk");
+    r0 = n < gstrlen(base, "strpbrk") ? base + n : 0u;
+}
+
+/* char *strncat(char *dst, const char *src, size_t n) */
+void vita_hle_strncat(void) {
+    uint32_t ld = gstrlen(r0, "strncat dst"), ls = gstrlen(r1, "strncat src");
+    uint32_t copy = ls < r2 ? ls : r2;
+    uint8_t *d = (uint8_t *)gp(r0 + ld, copy + 1, "strncat dst");
+    const void *s = copy ? gp(r1, copy, "strncat src") : NULL;
+    if (d) {
+        if (s) memcpy(d, s, copy);
+        d[copy] = 0;
+    }
+}
+
+/* int strcasecmp(const char *a, const char *b), and strcoll in the C locale */
+void vita_hle_strcasecmp(void) {
+    uint32_t la = gstrlen(r0, "strcasecmp a"), lb = gstrlen(r1, "strcasecmp b");
+    const uint8_t *a = (const uint8_t *)gp(r0, la + 1, "strcasecmp a");
+    const uint8_t *b = (const uint8_t *)gp(r1, lb + 1, "strcasecmp b");
+    if (!a || !b) { r0 = 0; return; }
+    uint32_t i = 0;
+    for (;; i++) {
+        int ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb || !ca) { r0 = (uint32_t)(int32_t)(ca - cb); return; }
+    }
+}
+void vita_hle_strcoll(void) { vita_hle_strcmp(); }
+
+/* int strncasecmp(const char *a, const char *b, size_t n) */
+void vita_hle_strncasecmp(void) {
+    uint32_t a = r0, b = r1, n = r2;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!vita_mem_ptr(a + i, 1) || !vita_mem_ptr(b + i, 1)) break;
+        int ca = vita_read8(a + i), cb = vita_read8(b + i);
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb || !ca) { r0 = (uint32_t)(int32_t)(ca - cb); return; }
+    }
+    r0 = 0;
+}
+
+/* char *strerror(int errnum): a line the program can print */
+void vita_hle_strerror(void) {
+    static uint32_t buf;
+    if (!buf) buf = vita_sysmem_reserve(0x100);
+    if (!buf) { r0 = 0; return; }
+    char text[64];
+    snprintf(text, sizeof(text), "error %d", (int)r0);
+    for (size_t i = 0; i <= strlen(text); i++) vita_write8(buf + (uint32_t)i, (uint8_t)text[i]);
+    r0 = buf;
+}
+
 void vita_hle_strchr(void) {
     uint32_t base = r0, l = gstrlen(base, "strchr");
     /* The terminator is findable: strchr(s, 0) returns the end of the string. */
@@ -414,6 +488,10 @@ void vita_hle_longjmp(void) {
     vita_host_exit(1);
 }
 
+/* int abs(int), long labs(long) */
+void vita_hle_abs(void)  { int32_t v = (int32_t)r0; r0 = (uint32_t)(v < 0 ? -v : v); }
+void vita_hle_labs(void) { vita_hle_abs(); }
+
 /* --- rand -------------------------------------------------------------------------
  * The library's own generator, so a program seeded the same way draws the same
  * numbers: the Dinkumware linear congruence, 15 bits of result. */
@@ -530,6 +608,7 @@ void vita_hle_strtok(void) {
     if (i < savail && p[i]) { p[i] = '\0'; g_strtok_next = s + i + 1; }
     else g_strtok_next = 0;
     r0 = s + start;
+    vita_hle_trace("strtok(%s0x%08X, \"%s\") -> 0x%08X \"%.40s\"", r0 == 0 ? "" : "", s, d, r0, p + start);
 }
 
 /* --- the C++ runtime's type_info and exceptions ---------------------------------
@@ -620,3 +699,8 @@ void vita_hle__Stoul(void) {
     if (r1 && vita_mem_ptr(r1, 4)) vita_write32(r1, r0 + (uint32_t)(end - buf));
     r0 = (uint32_t)v;
 }
+
+/* The kernel library exports a few of the C library's string functions
+ * under its own names, for programs that link no C library. */
+void vita_hle_sceClibStrrchr(void)     { vita_hle_strrchr(); }
+void vita_hle_sceClibStrncasecmp(void) { vita_hle_strncasecmp(); }

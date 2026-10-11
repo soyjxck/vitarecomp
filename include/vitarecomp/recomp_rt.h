@@ -267,6 +267,31 @@ uint32_t vita_trap_count(void);
  * every function; it does nothing unless the host turned it on. */
 void vita_trace_fn(uint32_t addr);
 
+/* --- the time slice -----------------------------------------------------------
+ *
+ * One guest thread runs at a time (sched.h), and on the console several do:
+ * a thread that waits for another by spinning on a word of memory waits for
+ * ever if the other never gets a turn. Every backward branch the generated
+ * C takes counts the running thread's slice down, and when it runs out the
+ * scheduler lets the other runnable threads go. A count rather than a
+ * clock, so a run schedules the same way every time; at backward branches
+ * because every loop has one, and an exclusive pair has none between its
+ * load and its store.
+ *
+ * A loop that reads memory, compares, and branches back, with nothing in it
+ * that could change what it reads, cannot end by anything its own thread
+ * does. The emitter recognises that shape and calls vita_spin_wait in it,
+ * which hands the baton over at once instead of burning the slice. */
+#define VITA_SLICE 20000
+
+extern int32_t vita_slice;
+void vita_slice_end(void);
+void vita_spin_wait(uint32_t addr);
+
+static inline void vita_back_edge(void) {
+    if (--vita_slice < 0) vita_slice_end();
+}
+
 /* TPIDRURO: the running thread's TLS block, as `mrc p15, 0, rt, c13, c0, 3`
  * reads it. Implemented by the thread manager (hle_threadmgr.c). */
 uint32_t vita_tls_base(void);

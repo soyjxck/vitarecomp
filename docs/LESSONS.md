@@ -345,8 +345,8 @@ Which is why `tools/e2e.sh` hashes a frame rather than counting traps.
 ## What the retail title found in its first hours of running (2026-10-10)
 
 The emit was 99.98 % translated and the first run reached the fifth
-firmware call before reading through a null pointer. Ten bugs between
-that and the title's `sceGxm` setup, each found by the same tools: the
+firmware call before reading through a null pointer. Sixteen bugs between
+that and the title's first frames, each found by the same tools: the
 trace of HLE calls with their arguments, the function trace, the register
 trace in a window of instructions around a bad address, and the title's own
 log, which it writes through `printf` and the runtime echoes into the trace.
@@ -451,8 +451,90 @@ log, which it writes through `printf` and the runtime echoes into the trace.
     the program's data. Found by reading the loop whose allocations grew by
     exactly 1.5 each time, then the disassembly of its head.
 
+11. **A PC-relative load's offset has a sign.** The 32-bit `ldr rt, [pc,
+    #imm]` is its own encoding when Rn is 15: a twelve-bit offset whose sign
+    is bit 7 of the first halfword, the bit the register-based forms use to
+    choose the twelve-bit immediate. The decoder read `ldr.w r2, [pc, #-32]`
+    as a register offset of zero, and the emitter folded the word at PC, the
+    next instruction, as the constant. The title keeps 273 of its constants
+    before the code that uses them and 97 after; among the former is the
+    magic multiplier for dividing by a record's size, so a vector of records
+    believed it had room for 69 in a buffer of 30, wrote past it, and the
+    heap's free lists filled with the records' text. Found by watching the
+    vector's end-of-storage word (`VITARECOMP_WATCH`), which was always
+    written correctly, then reading the capacity arithmetic in the register
+    trace until a multiplier that was not the one in the disassembly.
+
+12. **One printable halfword is an instruction as often as a string.** A
+    MOVW/MOVT pair that builds an odd address into the code is a function
+    pointer unless the bytes there are text, and the test for text was the
+    first halfword's two bytes being printable. `ldr r0, [r1, #4]` is "Hh".
+    A ten-instruction callback that begins with it was never emitted, and
+    the dispatcher missed it 845 times. The test is now the eight bytes
+    around the address, all but one printable: strings run longer than
+    instructions do.
+
+13. **A MOVW's half can move before its MOVT.** Discovery pairs a MOVW with
+    the MOVT of the same register. The scheduler is free to copy in
+    between: `movw r7, #0x7605; adds r5, r7, #0; movt r5, #0x8160` is how
+    the title stores a thunk into a dispatch table in `.bss`, and the pair
+    never met, so the thunk was never emitted and a `blx` through the table
+    missed. The MOVW's value now follows plain register copies (`mov`,
+    `adds rd, rn, #0`) until a MOVT closes it or another write clears it.
+    Eight functions, all reached only this way. Found from the dispatcher's
+    one miss in a run, the disassembly of the call site (a load from a
+    table that the file does not hold), and a search of the image for the
+    address as a word and as a MOVW: only the MOVW was there.
+
+14. **A thread that spins is waiting for another core.** After the load
+    screen's thread started, the trace went silent and stayed silent for a
+    fifteen-minute run; shorter runs before it had been read as a slow
+    start-up. A sampling profile, written for the question, put every
+    sample in one function and two thirds of them on one instruction: `ldr
+    r0, [sp]; cmp r0, #0; bne`, the wait of a queued spinlock, whose holder
+    clears a word on the waiter's stack. The holder was the thread that had
+    started the waiter, and a scheduler that switched only at kernel waits
+    never ran it again. Everything the title does before that point takes
+    two seconds. Fixed twice over: backward branches count a time slice,
+    and a loop that can be shown to only wait gives way at once
+    (docs/ARCHITECTURE.md, Threads). `samples/threads` is the regression:
+    three threads that wait for each other and never call the kernel.
+
+15. **A stub that hands out records has to hand the same one out twice.**
+    The audio synthesiser was stubbed as "accept everything": each voice
+    handle and each parameter lock got a fresh 64-byte record. A sound
+    engine locks a voice's parameters, writes them, and locks them again
+    expecting to read them back; this one makes those calls by the million
+    while it starts. The records ate the 57 MiB the arena had left, 7.2
+    million more requests were refused, and the title's own assert said
+    the rest: `sceKernelAllocMemBlock failed`. The allocator had been
+    asked for 3 MiB and said only "exhausted", so the first step was to
+    make it say how full it was and that its own runtime had filled it.
+    SceNgs is now a model with no signal (`src/hle_ngs.c`):
+    racks, voices, patches and parameter blocks all live in the memory the
+    title supplies for a rack, a handle is an address inside it, and a
+    voice plays in silence for as long as its sample lasts and then calls
+    back.
+
+16. **"Already decoded" is not "already a root".** Discovery scans the
+    image for stored words that look like pointers to code, and skipped a
+    word whose target had been decoded before, as nothing new. But a
+    function first met as the target of a branch in code that nothing
+    reaches is registered and is no root, and the word in a vtable is then
+    the only evidence that anything can call it. A three-instruction
+    virtual method was left out of the output that way and the title
+    called it. The word now names its target either way: 5,452 stored
+    words in this title point at code that was already decoded, and for 23
+    functions such a word was the only root. Found with
+    `VITARECOMP_WHY=<address>`,
+    written for the purpose: discovery prints what it made of that one
+    address each time it meets it, which is the question a dispatch miss
+    always raises.
+
 Also learned: the title's own crash handler, once reached, walks the stack
 for ever and prints a line per frame; a run captures stdout with a bound.
+Silence in the trace is not slowness: where the samples fall says which,
+and it took twenty seconds to ask.
 And a resource missing from the index is not a toolkit bug: the title asks
 for 248 shaders and textures that the base archive does not hold, which the
 v1.03 patch's own archive presumably does.

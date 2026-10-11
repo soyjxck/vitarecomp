@@ -28,6 +28,8 @@ typedef struct {
     uint32_t funcs_promoted;    /* weak pointer targets made roots by a clean body */
     uint32_t parts;             /* translation units the functions went into */
     uint32_t bodies_cut;        /* walks that ended without reaching a return */
+    uint32_t back_edges;        /* backward branches: each counts the time slice */
+    uint32_t wait_loops;        /* of those, loops that only wait on memory      */
     uint32_t part_funcs;        /* functions in the largest of them           */
     uint32_t insns;
     uint32_t translated;   /* emitted as real C            */

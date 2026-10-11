@@ -41,6 +41,10 @@ void vita_dispatch(uint32_t from, uint32_t addr);
 /* How many distinct addresses were dispatched to, and how many missed. Useful
  * for telling "the table is incomplete" from "the program went somewhere it
  * should not have". */
+/* The start of the function an address falls in: the greatest table entry
+ * not above it, or 0. For naming where a sample or a fault was. */
+uint32_t vita_dispatch_floor(uint32_t addr);
+
 uint32_t vita_dispatch_hits(void);
 uint32_t vita_dispatch_misses(void);
 

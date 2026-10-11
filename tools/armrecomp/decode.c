@@ -629,6 +629,18 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
             if (opc2 == 0x1 && opc3 == 1) { o->op = OP_VNEG;  set(o, A_ALU, "vneg"); return 1; }
             if (opc2 == 0x1 && opc3 == 3) { o->op = OP_VSQRT; set(o, A_ALU, "vsqrt"); return 1; }
 
+            /* Half precision: opc2 0010 widens a half to single, 0011 narrows
+             * a single to half; bit 7 (T) names the top half of the S
+             * register rather than the bottom. A retail title packs its
+             * vertex data this way. Both sides are S registers. */
+            if ((opc2 == 0x2 || opc2 == 0x3) && (opc3 & 1) && !dp) {
+                o->op      = opc2 == 0x2 ? OP_VCVT_F16_F32 : OP_VCVT_F32_F16;
+                o->imm     = (uint32_t)((h2 >> 7) & 1);
+                o->has_imm = 1;
+                set(o, A_ALU, opc2 == 0x2 ? "vcvt f32,f16" : "vcvt f16,f32");
+                return 1;
+            }
+
             /* VCMP and VCMPE. The E form differs only in whether a quiet NaN
              * raises an exception, which this runtime does not model. */
             if ((opc2 == 0x4 || opc2 == 0x5) && (opc3 & 1)) {
@@ -1012,6 +1024,15 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             o->op = B ? OP_NEON_CGE : OP_NEON_CGT;
             o->vfp_unsigned = (uint8_t)U;
             set(o, A_SIMD, B ? (U ? "vcge.u" : "vcge.s") : (U ? "vcgt.u" : "vcgt.s"));
+            return 1;
+        }
+        /* VSHL by register: each lane of Vm shifted by the signed byte in
+         * the same lane of Vn, left when it is positive and right when it
+         * is negative. U chooses the kind of right shift. */
+        if (A == 0x4 && B == 0) {
+            o->op = OP_NEON_SHL_REG;
+            o->vfp_unsigned = (uint8_t)U;
+            set(o, A_SIMD, U ? "vshl.u reg" : "vshl.s reg");
             return 1;
         }
         if (A == 0x6) {
@@ -1583,6 +1604,21 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         if (load) o->op = size == 0 ? (sign ? OP_LDRSB : OP_LDRB)
                         : size == 1 ? (sign ? OP_LDRSH : OP_LDRH) : OP_LDR;
         else      o->op = size == 0 ? OP_STRB : size == 1 ? OP_STRH : OP_STR;
+
+        /* Rn = 15 is the literal form, 1111 1000 U S 0 1 1111 Rt imm12: the
+         * offset is always twelve bits and bit 7 of the first halfword is
+         * its sign, not the choice of the 12-bit form. Read through the
+         * register-indexed branch, `ldr.w r2, [pc, #-32]` (a magic divide's
+         * constant kept before the function) had an offset of zero, and the
+         * word at PC is the next instruction: a vector's capacity came out
+         * as 69 elements in a buffer of 30, and the heap went with it. */
+        if (o->rn == 15 && load) {
+            o->imm     = h2 & 0xFFF;
+            o->has_imm = 1;
+            o->mem_add = (uint8_t)((h1 & 0x0080) != 0);
+            set(o, A_LOAD, "ldr literal.w");
+            return;
+        }
 
         if (h1 & 0x0080) {                        /* 12-bit unsigned offset */
             o->imm = h2 & 0xFFF;

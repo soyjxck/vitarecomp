@@ -63,4 +63,12 @@ grep -q "hello from sceClibPrintf, frame 0, heap 4194304" "$root/build-e2e/hello
     || { echo "e2e: hello: the console line did not reach stdout" >&2; exit 1; }
 echo "== hello: stdout matches"
 
+# threads at vblank 5: two workers and the main thread waiting for each other
+# by spinning, with no kernel wait anywhere. Four green squares (both started,
+# both passed the gate, the counter is exact, the lock is free) and the
+# counter as a full-width bar. It is drawn at all only if a thread that spins
+# gives way to the one it waits for.
+run threads c078b260713119f03b6432f0021d2388ca5b7b8671241add52e467b7922ceaa8 5 \
+    --frames 30 --press START@20
+
 echo "e2e: ok"

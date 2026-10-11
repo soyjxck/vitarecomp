@@ -134,12 +134,26 @@ What a retail title needs before its first frame, learned by running
 - **Variable imports.** The C library's case tables, `_Ctype` and the
   standard streams, bound by the loader at every site that names them; the
   C++ runtime's vtables get zeroed pages until the runtime has them.
-- **Three decoder faults and one in discovery** that the title's own code
-  found: the 32-bit extends, the structure loads, the table-branch guards
-  (docs/LESSONS.md).
+- **Half precision.** `vcvtb`/`vcvtt` between a half and a single, with
+  the subnormals and round-to-nearest-even, for the title's packed vertex
+  data.
+- **A time slice.** The title's locks and job queues wait by spinning, on
+  a console with cores to spare. Backward branches count a slice, and a
+  loop that only waits gives way at once (docs/ARCHITECTURE.md, Threads).
+- **Audio without sound.** SceNgs as a graph that remembers what the sound
+  engine wrote and plays each voice in silence for its length; the output
+  port paces the audio thread (docs/HLE.md).
+- **Four decoder faults and four in discovery** that the title's own code
+  found: the 32-bit extends, the structure loads, the sign of a PC-relative
+  load's offset, the table-branch guards, the text test on a pointer's
+  target, a MOVW copied to another register before its MOVT, a stored
+  pointer to a function already walked (docs/LESSONS.md).
 
-Where it stands: `module_start` through archive index, resources, worker
-threads and `sceGxm` setup to the parsing of its input tables.
+Where it stands: the title starts, loads its front end
+(`LOAD LEVEL( /frontend.bsp )`, `LEVEL START` in its own log) and runs its
+frame loop against the null GPU, a flip every second vertical blank. What
+it reaches next is what is not there yet: SceMp4 and the video decoder for
+its opening movie, and a `sceGxm` that draws.
 
 1. Accept FAGDec-decrypted `eboot.bin` and `*.suprx` (plain SCE ELF, the
    Vita3K input format) in `armrecomp info/extract`, in addition to fself.

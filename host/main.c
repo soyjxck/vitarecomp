@@ -169,7 +169,8 @@ static int usage(void) {
           "                 [--syms module.sym] [--trace-fns]\n"
           "  --mount P=DIR  where the guest mount P (app0, ux0, ...) lives on the host\n"
           "  --syms F       names from an `nm -n` listing, for traces\n"
-          "  --trace-fns    log every function entry (VITARECOMP_TRACE=1 logs traps and bad accesses)\n"
+          "  --trace-fns    log every function entry (VITARECOMP_TRACE=1 logs traps and bad accesses;\n"
+          "                 VITARECOMP_PROFILE=N prints every N seconds where the time went)\n"
           "  --trace-insns LO-HI  log registers at each instruction in [LO, HI]; needs C emitted\n"
           "                 with VITARECOMP_EMIT_PC=1, which also names the PC of bad accesses\n",
           stderr);
@@ -249,6 +250,13 @@ int main(int argc, char **argv) {
     lr = 0xDEADC0DEu;
     r0 = 0;
     r1 = 0;
+
+    /* VITARECOMP_PROFILE=N: every N seconds, where the samples fell. */
+    {
+        const char *e = getenv("VITARECOMP_PROFILE");
+        int period = e ? atoi(e) : 0;
+        if (period > 0) vita_profile_start((uint32_t)period);
+    }
 
     vita_module_start();
 

@@ -112,10 +112,9 @@ void vita_hle_sceAudioOutSetConfig(void)   { int i = (int)r0 - 1; if (i >= 0 && 
 void vita_hle_sceAudioOutGetRestSample(void) { r0 = 0; }
 void vita_hle_sceAudioOutGetAdopt(void)    { r0 = 1; }
 
-/* --- the audio synthesiser (SceNgs) ---------------------------------------------------
- * Handles are small records; voices are accepted and silent. The sizes the
- * title asks for are modest and it allocates them itself. */
+/* The audio synthesiser, SceNgs, is in hle_ngs.c. */
 
+/* A small record in guest memory for a stub that has to return an address. */
 static uint32_t handle(void) {
     static uint32_t pool, left;
     if (left < 64) { pool = vita_sysmem_reserve(0x10000); left = pool ? 0x10000 : 0; }
@@ -123,66 +122,6 @@ static uint32_t handle(void) {
     uint32_t h = pool; pool += 64; left -= 64;
     return h;
 }
-
-void vita_hle_sceNgsSystemGetRequiredMemorySize(void) { if (vita_mem_ptr(r1, 4)) vita_write32(r1, 0x10000); r0 = 0; }
-void vita_hle_sceNgsSystemInit(void)    { if (vita_mem_ptr(r3, 4)) vita_write32(r3, r0 ? r0 : handle()); vita_hle_trace("sceNgsSystemInit(0x%08X, 0x%X)", r0, r1); r0 = 0; }
-void vita_hle_sceNgsSystemRelease(void) { r0 = 0; }
-void vita_hle_sceNgsSystemUpdate(void)  { r0 = 0; }
-void vita_hle_sceNgsSystemSetFlags(void){ r0 = 0; }
-void vita_hle_sceNgsSystemLock(void)    { r0 = 0; }
-void vita_hle_sceNgsSystemUnlock(void)  { r0 = 0; }
-void vita_hle_sceNgsSystemSetParamErrorCallback(void) { r0 = 0; }
-void vita_hle_sceNgsRackGetRequiredMemorySize(void) { if (vita_mem_ptr(r2, 4)) vita_write32(r2, 0x4000); r0 = 0; }
-void vita_hle_sceNgsRackInit(void)      { if (vita_mem_ptr(r3, 4)) vita_write32(r3, handle()); r0 = 0; }
-void vita_hle_sceNgsRackRelease(void)   { r0 = 0; }
-void vita_hle_sceNgsRackSetParamErrorCallback(void) { r0 = 0; }
-void vita_hle_sceNgsRackGetVoiceHandle(void) { if (vita_mem_ptr(r2, 4)) vita_write32(r2, handle()); r0 = 0; }
-void vita_hle_sceNgsVoiceInit(void)     { r0 = 0; }
-void vita_hle_sceNgsVoicePlay(void)     { r0 = 0; }
-void vita_hle_sceNgsVoiceKeyOff(void)   { r0 = 0; }
-void vita_hle_sceNgsVoiceKill(void)     { r0 = 0; }
-void vita_hle_sceNgsVoicePause(void)    { r0 = 0; }
-void vita_hle_sceNgsVoiceResume(void)   { r0 = 0; }
-void vita_hle_sceNgsVoiceSetFinishedCallback(void) { r0 = 0; }
-void vita_hle_sceNgsVoiceSetParamsBlock(void) { r0 = 0; }
-void vita_hle_sceNgsVoiceLockParams(void)   { if (vita_mem_ptr(r3, 8)) { vita_write32(r3, handle()); vita_write32(r3 + 4, 64); } r0 = 0; }
-void vita_hle_sceNgsVoiceUnlockParams(void) { r0 = 0; }
-void vita_hle_sceNgsVoiceBypassModule(void) { r0 = 0; }
-void vita_hle_sceNgsVoiceGetModuleBypass(void) { if (vita_mem_ptr(r2, 4)) vita_write32(r2, 0); r0 = 0; }
-void vita_hle_sceNgsVoiceGetStateData(void) { zero(r2, r3); r0 = 0; }
-void vita_hle_sceNgsVoiceGetInfo(void)      { zero(r1, 0x20); r0 = 0; }
-void vita_hle_sceNgsVoiceGetParamsOutOfRange(void) { r0 = 0; }
-void vita_hle_sceNgsVoicePatchSetVolume(void)  { r0 = 0; }
-void vita_hle_sceNgsVoicePatchSetVolumes(void) { r0 = 0; }
-void vita_hle_sceNgsVoicePatchSetVolumesMatrix(void) { r0 = 0; }
-void vita_hle_sceNgsPatchCreateRouting(void) { if (vita_mem_ptr(r1, 4)) vita_write32(r1, handle()); r0 = 0; }
-void vita_hle_sceNgsPatchRemoveRouting(void) { r0 = 0; }
-void vita_hle_sceNgsPatchGetInfo(void)       { zero(r1, 0x20); r0 = 0; }
-void vita_hle_sceNgsAT9GetSectionDetails(void) {
-    /* { search_offset; num_bytes; num_samples; start_skip; end_skip }: the
-     * whole range as given */
-    if (vita_mem_ptr(r3, 20)) { vita_write32(r3, 0); vita_write32(r3 + 4, r1 * 2); vita_write32(r3 + 8, r1); vita_write32(r3 + 12, 0); vita_write32(r3 + 16, 0); }
-    r0 = 0;
-}
-static uint32_t voice_def(void) { static uint32_t d; if (!d) d = handle(); return d; }
-void vita_hle_sceNgsVoiceDefGetAtrac9Voice(void)             { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetCompressorBuss(void)          { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetCompressorSideChainBuss(void) { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetDelayBuss(void)               { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetDistortionBuss(void)          { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetEnvelopeBuss(void)            { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetEqBuss(void)                  { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetMasterBuss(void)              { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetMixerBuss(void)               { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetPauserBuss(void)              { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetPitchShiftBuss(void)          { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetReverbBuss(void)              { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetSasEmuVoice(void)             { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetScreamAtrac9Voice(void)       { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetScreamVoice(void)             { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetSimpleAtrac9Voice(void)       { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetSimpleVoice(void)             { r0 = voice_def(); }
-void vita_hle_sceNgsVoiceDefGetTemplate1(void)               { r0 = voice_def(); }
 
 /* --- application services ------------------------------------------------------------- */
 

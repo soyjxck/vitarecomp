@@ -11,6 +11,7 @@
 #include "vitarecomp/hle.h"
 #include "vitarecomp/host.h"
 #include "../src/hle_format.h"
+#include "../src/sched.h"
 #include <string.h>
 
 #include <assert.h>
@@ -286,6 +287,13 @@ static void test_dispatch(void) {
     assert(vita_dispatch_hits() == 3);
     assert(vita_dispatch_misses() == 0);
 
+    /* The function an address falls in: the entry at or below it. */
+    assert(vita_dispatch_floor(0x81000100u) == 0x81000100u);
+    assert(vita_dispatch_floor(0x810001FEu) == 0x81000100u);
+    assert(vita_dispatch_floor(0x81000201u) == 0x81000200u);
+    assert(vita_dispatch_floor(0x8FFFFFFFu) == 0x81000300u);
+    assert(vita_dispatch_floor(0x810000FEu) == 0);
+
     /* An unsorted table is refused outright: count goes to zero, so every
      * lookup misses loudly instead of some lookups missing quietly. */
     static const vita_dispatch_entry unsorted[] = {
@@ -548,6 +556,275 @@ static void test_neon_more(void) {
     printf("  neon lanes (float, misc, ext)   ok\n");
 }
 
+/* --- the audio synthesiser --------------------------------------------------------
+ *
+ * SceNgs with no sound: what a sound engine reads back has to be what it
+ * wrote, and a voice has to last as long as its sample does. The first
+ * version returned a new record from every lock and every voice-handle
+ * query, and a retail engine's start-up filled the arena with them.
+ */
+void vita_hle_sceNgsSystemGetRequiredMemorySize(void);
+void vita_hle_sceNgsSystemInit(void);
+void vita_hle_sceNgsSystemUpdate(void);
+void vita_hle_sceNgsRackGetRequiredMemorySize(void);
+void vita_hle_sceNgsRackInit(void);
+void vita_hle_sceNgsRackGetVoiceHandle(void);
+void vita_hle_sceNgsVoiceDefGetScreamVoice(void);
+void vita_hle_sceNgsVoiceDefGetScreamAtrac9Voice(void);
+void vita_hle_sceNgsVoiceLockParams(void);
+void vita_hle_sceNgsVoiceUnlockParams(void);
+void vita_hle_sceNgsVoiceSetFinishedCallback(void);
+void vita_hle_sceNgsVoicePlay(void);
+void vita_hle_sceNgsVoiceKeyOff(void);
+void vita_hle_sceNgsVoiceGetInfo(void);
+void vita_hle_sceNgsVoiceGetStateData(void);
+void vita_hle_sceNgsPatchCreateRouting(void);
+void vita_hle_sceNgsPatchGetInfo(void);
+void vita_hle_sceNgsPatchRemoveRouting(void);
+void vita_hle_sceNgsAT9GetSectionDetails(void);
+
+#define NB 0x81000000u
+
+static int      g_finished;
+static uint32_t g_finished_voice, g_finished_user;
+static void finished_entry(void) {
+    g_finished++;
+    g_finished_voice = vita_read32(r0);
+    g_finished_user = vita_read32(r0 + 24);
+}
+
+static uint32_t ngs_voice_state(uint32_t voice) {
+    r0 = voice; r1 = NB + 0x1500; vita_hle_sceNgsVoiceGetInfo();
+    assert(r0 == 0);
+    return vita_read32(NB + 0x1500);
+}
+
+static void ngs_update(uint32_t sys, int times) {
+    for (int i = 0; i < times; i++) { r0 = sys; vita_hle_sceNgsSystemUpdate(); assert(r0 == 0); }
+}
+
+static void test_ngs(void) {
+    assert(vita_mem_init(NB, 0x100000) == 0);
+    vita_memblock_init(NB + 0x80000, 0x10000);
+    vita_mem_bad_access = 0;
+    static const vita_dispatch_entry table[] = { { NB + 0x500, finished_entry } };
+    vita_dispatch_init(table, 1);
+    sp = NB + 0x70000;
+
+    /* A system of 512-sample updates at 48 kHz, in memory the title owns. */
+    uint32_t params = NB + 0x1000;
+    vita_write32(params, 8); vita_write32(params + 4, 64); vita_write32(params + 8, 512);
+    vita_write32(params + 12, 48000); vita_write32(params + 16, 0);
+    r0 = params; r1 = NB + 0x1100; vita_hle_sceNgsSystemGetRequiredMemorySize();
+    assert(r0 == 0 && vita_read32(NB + 0x1100) != 0);
+    r0 = NB + 0x10000; r1 = vita_read32(NB + 0x1100); r2 = params; r3 = NB + 0x1104;
+    vita_hle_sceNgsSystemInit();
+    assert(r0 == 0);
+    uint32_t sys = vita_read32(NB + 0x1104);
+    assert(sys == NB + 0x10000);
+
+    /* The definitions are distinct, and the same each time they are asked for. */
+    vita_hle_sceNgsVoiceDefGetScreamVoice();
+    uint32_t def = r0;
+    vita_hle_sceNgsVoiceDefGetScreamAtrac9Voice();
+    assert(def && r0 && r0 != def);
+    vita_hle_sceNgsVoiceDefGetScreamVoice();
+    assert(r0 == def);
+
+    /* A rack of four voices in a block of the size the runtime asked for. */
+    uint32_t desc = NB + 0x1200;
+    vita_write32(desc, def); vita_write32(desc + 4, 4); vita_write32(desc + 8, 1);
+    vita_write32(desc + 12, 0); vita_write32(desc + 16, 2); vita_write32(desc + 20, 0x1234);
+    r0 = sys; r1 = desc; r2 = NB + 0x1300; vita_hle_sceNgsRackGetRequiredMemorySize();
+    assert(r0 == 0);
+    uint32_t need = vita_read32(NB + 0x1300);
+    assert(need > 4 * 84 && need < 0x10000);
+    vita_write32(NB + 0x1310, NB + 0x20000); vita_write32(NB + 0x1314, need - 16);
+    r0 = sys; r1 = NB + 0x1310; r2 = desc; r3 = NB + 0x1320; vita_hle_sceNgsRackInit();
+    assert(r0 != 0);                                    /* a block too small is refused */
+    vita_write32(NB + 0x1314, need);
+    r0 = sys; r1 = NB + 0x1310; r2 = desc; r3 = NB + 0x1320; vita_hle_sceNgsRackInit();
+    assert(r0 == 0);
+    uint32_t rack = vita_read32(NB + 0x1320);
+    assert(rack == NB + 0x20000);
+
+    /* A voice has one handle. */
+    r0 = rack; r1 = 1; r2 = NB + 0x1400; vita_hle_sceNgsRackGetVoiceHandle();
+    assert(r0 == 0);
+    uint32_t voice = vita_read32(NB + 0x1400);
+    r0 = rack; r1 = 1; r2 = NB + 0x1404; vita_hle_sceNgsRackGetVoiceHandle();
+    assert(r0 == 0 && vita_read32(NB + 0x1404) == voice);
+    r0 = rack; r1 = 2; r2 = NB + 0x1404; vita_hle_sceNgsRackGetVoiceHandle();
+    uint32_t other = vita_read32(NB + 0x1404);
+    assert(other != voice && other >= rack && other < rack + need);
+    r0 = rack; r1 = 4; r2 = NB + 0x1404; vita_hle_sceNgsRackGetVoiceHandle();
+    assert(r0 != 0);
+
+    /* The player's block: locked, written, and still there at the next lock. */
+    r0 = voice; r1 = 0; r2 = 0x01015CE6u; r3 = NB + 0x1410; vita_hle_sceNgsVoiceLockParams();
+    assert(r0 == 0);
+    uint32_t block = vita_read32(NB + 0x1410), block_size = vita_read32(NB + 0x1414);
+    assert(block >= rack && block + block_size <= rack + need && block_size >= 84);
+    assert(vita_read32(block) == 0x01015CE6u);
+    r0 = voice; r1 = 0; r2 = 0x01015CE6u; r3 = NB + 0x1418; vita_hle_sceNgsVoiceLockParams();
+    assert(r0 != 0);                                    /* locked already */
+    vita_write32(block + 4, 84);
+    vita_write32(block + 8, NB + 0x30000);              /* buffer 0: 4096 bytes, played once */
+    vita_write32(block + 12, 4096);
+    vita_write16(block + 16, 0);
+    vita_write16(block + 18, 0xFFFF);
+    { float hz = 48000.0f, one = 1.0f; uint32_t u;
+      memcpy(&u, &hz, 4); vita_write32(block + 56, u);
+      memcpy(&u, &one, 4); vita_write32(block + 60, u); }
+    vita_write8(block + 76, 1);                         /* mono, 16-bit PCM */
+    r0 = voice; r1 = 0; vita_hle_sceNgsVoiceUnlockParams();
+    assert(r0 == 0);
+    r0 = voice; r1 = 0; r2 = 0x01015CE6u; r3 = NB + 0x1418; vita_hle_sceNgsVoiceLockParams();
+    assert(r0 == 0 && vita_read32(NB + 0x1418) == block && vita_read32(block + 12) == 4096);
+    r0 = voice; r1 = 0; vita_hle_sceNgsVoiceUnlockParams();
+    r0 = other; r1 = 0; r2 = 0x01015CE6u; r3 = NB + 0x1418; vita_hle_sceNgsVoiceLockParams();
+    assert(r0 == 0 && vita_read32(NB + 0x1418) != block);   /* each voice has its own */
+    r0 = other; r1 = 0; vita_hle_sceNgsVoiceUnlockParams();
+
+    /* 4096 bytes of mono PCM are 2048 samples: four updates of 512. */
+    r0 = voice; r1 = NB + 0x501; r2 = 0xCAFE; vita_hle_sceNgsVoiceSetFinishedCallback();
+    assert(r0 == 0 && ngs_voice_state(voice) == 0);
+    r0 = voice; vita_hle_sceNgsVoicePlay();
+    assert(r0 == 0 && ngs_voice_state(voice) == 1);
+    ngs_update(sys, 3);
+    assert(g_finished == 0 && ngs_voice_state(voice) == 1);
+    r0 = voice; r1 = 0; r2 = NB + 0x1600; r3 = 24; vita_hle_sceNgsVoiceGetStateData();
+    assert(r0 == 0 && vita_read32(NB + 0x1600) == 3072 && vita_read32(NB + 0x1608) == 1536);
+    ngs_update(sys, 1);
+    assert(g_finished == 1 && g_finished_voice == voice && g_finished_user == 0xCAFE);
+    assert(ngs_voice_state(voice) == 0);
+    ngs_update(sys, 2);
+    assert(g_finished == 1);                            /* and it does not finish twice */
+
+    /* Looped once, the same sample lasts eight updates. */
+    vita_write16(block + 16, 1);
+    r0 = voice; vita_hle_sceNgsVoicePlay();
+    ngs_update(sys, 7);
+    assert(g_finished == 1);
+    ngs_update(sys, 1);
+    assert(g_finished == 2);
+
+    /* A key-off ends a voice at the next update, whatever is left of it. */
+    r0 = voice; vita_hle_sceNgsVoicePlay();
+    ngs_update(sys, 1);
+    r0 = voice; vita_hle_sceNgsVoiceKeyOff();
+    assert(r0 == 0 && ngs_voice_state(voice) == 0x41 && g_finished == 2);
+    ngs_update(sys, 1);
+    assert(g_finished == 3 && ngs_voice_state(voice) == 0);
+
+    /* A patch from one voice's output to another's input. */
+    uint32_t setup = NB + 0x1700;
+    vita_write32(setup, voice); vita_write32(setup + 4, 1); vita_write32(setup + 8, 0xFFFFFFFFu);
+    vita_write32(setup + 12, other); vita_write32(setup + 16, 0);
+    r0 = setup; r1 = NB + 0x1720; vita_hle_sceNgsPatchCreateRouting();
+    assert(r0 == 0);
+    uint32_t patch = vita_read32(NB + 0x1720);
+    assert(patch >= rack && patch < rack + need);
+    r0 = patch; r1 = NB + 0x1740; r2 = NB + 0x1760; vita_hle_sceNgsPatchGetInfo();
+    assert(r0 == 0 && vita_read32(NB + 0x1760) == voice && vita_read32(NB + 0x1764) == 1);
+    assert(vita_read32(NB + 0x1768) == 0 && vita_read32(NB + 0x176C) == other);
+    r0 = setup; r1 = NB + 0x1724; vita_hle_sceNgsPatchCreateRouting();
+    assert(r0 == 0 && vita_read32(NB + 0x1724) != patch);   /* the second free slot */
+    r0 = setup; r1 = NB + 0x1728; vita_hle_sceNgsPatchCreateRouting();
+    assert(r0 != 0);                                    /* two patches an output, and both taken */
+    r0 = patch; vita_hle_sceNgsPatchRemoveRouting();
+    assert(r0 == 0);
+    r0 = patch; r1 = NB + 0x1740; r2 = NB + 0x1760; vita_hle_sceNgsPatchGetInfo();
+    assert(r0 != 0);
+
+    /* ATRAC9: 96-byte frames of 128 samples. 1024 samples from the start are
+     * nine frames, the first of them the decoder's delay; in super packets
+     * of four frames they are three packets, with 128 to drop at the start
+     * and 384 at the end. */
+    uint32_t config = 0xFEu | (4u << 12) | (0x0Bu << 16) | (7u << 29);
+    r0 = 0; r1 = 1024; r2 = config; r3 = NB + 0x1800; vita_hle_sceNgsAT9GetSectionDetails();
+    assert(r0 == 0 && vita_read32(NB + 0x1800) == 0 && vita_read32(NB + 0x1804) == 9 * 96);
+    assert(vita_read16(NB + 0x1808) == 128 && vita_read16(NB + 0x180A) == 0 && vita_read32(NB + 0x180C) == 0);
+    r0 = 0; r1 = 1024; r2 = config | (1u << 27); r3 = NB + 0x1800; vita_hle_sceNgsAT9GetSectionDetails();
+    assert(r0 == 0 && vita_read32(NB + 0x1800) == 0 && vita_read32(NB + 0x1804) == 3 * 384);
+    assert(vita_read16(NB + 0x1808) == 128 && vita_read16(NB + 0x180A) == 384 && vita_read32(NB + 0x180C) == 1);
+    r0 = 0; r1 = 1024; r2 = 0x12345678u; r3 = NB + 0x1800; vita_hle_sceNgsAT9GetSectionDetails();
+    assert(r0 != 0);
+
+    assert(vita_mem_bad_access == 0);
+    vita_mem_free();
+    printf("  audio synthesiser, silent      ok\n");
+}
+
+/* --- the time slice -------------------------------------------------------------
+ *
+ * One guest thread runs at a time, and a thread that waits for another by
+ * spinning has to give way or it waits for ever. Two ways it does: a loop
+ * that only waits calls vita_spin_wait and the other thread goes at once,
+ * and any loop counts its backward branches against a slice. The worker
+ * here stands in for generated code: it is reached through the dispatch
+ * table and makes the calls the emitter would have written into it.
+ */
+static volatile int g_gate;
+static int g_worker_at;
+
+static void worker_entry(void) {
+    g_worker_at = 1;
+    while (!g_gate) vita_spin_wait(0x81000400u);
+    g_worker_at = 2;
+    for (int i = 0; i < 3 * VITA_SLICE + 10; i++) vita_back_edge();
+    g_worker_at = 3;
+}
+
+static void test_time_slice(void) {
+    assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
+    vita_memblock_init(0x81008000u, 0x8000u);
+    static const vita_dispatch_entry table[] = { { 0x81000400u, worker_entry } };
+    vita_dispatch_init(table, 1);
+
+    /* A started thread runs first. This one spins on the gate, which only
+     * the thread that started it can open: the spin hands the baton back,
+     * or this line is never reached. */
+    uint32_t uid = vita_thread_create("spinner", 0x81000401u, 0x10000100u, 0x1000);
+    assert(uid != 0);
+    assert(vita_thread_start(uid, 0, 0) == 0);
+    assert(g_worker_at == 1);
+
+    /* Now this thread computes without a kernel call. Each slice it uses up
+     * gives the worker one of its own; the worker needs more than three. */
+    g_gate = 1;
+    int turns = 0;
+    while (g_worker_at != 3) {
+        for (int i = 0; i <= VITA_SLICE; i++) vita_back_edge();
+        turns++;
+        assert(turns < 100);
+    }
+    assert(turns >= 3);
+
+    assert(vita_thread_wait_end(uid, 0, NULL) == 0);
+    assert(vita_thread_delete(uid) == 0);
+    vita_mem_free();
+    printf("  time slice and spin wait       ok\n");
+}
+
+static void test_half_precision(void) {
+    assert(vita_f32_to_f16(1.0f) == 0x3C00);
+    assert(vita_f32_to_f16(-2.0f) == 0xC000);
+    assert(vita_f32_to_f16(65504.0f) == 0x7BFF);
+    assert(vita_f32_to_f16(65536.0f) == 0x7C00);            /* overflow to infinity */
+    assert(vita_f32_to_f16(0.0f) == 0x0000);
+    assert(vita_f32_to_f16(5.9604645e-8f) == 0x0001);        /* the smallest subnormal */
+    assert(vita_f32_to_f16(0.333251953125f) == 0x3555);
+    assert(vita_f16_to_f32(0x3C00) == 1.0f);
+    assert(vita_f16_to_f32(0xC000) == -2.0f);
+    assert(vita_f16_to_f32(0x7BFF) == 65504.0f);
+    assert(vita_f16_to_f32(0x0001) == 5.9604645e-8f);
+    assert(vita_f16_to_f32(0x3555) == 0.333251953125f);
+    assert(vita_f16_to_f32(0x8000) == 0.0f);
+    { float n = vita_f16_to_f32(0x7E00); assert(n != n); }   /* NaN stays NaN */
+    printf("  half precision                 ok\n");
+}
+
 static void test_neon_structures(void) {
     assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
     assert(vita_neon_set_lane(0x1111111111111111ull, 2, 0xAB, 8) == 0x1111111111AB1111ull);
@@ -565,6 +842,24 @@ static void test_neon_structures(void) {
     assert(vita_d_get(0) == 0x0000010400000100ull && vita_d_get(2) == 0x0000010500000101ull);
     assert(vita_d_get(4) == 0x0000010600000102ull && vita_d_get(6) == 0x0000010700000103ull);
     printf("  neon structure loads           ok\n");
+}
+
+static void test_neon_shift_by_register(void) {
+    /* 32-bit lanes: the low one left by 4, the high one right by 4. */
+    uint64_t by = 0x000000FC00000004ull;
+    assert(vita_neon_shl_reg(0x8000001000000001ull, by, 32, 0) == 0xF800000100000010ull);
+    assert(vita_neon_shl_reg(0x8000001000000001ull, by, 32, 1) == 0x0800000100000010ull);
+    /* Only the count's low byte is read, as a signed one. */
+    assert(vita_neon_shl_reg(0x0000000000000003ull, 0x00000000FFFFFF01ull, 32, 1) == 0x0000000000000006ull);
+    /* A count as wide as the lane: nothing left, or the sign. */
+    assert(vita_neon_shl_reg(0x0000000100000001ull, 0x0000002000000020ull, 32, 0) == 0);
+    assert(vita_neon_shl_reg(0x80000000FFFFFFFFull, 0x000000E0000000E0ull, 32, 1) == 0);
+    assert(vita_neon_shl_reg(0x8000000070000000ull, 0x000000E0000000E0ull, 32, 0) == 0xFFFFFFFF00000000ull);
+    /* Bytes and a whole doubleword. */
+    assert(vita_neon_shl_reg(0x0000000000008001ull, 0x000000000000FF01ull, 8, 0) == 0x000000000000C002ull);
+    assert(vita_neon_shl_reg(0x8000000000000000ull, 0x00000000000000C1ull, 64, 0) == 0xFFFFFFFFFFFFFFFFull);
+    assert(vita_neon_shl_reg(0x8000000000000000ull, 0x00000000000000C1ull, 64, 1) == 0x0000000000000001ull);
+    printf("  neon shift by register         ok\n");
 }
 
 static void test_neon_shifts(void) {
@@ -644,10 +939,14 @@ int main(void) {
     test_neon();
     test_neon_more();
     test_neon_shifts();
+    test_neon_shift_by_register();
     test_neon_structures();
+    test_half_precision();
     test_memory();
     test_var_imports();
     test_scanf();
+    test_time_slice();
+    test_ngs();
     printf("all runtime tests passed\n");
     return 0;
 }

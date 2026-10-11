@@ -454,17 +454,42 @@ through it returns the block's bytes.
 
 The recompiled code keeps its registers in globals and has no idea which
 thread it is on; threads are the runtime's. `src/sched.c` gives each guest
-thread a host thread and lets exactly one of them run guest code at a time:
-at a wait the kernel cannot satisfy (a semaphore short, a mutex held, a
-condition variable, a thread's end, a delay, the vertical blank) the running
-thread saves the register globals into its record, loads the next runnable
-thread's, hands it the baton and sleeps on its own condition variable until
-the baton comes back. Nothing is ever concurrent, so what held for one
-thread still holds: an exclusive pair cannot be interrupted, memory needs no
-ordering. A started thread runs first, up to its first wait, which is what a
-worker needs to set itself up before its maker goes on. When every thread
-is waiting and none on the clock, the program has deadlocked, and the
-runtime says which thread waits on what.
+thread a host thread and lets exactly one of them run guest code at a time.
+At a switch the running thread saves the register globals into its record,
+loads the next runnable thread's, hands it the baton and sleeps on its own
+condition variable until the baton comes back. Nothing is ever concurrent,
+so what held for one thread still holds: memory needs no ordering.
+
+A switch happens in two kinds of place. The first is a wait the kernel
+cannot satisfy: a semaphore short, a mutex held, a condition variable, a
+thread's end, a delay, the vertical blank. The second is the end of a time
+slice. The console has several cores, and a title's own locks and job queues
+wait for another thread by reading a word until it changes, with no kernel
+call for a scheduler to see; a thread that does that while the other never
+runs waits for ever. So every backward branch in the generated C counts the
+running thread's slice down (`vita_back_edge`, 20,000 to a slice), and when
+it runs out each other runnable thread gets a slice of its own. The slice is
+a count rather than a clock, so a run schedules the same way every time, and
+it is counted at backward branches because every loop has one and an
+exclusive pair has none between its load and its store: `LDREX`/`STREX`
+still cannot be interrupted. A cycle counter checked where blocks end is how
+emulators of single-core machines have always scheduled; this is that, with
+the block boundaries a recompiler has.
+
+A loop that only waits should not burn its slice first, and the emitter can
+tell one exactly: loads, compares, and a conditional branch back to the top,
+with every register the loop reads either untouched by it or loaded earlier
+in the same turn. Nothing in such a loop writes memory and nothing carries
+from one turn to the next, so only another thread can end it. There the
+generated C calls `vita_spin_wait`, and another runnable thread goes at
+once. `ldr r1, [r1]; cmp r1, #0; bne` reads what its last turn wrote, is a
+list walk, and is left alone. When no other thread is runnable and none
+sleeps on the clock, nothing can change the word: that is a deadlock, and
+the runtime says which thread spins where and what the others wait on, as
+it does when every thread is waiting in the kernel.
+
+A started thread runs first, up to its first wait, which is what a worker
+needs to set itself up before its maker goes on.
 
 ### Calling back into the program
 
@@ -537,7 +562,7 @@ option, so the core keeps its no-dependency promise.
 
 A recompiled program that is wrong is wrong quietly: valid C, no trap, a
 pixel in the wrong place or a pointer with a plausible value. The runtime
-carries four ways of looking, all off by default and free when off:
+carries six ways of looking, all off by default and free when off:
 
 | Tool | Switch | What it shows |
 |---|---|---|
@@ -545,10 +570,15 @@ carries four ways of looking, all off by default and free when off:
 | Instruction trace | C emitted with `VITARECOMP_EMIT_PC=1`; `--trace-insns LO-HI` | registers and flags at each instruction in an address window |
 | Bad-access reports | `VITARECOMP_TRACE=1` | the first bad guest accesses, with the PC when the C records it |
 | Write watchpoint | `VITARECOMP_WATCH=<hex>` | every store that covers an address, with value and PC |
+| Sampling profile | `VITARECOMP_PROFILE=N`, C emitted with `VITARECOMP_EMIT_PC=1` | every N seconds: the share of samples per guest thread and per function, and the instruction each function was most often at |
+| Discovery, one address | `VITARECOMP_WHY=<hex>` on `armrecomp discover` or `emit` | what discovery made of that address each time it met it: walked, decoded inside another function, named by a stored word, refused and why |
 
 The order they are reached for is the order above: the function trace says
 which function went wrong, the instruction trace says where in it, the
 watchpoint says who touched the memory it read. The nine newlib bugs in
 LESSONS.md were found that way, none of them by reading the disassembly
-first.
+first. The profile is for the other failure, a program that says nothing:
+the trace is as silent while it computes as while it spins, and the samples
+tell the two apart in one period. And a dispatch miss names an address the
+output has no function for; the last row is how to ask why.
 

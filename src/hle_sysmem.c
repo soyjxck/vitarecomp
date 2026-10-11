@@ -63,7 +63,8 @@ void vita_hle_sceKernelAllocMemBlock(void) {
 
     uint32_t start = (g_next + gran - 1) & ~(gran - 1);
     if (start < g_next || start + size < start || start + size > g_base + g_size) {
-        vita_hle_trace("sceKernelAllocMemBlock(type 0x%08X, size 0x%X): arena exhausted, NO_MEMORY", type, size);
+        vita_hle_trace("sceKernelAllocMemBlock(type 0x%08X, size 0x%X): arena exhausted (0x%X of 0x%X in use), NO_MEMORY",
+                       type, size, g_next - g_base, g_size);
         r0 = SCE_KERNEL_ERROR_NO_MEMORY;
         return;
     }
@@ -109,9 +110,14 @@ void vita_hle_sceKernelFreeMemBlock(void) {
 uint32_t vita_sysmem_reserve(uint32_t size) {
     uint32_t start = (g_next + 0xFFFu) & ~0xFFFu;
     size = (size + 0xFFFu) & ~0xFFFu;
-    if (start < g_next || start + size < start || start + size > g_base + g_size) return 0;
+    if (start < g_next || start + size < start || start + size > g_base + g_size) {
+        vita_hle_trace("runtime reservation of 0x%X refused: arena exhausted (0x%X of 0x%X in use)",
+                       size, g_next - g_base, g_size);
+        return 0;
+    }
     void *p = vita_mem_ptr(start, size);
     if (!p) return 0;
+    if (size >= 0x100000u) vita_hle_trace("runtime reservation of 0x%X at 0x%08X", size, start);
     memset(p, 0, size);
     g_next = start + size;
     return start;

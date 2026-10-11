@@ -8,6 +8,8 @@
 
 #include "analyze.h"
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,6 +44,33 @@ static void sq_push(seedq *q, uint32_t addr, arm_mode mode, uint16_t heur) {
 }
 
 static int looks_like_text(uint16_t h);
+static int text_run(const vm_image *img, uint32_t t);
+
+/* VITARECOMP_WHY=<hex address> in the environment: discovery says on stderr
+ * what it made of that one address, each time it meets it. A dispatch miss
+ * names an address and raises one question, why is no function there, and
+ * the answer is one of a handful: nothing named it, something named it and
+ * a filter refused it, or another walk had already decoded through it. */
+static uint32_t why_addr(void) {
+    static int read;
+    static uint32_t addr;
+    if (!read) {
+        const char *e = getenv("VITARECOMP_WHY");
+        read = 1;
+        if (e && *e) addr = (uint32_t)strtoul(e, NULL, 16) & ~1u;
+    }
+    return addr;
+}
+
+static void why(uint32_t addr, const char *fmt, ...) {
+    if (!why_addr() || (addr & ~1u) != why_addr()) return;
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "why 0x%08X: ", addr & ~1u);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    va_end(ap);
+}
 
 /* Does code start here?
  *
@@ -213,6 +242,8 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
             if (in.op == OP_IT)
                 it_left = (in.it_mask & 1) ? 4 : (in.it_mask & 2) ? 3 : (in.it_mask & 4) ? 2 : 1;
 
+            if (a == start) why(a, "walked as a function");
+            else why(a, "decoded inside the function walked from 0x%08X", start);
             seen_set(r, off);
             r->insns_total++;
             r->bytes_covered += (uint32_t)n;
@@ -233,7 +264,7 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                 if ((v & 1) && (v & ~1u) >= base && (v & ~1u) + 2 <= base + len) {
                     uint32_t t = v & ~1u;
                     uint16_t h = (uint16_t)(text[t - base] | ((uint16_t)text[t - base + 1] << 8));
-                    if (!looks_like_text(h) && starts_like_code(img, t)) {
+                    if (!text_run(img, t) && starts_like_code(img, t)) {
                         int strong = has_prologue(h);
                         sq_push(q, t, ARM_T32, strong ? VF_R_POINTER : VF_R_WEAK_PTR);
                         r->seeds_pointer++;
@@ -244,6 +275,20 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                        in.rd >= 0 && in.rd < 16) {
                 movw_val[in.rd] = in.imm;
                 movw_ok |= (uint16_t)(1u << in.rd);
+            } else if (in.rd >= 0 && in.rd < 16 &&
+                       ((in.op == OP_MOV && !in.has_imm && in.rm >= 0 && in.rm < 16 && !in.shift_amt) ||
+                        (in.op == OP_ADD && in.has_imm && in.imm == 0 && in.rn >= 0 && in.rn < 16))) {
+                /* The scheduler may move the low half to another register
+                 * before its MOVT: `movw r7, #0x7605; adds r5, r7, #0; movt
+                 * r5, #0x8160` stores a thunk into a table in .bss, and the
+                 * pair read per register never met. */
+                int8_t src = in.op == OP_MOV ? in.rm : in.rn;
+                if ((movw_ok >> src) & 1) {
+                    movw_val[in.rd] = movw_val[src];
+                    movw_ok |= (uint16_t)(1u << in.rd);
+                } else {
+                    movw_ok &= (uint16_t)~(1u << in.rd);
+                }
             } else if (in.rd >= 0 && in.rd < 16) {
                 movw_ok &= (uint16_t)~(1u << in.rd);
             }
@@ -425,13 +470,34 @@ static uint32_t shape_scan_region(const vm_image *img, vf_result *r, seedq *q,
         if (run_left) run_left--;
 
         if (!code_ptr_shape(img, scan + off, &t)) continue;
+        why(t, "a stored word at offset 0x%X of the scanned region holds it%s", off,
+            in_table ? ", in a table of such words" : "");
 
-        /* Do not re-seed something already decoded: that is not a discovery. */
-        if (seen_get(r, t - base)) continue;
+        /* Something already decoded is not a discovery, and is not counted
+         * as one. It may still be news: a function first met as the target
+         * of a branch in code nothing reaches is registered but is no root,
+         * and the word in this table is the one thing that says a pointer
+         * to it exists. Skipping it here left a three-instruction virtual
+         * method out of the output, and the title called it. So the word
+         * still names its target to the driver, which adds the reason to
+         * the function it already has, or registers the entry if the
+         * address had only been walked through. The same evidence is asked
+         * of it as of a new one: a table, or a prologue. */
+        if (seen_get(r, t - base)) {
+            uint16_t h0 = (uint16_t)(text[t - base] | ((uint16_t)text[t - base + 1] << 8));
+            if (in_table || has_prologue(h0)) {
+                why(t, "already decoded; the stored word makes it a root");
+                sq_push(q, t, ARM_T32, VF_R_SHAPE);
+                r->shape_known++;
+            } else {
+                why(t, "already decoded, and a lone word to code with no prologue seeds nothing");
+            }
+            continue;
+        }
 
         arm_insn in;
         if (arm_decode(text, base, len, t, ARM_T32, &in) == 0) { r->rejected_shape++; continue; }
-        if (in.cls == A_UNKNOWN || in.cls == A_UNDEF) { r->rejected_shape++; continue; }
+        if (in.cls == A_UNKNOWN || in.cls == A_UNDEF) { why(t, "refused: its first instruction does not decode"); r->rejected_shape++; continue; }
 
         /* "Decodes as something" is far too weak a filter to be worth much:
          * the Thumb decoder almost never returns unknown, so nearly every
@@ -458,10 +524,11 @@ static uint32_t shape_scan_region(const vm_image *img, vf_result *r, seedq *q,
                     || (h == 0xE92D)                     /* push.w / stmdb  */
                     || ((h & 0xFF80) == 0xB080);         /* sub sp, #imm    */
 
-        if (!prologue && !in_table) { r->rejected_shape++; continue; }
-        if (!starts_like_code(img, t)) { r->rejected_shape++; continue; }
+        if (!prologue && !in_table) { why(t, "refused: no prologue, and the word is not in a table"); r->rejected_shape++; continue; }
+        if (!starts_like_code(img, t)) { why(t, "refused: what follows does not read as code"); r->rejected_shape++; continue; }
 
         sq_push(q, t, ARM_T32, VF_R_SHAPE);
+        why(t, "seeded as a function by the stored word");
         r->seeds_shape++;
         found++;
     }
@@ -517,6 +584,26 @@ static void shape_scan(const vm_image *img, vf_result *r, seedq *q) {
 static int looks_like_text(uint16_t h) {
     uint8_t a = (uint8_t)h, b = (uint8_t)(h >> 8);
     return a >= 0x20 && a < 0x7F && b >= 0x20 && b < 0x7F;
+}
+
+/* Whether the bytes around `t` read as a run of text. One printable
+ * halfword is not enough to say so: `ldr r0, [r1, #4]` is "Hh", and a
+ * callback that begins with it, reached only through a MOVW/MOVT pair, was
+ * taken for the second byte of a string and never emitted; 845 calls
+ * missed it. Strings run longer than instructions do, so the test is the
+ * eight bytes around the address, all but one printable. */
+static int text_run(const vm_image *img, uint32_t t) {
+    const uint8_t *text = img->data + img->seg_file;
+    uint32_t base = img->seg_vaddr, len = img->seg_len;
+    int printable = 0, seen = 0;
+    for (int k = -2; k < 6; k++) {
+        uint32_t a = t + (uint32_t)k;
+        if (a < base || a >= base + len) continue;
+        uint8_t c = text[a - base];
+        seen++;
+        if (c >= 0x20 && c < 0x7F) printable++;
+    }
+    return seen >= 6 && printable >= seen - 1;
 }
 
 /* A relocated word holding a Thumb-tagged address into .text. */

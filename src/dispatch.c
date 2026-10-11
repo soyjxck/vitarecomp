@@ -32,6 +32,15 @@ void vita_dispatch_init(const vita_dispatch_entry *table, uint32_t count) {
     }
 }
 
+uint32_t vita_dispatch_floor(uint32_t addr) {
+    uint32_t key = addr & ~1u, lo = 0, hi = g_count;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (g_table[mid].addr <= key) lo = mid + 1; else hi = mid;
+    }
+    return lo ? g_table[lo - 1].addr : 0;
+}
+
 uint32_t vita_dispatch_hits(void)   { return g_hits; }
 uint32_t vita_dispatch_misses(void) { return g_misses; }
 

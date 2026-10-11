@@ -55,11 +55,13 @@ add_library(vitarecomp STATIC
     src/hle_libm.c
     src/hle_ult.c
     src/hle_gxm.c
+    src/hle_ngs.c
     src/hle_stubs.c
     src/hle_vars.c
     src/hle_scanf.c
     src/hle_rtc.c
     src/sched.c
+    src/profile.c
     src/symbols.c
 )
 

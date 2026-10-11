@@ -3,10 +3,11 @@
  * The recompiled code keeps its registers in globals (cpu.h) and has no idea
  * which thread it is on; that is what makes it fast and what makes threads a
  * runtime matter. The arrangement here: one host thread per guest thread,
- * exactly one of them running guest code at any moment, and a switch only
- * where the console's kernel would block or yield: a wait on a semaphore,
- * mutex or condition that cannot be satisfied, a delay, a wait for a thread
- * to end, and the vertical blank.
+ * exactly one of them running guest code at any moment, and a switch where
+ * the console's kernel would block or yield (a wait on a semaphore, mutex
+ * or condition that cannot be satisfied, a delay, a wait for a thread to
+ * end, the vertical blank) or where the running thread's time slice ends,
+ * which is always at a backward branch of the generated code.
  *
  * At a switch the running thread saves the register globals into its own
  * record, loads the next thread's, hands it the baton and sleeps on its own
@@ -66,8 +67,16 @@ void vita_sched_wake(int kind, uint32_t obj, int all);
 /* Let another runnable thread go, if there is one. */
 void vita_sched_yield(void);
 
+/* Preemption, driven by the generated code (recomp_rt.h): vita_slice_end
+ * when the running thread's count of backward branches runs out, and
+ * vita_spin_wait in a loop that only another thread can end. */
+
 /* Sleep for the given microseconds; other threads run meanwhile. */
 void vita_sched_delay(uint32_t us);
+
+/* The thread holding the baton, for a sampler on another host thread: its
+ * uid and name, or 0 and "(idle)" while every guest thread waits. */
+uint32_t vita_sched_running(char *name, uint32_t cap);
 
 /* How many threads exist and how many are runnable, for the host's summary. */
 uint32_t vita_sched_threads(uint32_t *runnable);

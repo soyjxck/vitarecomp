@@ -85,6 +85,12 @@ const char *vita_symbol_name(uint32_t addr, uint32_t *off);
 extern int vita_trace_fns;
 void vita_trace_fn(uint32_t addr);
 
+/* A sampling view of where the program is (profile.c): every `period_s`
+ * seconds, the functions the samples of the recorded guest address fell in
+ * and which guest thread was running. Needs C emitted with
+ * VITARECOMP_EMIT_PC=1. */
+void vita_profile_start(uint32_t period_s);
+
 /* Button bits, for hosts that map keys. The Vita's own values. */
 #define VITA_CTRL_SELECT    0x00000001u
 #define VITA_CTRL_L3        0x00000002u

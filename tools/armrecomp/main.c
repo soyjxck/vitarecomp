@@ -805,6 +805,7 @@ static int cmd_discover(const char *path) {
     printf("  pointer shape       %u  (heuristic; %u candidates rejected)\n",
            r.seeds_shape, r.rejected_shape);
     printf("    of which in .text %u\n", r.seeds_shape - r.seeds_shape_data);
+    printf("    already walked    %u  (no new function; the stored word makes its target a root)\n", r.shape_known);
     printf("    in data segments  %u  (%u segment%s scanned)\n",
            r.seeds_shape_data, img.data_seg_count,
            img.data_seg_count == 1 ? "" : "s");
@@ -918,6 +919,8 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
     printf("  trapped       %u  (%.2f%%)\n", st.trapped,
            st.insns ? 100.0 * st.trapped / st.insns : 0.0);
     printf("  literals      %u  folded to constants\n", st.literals);
+    printf("  loops         %u  backward branches, each counting the time slice; %u of them only wait\n",
+           st.back_edges, st.wait_loops);
     printf("  import calls  %u  bound to firmware\n", st.import_calls);
     if (st.var_imports)
         printf("  var imports   %u  variables bound at load, read at %u sites\n",

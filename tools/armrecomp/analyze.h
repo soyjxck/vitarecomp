@@ -89,6 +89,9 @@ typedef struct {
      * the counts would hide which sweep is doing the work. */
     uint32_t seeds_shape_data;
     uint32_t rejected_shape;
+    /* Stored words naming code that was already decoded: no new function,
+     * but the word makes its target a root. */
+    uint32_t shape_known;
     /* Mode-switching calls whose target is not a known import stub, and so
      * were not followed into ARM. Counted rather than hidden: if a module has
      * genuine ARM code outside its stub table, this is the number that says

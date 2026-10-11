@@ -96,6 +96,8 @@ typedef enum {
     OP_VMOV_D_TO_C,     /* rt2:rt = a D register, or the S pair vm, vm+1       */
     OP_VMOV_C_TO_D,     /* the other way                                       */
     OP_VCVT_FF,         /* between precisions; vfp_dp names the SOURCE kind     */
+    OP_VCVT_F16_F32,    /* half in the low (imm 0) or high (imm 1) half of vm, to single */
+    OP_VCVT_F32_F16,    /* single to half, into that half of vd, the other kept */
 
     /* Advanced SIMD on D registers (neon.h). vd/vn/vm are D numbers 0-31,
      * neon_q doubles them up, neon_size is the lane width in bits. */
@@ -135,7 +137,7 @@ typedef enum {
     OP_NEON_CVT,        /* imm: 0 s32->f32, 1 u32->f32, 2 f32->s32, 3 f32->u32 */
     /* shifts by an immediate; vfp_unsigned tells the right shifts their fill */
     OP_NEON_SHR, OP_NEON_SRA, OP_NEON_RSHR, OP_NEON_RSRA,  /* imm bits right  */
-    OP_NEON_SHL, OP_NEON_SLI, OP_NEON_SRI,                  /* SLI/SRI insert */
+    OP_NEON_SHL, OP_NEON_SHL_REG, OP_NEON_SLI, OP_NEON_SRI,                  /* SLI/SRI insert */
     OP_NEON_MOVL, OP_NEON_SHLL, /* vd (Q) = vm (D) widened, SHLL then << imm  */
     OP_NEON_MOVN, OP_NEON_SHRN, OP_NEON_RSHRN,  /* vd (D) = vm (Q) >> imm, narrowed */
     /* one operand is lane imm of vm, broadcast; neon_f for the f32 forms     */
