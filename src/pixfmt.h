@@ -57,6 +57,12 @@ uint32_t pixfmt_colour_texture(uint32_t format);
 /* One pixel's bytes as red, green, blue and alpha. */
 void pixfmt_decode(const pixfmt *f, const uint8_t *pixel, float rgba[4]);
 
+/* The numbers a field of `bits` bits of a kind can stand for, in the order
+ * of the field's values, where pixfmt_decode looks them up; NULL for a field
+ * it works out each time. For a caller that reads many pixels of one format
+ * and wants the lookups without the rest. */
+const float *pixfmt_table(unsigned kind, unsigned bits);
+
 /* Set, every field is worked out afresh; clear, the fields with few values
  * are looked up in tables made by the same arithmetic. For a test to hold
  * the second way to the first. */

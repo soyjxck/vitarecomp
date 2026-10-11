@@ -276,6 +276,16 @@ static void tables(void) {
     g_tabled = 1;
 }
 
+const float *pixfmt_table(unsigned kind, unsigned bits) {
+    if (!g_tabled) tables();
+    if (kind == PIX_UNORM && bits >= 1 && bits <= 8) return g_unorm[bits];
+    if (kind == PIX_F16 && bits == 16) return g_half;
+    if (kind == PIX_SNORM && bits == 8) return g_snorm8;
+    if (kind == PIX_UF10 && bits == 10) return g_uf10;
+    if (kind == PIX_UF11 && bits == 11) return g_uf11;
+    return NULL;
+}
+
 void pixfmt_decode(const pixfmt *f, const uint8_t *pixel, float rgba[4]) {
     uint64_t bits = 0;
     float v[4] = { 0.0f, 0.0f, 0.0f, 0.0f };

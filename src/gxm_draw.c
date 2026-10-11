@@ -31,6 +31,8 @@ enum { T_BEGIN, T_VERTICES, T_SETUP, T_FILL, T_MAIN };                  /* the d
 enum { T_INPUTS, T_SAMPLES, T_PROGRAM, T_STORE, T_BAND, T_PREPARE, T_WORKER };     /* each thread */
 static uint32_t g_profile;
 static uint64_t g_main_ns[T_MAIN];
+/* and the same by the size of the surface drawn to: a frame is a dozen scenes, of a few sizes */
+static struct { uint32_t width, height, lists, draws; uint64_t ns; } g_by_target[16];
 
 static uint64_t now_ns(void) {
     struct timespec t;
@@ -796,27 +798,95 @@ static const float *slot_row(const draw *d, const struct batch *b, unsigned n, u
     return b->var[d->slot_at[slot] + (int)k];
 }
 
-/* slot_value, for one of the pixels waiting. */
-static void lane_value(const draw *d, const struct batch *b, unsigned slot, unsigned l, float v[4], float dx[4], float dy[4]) {
-    memset(dx, 0, 4 * sizeof(float));
-    memset(dy, 0, 4 * sizeof(float));
-    if (slot == GXP_SLOT_POSITION) {
-        v[0] = (float)b->x[l] + 0.5f; v[1] = (float)b->y[l] + 0.5f; v[2] = b->depth[l];
-        v[3] = d->w_at >= 0 ? b->var[d->w_at][l] : 1.0f;
-        dx[0] = 1.0f; dy[1] = 1.0f;
-        return;
+/* sample_input for every pixel waiting: the sample of texture `t` that
+ * input `in` hands each of them, component k of pixel l left in out[k][l].
+ * The coordinates and their rates of change are those slot_value gives a
+ * pixel by itself, projected the same way, and the numbers are worked out
+ * by the same arithmetic; what differs is that a row is asked of the
+ * texture at once. Returns how many components the texture has. */
+static int sample_rows(worker *wk, const gxp_input *in, const gxm_tex *t, const struct batch *b, unsigned n,
+                       float (*out)[USSE_LANES]) {
+    const draw *d = wk->d;
+    float held[4][USSE_LANES], cu[USSE_LANES], cv[USSE_LANES], lod[USSE_LANES];
+    if (!t) {
+        for (int k = 0; k < 4; k++) memset(out[k], 0, n * sizeof(float));
+        wk->counters.no_texture += n;
+        return 4;
     }
-    if (slot >= GXP_SLOTS || d->slot_at[slot] < 0) { v[0] = v[1] = v[2] = 0.0f; v[3] = 1.0f; return; }
-    int at = d->slot_at[slot];
-    for (int k = 0; k < 4; k++) v[k] = b->var[at + k][l];
-    memcpy(dx, b->ddx[l] + at, 4 * sizeof(float));
-    memcpy(dy, b->ddy[l] + at, 4 * sizeof(float));
+    unsigned slot = in->coord;
+    int position = slot == GXP_SLOT_POSITION, at = !position && slot < GXP_SLOTS ? d->slot_at[slot] : -1;
+    const float *v0 = slot_row(d, b, n, slot, 0, held[0]), *v1 = slot_row(d, b, n, slot, 1, held[1]);
+    const float *v2 = slot_row(d, b, n, slot, 2, held[2]);
+    int wanted = !(t->cube || t->levels == 1);              /* a level to choose: the rates of change are looked at */
+
+    if (in->projection && !t->cube) {
+        /* the coordinate over its w, or over its z, and the rate of change of that */
+        int by = in->projection == 1 ? 3 : 2;
+        const float *over = by == 3 ? slot_row(d, b, n, slot, 3, held[3]) : v2;
+        for (unsigned l = 0; l < n; l++) {
+            float q = 1.0f / over[l], u = v0[l], v = v1[l];
+            if (wanted) {
+                float dx[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, dy[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                if (position) { dx[0] = 1.0f; dy[1] = 1.0f; }
+                else if (at >= 0) { memcpy(dx, b->ddx[l] + at, sizeof(dx)); memcpy(dy, b->ddy[l] + at, sizeof(dy)); }
+                dx[0] = (dx[0] - u * q * dx[by]) * q; dy[0] = (dy[0] - u * q * dy[by]) * q;
+                dx[1] = (dx[1] - v * q * dx[by]) * q; dy[1] = (dy[1] - v * q * dy[by]) * q;
+                lod[l] = gxm_tex_footprint(t, dx[0], dx[1], dy[0], dy[1]);
+            }
+            cu[l] = u * q;
+            cv[l] = v * q;
+        }
+        v0 = cu; v1 = cv;
+    } else if (wanted) {
+        if (position) {
+            float one = gxm_tex_footprint(t, 1.0f, 0.0f, 0.0f, 1.0f);
+            for (unsigned l = 0; l < n; l++) lod[l] = one;
+        } else if (at >= 0) {
+            for (unsigned l = 0; l < n; l++)
+                lod[l] = gxm_tex_footprint(t, b->ddx[l][at], b->ddx[l][at + 1], b->ddy[l][at], b->ddy[l][at + 1]);
+        } else {
+            float none = gxm_tex_footprint(t, 0.0f, 0.0f, 0.0f, 0.0f);
+            for (unsigned l = 0; l < n; l++) lod[l] = none;
+        }
+    }
+    const float *coord[3] = { v0, v1, v2 };
+    float *rows[4] = { out[0], out[1], out[2], out[3] };
+    gxm_tex_sample_row(t, &wk->cache[in->unit], n, coord, wanted ? lod : NULL, rows);
+    return t->pf.components;
 }
 
-/* VITARECOMP_GXM_UNWRITTEN=1: every register is filled with a mark before a
- * row of pixels goes through its program, and a program that reads one
- * still marked is named, once for each instruction of it that does. What
- * such a program draws depends on what ran before it. */
+/* store_sample for every pixel waiting: the samples into the rows of the
+ * registers the program looks for them in, in the form it was compiled to
+ * find there. A word store_sample leaves alone is left alone. */
+static void store_rows(const gxp_input *in, const gxm_tex *t, float (*rgba)[USSE_LANES], int got,
+                       uint32_t (*row)[USSE_LANES], unsigned n) {
+    if (in->result == 3) {
+        int kept = in->single ? 1 : got;
+        for (int k = 0; k < 4; k++) {
+            if (k < kept) memcpy(row[k], rgba[k], n * sizeof(float));
+            else if (!in->single) memset(row[k], 0, n * sizeof(uint32_t));
+        }
+    } else if (in->result == 0 && t && t->pf.type == USSE_F32) {
+        /* a texture of whole words, kept as it is */
+        for (int k = 0; k < got; k++) memcpy(row[k], rgba[k], n * sizeof(float));
+    } else if (in->result == 0 && (!t || t->pf.type == USSE_U8 || t->pf.type == USSE_S8)) {
+        int is_signed = t && t->pf.type == USSE_S8;
+        for (unsigned l = 0; l < n; l++) {
+            uint32_t word = 0;
+            for (int k = 0; k < got; k++) {
+                float c = rgba[k][l];
+                if (is_signed) pack(&word, GXP_S8, (unsigned)k, roundf((c < -1.0f ? -1.0f : c > 1.0f ? 1.0f : c) * 127.0f));
+                else pack(&word, GXP_U8, (unsigned)k, roundf(unit_clamp(c) * 255.0f));
+            }
+            row[0][l] = word;
+        }
+    } else {
+        memset(row[0], 0, n * sizeof(uint32_t));
+        memset(row[1], 0, n * sizeof(uint32_t));
+        for (int k = 0; k < got; k++) vita_floats_to_halves(rgba[k], row[k >> 1], k & 1, n);
+    }
+}
+
 static mtx_t g_unwritten_lock;
 static void unwritten_lock_init(void) { mtx_init(&g_unwritten_lock, mtx_plain); }
 
@@ -879,7 +949,7 @@ static void flush(worker *wk) {
     gxm_draw_state *s = d->s;
     const gxp_program *p = wk->f.p;
     usse_wide *w = &b->w;
-    float scratch[USSE_LANES], v[4], dx[4], dy[4], rgba[4];
+    float scratch[USSE_LANES], sampled[4][USSE_LANES];
     uint32_t reg[4];
     uint64_t lap = g_profile ? now_ns() : 0, at;
 #define LAP(stage) do { if (g_profile) { at = now_ns(); wk->ns[stage] += at - lap; lap = at; } } while (0)
@@ -923,15 +993,9 @@ static void flush(worker *wk) {
                 LAP(T_INPUTS);
             }
             if (in->has_texture && in->texture_reg < USSE_WORDS - 4) {
-                uint32_t (*row)[USSE_LANES] = &w->pa[in->texture_reg];
                 const gxm_tex *t = in->unit < GXP_TEXTURE_UNITS ? wk->f.tex[in->unit] : NULL;
-                for (unsigned l = 0; l < n; l++) {
-                    if (t) lane_value(d, b, in->coord, l, v, dx, dy);
-                    int got = sample_input(wk, in, t, v, dx, dy, rgba);
-                    for (int k = 0; k < 4; k++) reg[k] = row[k][l];
-                    store_sample(in, t, rgba, got, reg);
-                    for (int k = 0; k < 4; k++) row[k][l] = reg[k];
-                }
+                int got = sample_rows(wk, in, t, b, n, sampled);
+                store_rows(in, t, sampled, got, &w->pa[in->texture_reg], n);
                 LAP(T_SAMPLES);
             }
         }
@@ -1129,6 +1193,12 @@ static void profile_report(void) {
             (double)ns[T_INPUTS] * per, (double)ns[T_SAMPLES] * per, (double)ns[T_PROGRAM] * per, (double)ns[T_STORE] * per,
             (double)(ns[T_BAND] > batched ? ns[T_BAND] - batched : 0) * per,
             (double)covered / (double)g_profile, (double)in_rows / (double)g_profile, (double)alone / (double)g_profile);
+    fprintf(stderr, "    by the surface drawn to, ms a frame (lists of draws, draws):");
+    for (unsigned i = 0; i < 16 && g_by_target[i].width; i++)
+        fprintf(stderr, " %ux%u %.1f (%.1f, %.1f)", g_by_target[i].width, g_by_target[i].height, (double)g_by_target[i].ns * per,
+                (double)g_by_target[i].lists / (double)g_profile, (double)g_by_target[i].draws / (double)g_profile);
+    fprintf(stderr, "\n");
+    memset(g_by_target, 0, sizeof(g_by_target));
     memset(g_main_ns, 0, sizeof(g_main_ns));
     last = now;
 }
@@ -1538,7 +1608,7 @@ static void fill_tile(void *ctx, unsigned item, unsigned index) {
 uint32_t gxm_draw_flush(void) {
     uint32_t pixels = 0, queued_now = g_queued;
     if (!queued_now) return 0;
-    uint64_t lap = g_profile ? now_ns() : 0, at;
+    uint64_t lap = g_profile ? now_ns() : 0, at, began = lap;
 #define LAP(stage) do { if (g_profile) { at = now_ns(); g_main_ns[stage] += at - lap; lap = at; } } while (0)
 
     for (unsigned w = 0; w < vita_pool_size(); w++) {
@@ -1560,6 +1630,15 @@ uint32_t gxm_draw_flush(void) {
     if (any) vita_pool_run(g_tiles_x * g_tiles_y, fill_tile, NULL);
     LAP(T_FILL);
 #undef LAP
+    if (g_profile) {
+        uint32_t width = g_queue[0]->s.width, height = g_queue[0]->s.height;
+        unsigned i = 0;
+        while (i < 15 && g_by_target[i].width && (g_by_target[i].width != width || g_by_target[i].height != height)) i++;
+        g_by_target[i].width = width; g_by_target[i].height = height;
+        g_by_target[i].lists++;
+        g_by_target[i].draws += queued_now;
+        g_by_target[i].ns += now_ns() - began;
+    }
 
     for (uint32_t i = 0; i < queued_now; i++) {
         queued *q = g_queue[i];

@@ -270,6 +270,67 @@ static void compare_ways(const char *what, unsigned rounds, int cube) {
     }
 }
 
+/* A row of samples is the same samples taken one at a time: for the
+ * texture now open, sixty-four points at a time, with a level of detail
+ * each or with none, a few of them not numbers at all. */
+static void compare_row(const char *what, unsigned rounds, int cube) {
+    enum { N = 64 };
+    static float u[N], v[N], s[N], lod[N], out[4][N];
+    const float *coord[3] = { u, v, s };
+    float *rows[4] = { out[0], out[1], out[2], out[3] };
+    for (unsigned round = 0; round < rounds; round++) {
+        unsigned n = 1 + rnd() % N;
+        int with_lod = (round & 1) != 0;
+        for (unsigned i = 0; i < n; i++) {
+            u[i] = rnd_between(-2.5f, 3.5f); v[i] = rnd_between(-2.5f, 3.5f); s[i] = rnd_between(-1.0f, 1.0f);
+            if (cube) { u[i] -= 0.5f; v[i] -= 0.5f; }
+            if (rnd() % 97 == 0) u[i] = v[i] - v[i] + (float)(1e30 * 1e30) * 0.0f;      /* not a number */
+            lod[i] = rnd_between(-2.0f, 9.0f);
+        }
+        gxm_tex_cache_reset(&cache);
+        gxm_tex_sample_row(&t, &cache, n, coord, with_lod ? lod : NULL, rows);
+        for (unsigned i = 0; i < n; i++) {
+            float point[3] = { u[i], v[i], s[i] }, one[4], row[4] = { out[0][i], out[1][i], out[2][i], out[3][i] };
+            gxm_tex_sample(&t, &cache, point, with_lod ? lod[i] : 0.0f, one);
+            if (memcmp(one, row, sizeof(one))) {
+                fprintf(stderr, "%s: point %u of %u at (%g, %g, %g): in a row %g %g %g %g, by itself %g %g %g %g\n", what, i, n,
+                        (double)u[i], (double)v[i], (double)s[i], (double)row[0], (double)row[1], (double)row[2], (double)row[3],
+                        (double)one[0], (double)one[1], (double)one[2], (double)one[3]);
+                assert(0);
+            }
+        }
+    }
+}
+
+static void test_rows(void) {
+    uint32_t w[4];
+    for (size_t i = 0; i < sizeof(store); i++) store[i] = (uint8_t)rnd();
+    /* bytes in rows, filtered, in levels blended; halves in tiles, one level; a cube in levels; blocks decoded */
+    words(w, GXM_TEX_LINEAR, 0x0C000000u, 64, 32, 5, 1, 0);
+    w[0] |= 1u << 9;
+    open_texture(w);
+    compare_row("bytes in rows, in levels", 300, 0);
+    words(w, GXM_TEX_TILED, 0x1B000000u, 64, 32, 1, 0, 2);
+    open_texture(w);
+    compare_row("halves in tiles", 300, 0);
+    words(w, GXM_TEX_LINEAR_STRIDED, 0x15000000u, 40, 12, 1, 1, 2);
+    w[0] = (w[0] & ~((7u << 9) | (0x3FFu << 17) | (3u << 1))) | ((39u & 7) << 9) | ((39u >> 3) << 17);
+    open_texture(w);
+    compare_row("depth in rows of a given length", 300, 0);
+    words(w, GXM_TEX_CUBE, 0x0C000000u, 16, 16, 3, 1, 2);
+    w[0] |= 1u << 9;
+    open_texture(w);
+    compare_row("bytes on a cube, in levels", 300, 1);
+    memset(&t, 0, sizeof(t));
+    words(w, GXM_TEX_SWIZZLED, 0x87000000u, 64, 32, 6, 1, 0);
+    w[0] |= 1u << 9;
+    open_texture(w);
+    decode_levels();
+    compare_row("decoded blocks", 300, 0);
+    memset(&t, 0, sizeof(t));
+    printf("  a row and one at a time        ok\n");
+}
+
 static void test_fast_ways(void) {
     uint32_t w[4];
     for (size_t i = 0; i < sizeof(store); i++) store[i] = (uint8_t)rnd();
@@ -330,6 +391,56 @@ static void test_fast_ways(void) {
     open_texture(w);
     assert(t.stride == 160);
     compare_ways("depth in rows of a given length", 4000, 0);
+    /* And a scene's own buffers read as textures, each in the layouts they
+     * come in: small floats beside two bits, nearest and filtered; halves
+     * on the faces of a cube; bytes swizzled and on a cube; one float; two
+     * sixteen-bit fractions, which are scaled and not looked up; depth
+     * beside a byte, in tiles. */
+    for (uint32_t filter = 0; filter < 2; filter++) {
+        words(w, GXM_TEX_LINEAR, 0x9A000000u, 45, 26, 1, filter, 2);
+        open_texture(w);
+        assert(t.quick == 1);
+        compare_ways("small floats beside two bits", 4000, 0);
+        words(w, GXM_TEX_LINEAR, 0x9A001000u, 45, 26, 1, filter, 0);
+        open_texture(w);
+        compare_ways("two bits beside small floats", 4000, 0);
+        words(w, GXM_TEX_SWIZZLED, 0x0C000000u, 32, 16, 4, filter, 0);
+        w[0] |= filter << 9;
+        open_texture(w);
+        assert(t.quick == 1 && t.levels == 4);
+        compare_ways("bytes, swizzled, in levels", 4000, 0);
+        words(w, GXM_TEX_SWIZZLED, 0x0C000000u, 32, 16, 1, filter, 0);
+        w[0] |= 1u << 27;
+        open_texture(w);
+        assert(t.quick == 1 && t.gamma);
+        compare_ways("bytes on the display's curve, swizzled", 4000, 0);
+        words(w, GXM_TEX_TILED, 0x15000000u, 64, 64, 1, filter, 2);
+        open_texture(w);
+        assert(t.quick == 2);
+        compare_ways("depth beside a byte, in tiles", 4000, 0);
+        words(w, GXM_TEX_LINEAR, 0x0F000000u, 40, 24, 1, filter, 1);
+        open_texture(w);
+        assert(t.quick == 2);
+        compare_ways("two sixteen-bit fractions", 4000, 0);
+        words(w, GXM_TEX_LINEAR, 0x12000000u, 40, 24, 1, 0, 2);
+        open_texture(w);
+        compare_ways("one float", 4000, 0);
+    }
+    memset(&t, 0, sizeof(t));
+    words(w, GXM_TEX_CUBE, 0x1B000000u, 16, 16, 1, 1, 2);
+    open_texture(w);
+    assert(t.quick == 1 && t.cube);
+    compare_ways("halves on a cube", 4000, 1);
+    words(w, GXM_TEX_CUBE, 0x0C000000u, 16, 16, 3, 1, 2);
+    w[0] |= 1u << 9;
+    open_texture(w);
+    compare_ways("bytes on a cube, in levels", 4000, 1);
+    /* cut short: the general way answers nothing past the end, and so must this */
+    words(w, GXM_TEX_TILED, 0x1B000000u, 64, 64, 1, 1, 0);
+    open_texture(w);
+    t.avail = 64 * 8 * 40;
+    compare_ways("halves in tiles, cut short", 4000, 0);
+    memset(&t, 0, sizeof(t));
     printf("  the fast ways and the general  ok\n");
 }
 
@@ -340,6 +451,7 @@ int main(void) {
     test_samples();
     test_cube();
     test_fast_ways();
+    test_rows();
     printf("all gxm_tex tests passed\n");
     return 0;
 }

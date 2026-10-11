@@ -317,10 +317,20 @@ Not there yet, in the order the title will want them:
    only where a texture with smaller copies is placed by them, and the
    stencil and depth tests are made in the walk itself, before either,
    for the draws where a pixel that fails changes nothing. A fifth off
-   the walk. `VITARECOMP_GXM_PROFILE` says where a frame's time goes
-   now: the threads are busy, and what they are busy with is samples
-   first, then the programs, the walk, the store. What is left is in
-   milestone E.
+   the walk. Then the samples again, from the other end. A census of
+   what play samples said nearly half of it is the scene's own buffers
+   read back as textures, depth beside a byte, small floats, halves in
+   tiles, signed bytes, and every texel of those went through the general
+   reader and the general decoder; a texture now works out once, from its
+   control words, how its texel is read as a word and each channel had
+   from it. And a texture input is sampled for the whole row of pixels
+   waiting in one call, the texture's levels looked at once for the row
+   and the results put into the registers a row at a time. Samples went
+   from 860 ms of the threads' time a frame to 440, and a frame from 163
+   ms to 123 on a machine doing other work. `VITARECOMP_GXM_PROFILE`
+   says where a frame's time goes now: samples and programs level, then
+   the walk and the store, and a quarter of a frame is the title's own
+   code. What is left is in milestone E.
 2. Lines and points, depth bias, the mask-update program, multisampled
    targets, the YUV textures a movie arrives in, the transfer calls.
    Each is counted or named where it is skipped, none is silent.

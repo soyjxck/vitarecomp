@@ -713,7 +713,10 @@ tiles, the fill); and, summed over the threads that take part, the
 vertices and triangles again and, in the fill, the fragment programs'
 inputs, their texture samples, the programs, the tests and the store,
 with how many pixels a triangle covered, how many went through a program
-in rows and how many one at a time. `VITARECOMP_GXM_SKIP=<first>-<last>`
+in rows and how many one at a time; and on a second line what drawing cost
+by the size of the surface drawn to, with how many lists of draws and how
+many draws went to each, which says whether a frame's time is in its
+picture or in the small passes around it. `VITARECOMP_GXM_SKIP=<first>-<last>`
 counts the draws of those frames and draws none of them, which takes a
 title past a screen it holds for a fixed time, a health warning over a
 costly scene, in seconds. What those frames would have left in any

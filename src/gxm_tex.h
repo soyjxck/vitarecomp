@@ -49,6 +49,14 @@ typedef struct {
     uint8_t  chan_shift[4];                 /* then, for red, green, blue and alpha: which byte of the texel, */
     const float *chan_table[4];             /* and the 256 numbers that byte can stand for */
     pixfmt   pf;                            /* a texel; for blocks and palettes, what they decode to */
+    /* For a texel that is a plain run of bytes whose every channel is a
+     * field with a table, a field scaled, a float as it stands or a
+     * constant: how each channel is had from the texel read as one word.
+     * `quick` is 1 when all four are lookups (a constant is a table of
+     * one), 2 when some need their own arithmetic, 0 when the texel goes
+     * through pixfmt_decode. */
+    uint8_t  quick;
+    struct { uint8_t shift, how; uint32_t mask; const float *table; float scale; } q[4];
     uint32_t level_w[GXM_TEX_LEVELS], level_h[GXM_TEX_LEVELS];      /* texels */
     uint32_t store_w[GXM_TEX_LEVELS], store_h[GXM_TEX_LEVELS];      /* units, as laid out */
     uint32_t level_at[GXM_TEX_LEVELS];      /* bytes from the start of a face */
@@ -112,6 +120,14 @@ void gxm_tex_sample(const gxm_tex *t, gxm_tex_cache *cache, const float *coord, 
 /* The four texels a bilinear sample at (u, v) of level 0 would blend, first
  * channel only, in the order (x0,y1) (x1,y1) (x1,y0) (x0,y0), and the
  * fractions of the way from x0 to x1 and from y0 to y1. */
+/* gxm_tex_sample for `n` points at once. Coordinate k of point i is
+ * coord[k][i]: two of them, or the three of a direction for a cube. lod[i]
+ * is its level of detail, or `lod` is NULL for none. Component c of point
+ * i's sample is left in out[c][i]. Each point gets what gxm_tex_sample
+ * gives it; what does not depend on the point is worked out once. */
+void gxm_tex_sample_row(const gxm_tex *t, gxm_tex_cache *cache, unsigned n, const float *const coord[3],
+                        const float *lod, float *const out[4]);
+
 void gxm_tex_gather(const gxm_tex *t, gxm_tex_cache *cache, const float *coord, float texels[4], float fraction[2]);
 
 #endif /* VITARECOMP_GXM_TEX_H */

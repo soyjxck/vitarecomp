@@ -43,6 +43,78 @@ static void channels(gxm_tex *t) {
     }
 }
 
+/* --- a plain texel, quickly ---------------------------------------------------------------
+ * Half the samples a deferred renderer takes are of its own buffers: depth
+ * beside a byte, small floats, halves, signed bytes, in rows, in tiles, in
+ * a rectangle of a larger surface. Each texel of those went through the
+ * general reader, which asks what kind of texture it has every time, and
+ * then through the general decoder, which asks what kind of field. For a
+ * texture those answers do not change; they are worked out once, when its
+ * control words are read. What comes out is what the general way gives. */
+
+enum { Q_TABLE = 0, Q_SCALE, Q_BITS };
+static const float g_zero1[1] = { 0.0f }, g_one1[1] = { 1.0f };
+
+static void quick(gxm_tex *t) {
+    t->quick = 0;
+    if (t->kind != GXM_TEX_PLAIN || t->pf.bytes > 8 || t->pf.raw) return;
+    if (t->gamma && !t->bytes8) return;                 /* the curve is in the byte tables and nowhere else */
+    uint8_t all_tables = 1;
+    for (int c = 0; c < 4; c++) {
+        int from = t->pf.from[c];
+        t->q[c].how = Q_TABLE; t->q[c].shift = 0; t->q[c].mask = 0; t->q[c].scale = 0.0f;
+        if (from == PIX_ZERO) { t->q[c].table = g_zero1; continue; }
+        if (from == PIX_ONE)  { t->q[c].table = g_one1; continue; }
+        unsigned kind = t->pf.f[from].kind, bits = t->pf.f[from].bits;
+        t->q[c].shift = t->pf.f[from].shift;
+        t->q[c].mask = bits >= 32 ? 0xFFFFFFFFu : (1u << bits) - 1;
+        if (t->bytes8) { t->q[c].table = t->chan_table[c]; continue; }      /* on the curve or off it, as channels() chose */
+        t->q[c].table = pixfmt_table(kind, bits);
+        if (t->q[c].table) continue;
+        all_tables = 0;
+        if (kind == PIX_UNORM && bits <= 32) {
+            t->q[c].how = Q_SCALE;
+            t->q[c].scale = bits >= 32 ? (float)0xFFFFFFFFull : (float)(uint64_t)t->q[c].mask;
+        } else if (kind == PIX_F32 && bits == 32) {
+            t->q[c].how = Q_BITS;
+        } else {
+            return;
+        }
+    }
+    t->quick = all_tables ? 1 : 2;
+}
+
+/* Where texel (x, y) of a level of a plain texture lies, in bytes from its
+ * first; the texel is within the level. */
+static uint64_t plain_offset(const gxm_tex *t, unsigned face, unsigned level, uint32_t x, uint32_t y) {
+    uint64_t at = (uint64_t)face * t->face_bytes + t->level_at[level];
+    switch (t->type) {
+    case GXM_TEX_LINEAR:         return at + ((uint64_t)y * t->store_w[level] + x) * t->unit_bytes;
+    case GXM_TEX_LINEAR_STRIDED: return at + (uint64_t)y * t->stride + (uint64_t)x * t->unit_bytes;
+    case GXM_TEX_TILED:
+        return at + (uint64_t)(((y >> 5) * (t->store_w[level] / 32) + (x >> 5)) * 1024 + (y & 31) * 32 + (x & 31)) * t->unit_bytes;
+    default:                     return at + (uint64_t)tex_morton_index(x, y, t->store_w[level], t->store_h[level]) * t->unit_bytes;
+    }
+}
+
+static void quick_texel(const gxm_tex *t, unsigned face, unsigned level, int x, int y, float rgba[4]) {
+    uint64_t at = plain_offset(t, face, level, (uint32_t)x, (uint32_t)y), word = 0;
+    if (at + t->unit_bytes > t->avail) { rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0.0f; return; }
+    if (t->pf.bytes == 4) { uint32_t four; memcpy(&four, t->base + at, 4); word = four; }
+    else if (t->pf.bytes == 8) memcpy(&word, t->base + at, 8);
+    else memcpy(&word, t->base + at, t->pf.bytes);
+    if (t->quick == 1) {
+        for (int c = 0; c < 4; c++) rgba[c] = t->q[c].table[(uint32_t)(word >> t->q[c].shift) & t->q[c].mask];
+        return;
+    }
+    for (int c = 0; c < 4; c++) {
+        uint32_t field = (uint32_t)(word >> t->q[c].shift) & t->q[c].mask;
+        if (t->q[c].how == Q_TABLE) rgba[c] = t->q[c].table[field];
+        else if (t->q[c].how == Q_SCALE) rgba[c] = (float)field / t->q[c].scale;
+        else memcpy(&rgba[c], &field, 4);
+    }
+}
+
 /* A texel whose fields are whole bytes, through the tables. */
 static void bytes_texel(const gxm_tex *t, uint32_t px, float rgba[4]) {
     for (int c = 0; c < 4; c++) rgba[c] = t->chan_table[c][(px >> t->chan_shift[c]) & 255];
@@ -116,6 +188,7 @@ int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
         if (t->pf.f[i].kind != PIX_UNORM || t->pf.f[i].bits != 8 || t->pf.f[i].shift != 8 * i) t->bytes8 = 0;
     if (t->kind == GXM_TEX_PVRTC) { t->unit_w = t->pvrtc_bits == 2 ? 8 : 4; t->unit_h = 4; }
     channels(t);
+    quick(t);
 
     /* no more levels than the shorter side can be halved */
     uint32_t shorter = t->width < t->height ? t->width : t->height, most = 1;
@@ -348,16 +421,37 @@ static uint32_t word_at(const uint8_t *rows, uint32_t stride, int x, int y) {
     return word;
 }
 
-static void sample_level(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsigned level, float u, float v,
-                         int linear, float rgba[4]) {
-    int w = (int)t->level_w[level], h = (int)t->level_h[level];
-    int um = t->cube ? 2 : t->u_mode, vm = t->cube ? 2 : t->v_mode;
-    uint32_t stride = 0;
-    const uint8_t *rows = word_rows(t, face, level, &stride);
+/* A level as a sample sees it: everything about reading it that does not
+ * depend on where the sample falls. A row of samples of one texture looks at
+ * each level once. */
+typedef struct {
+    const gxm_tex *t;
+    gxm_tex_cache *cache;
+    unsigned face, level;
+    int w, h, um, vm, quickly;
+    const uint8_t *rows;
+    uint32_t stride;
+} level_view;
+
+static void view_level(level_view *lv, const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsigned level) {
+    lv->t = t; lv->cache = cache; lv->face = face; lv->level = level;
+    lv->w = (int)t->level_w[level]; lv->h = (int)t->level_h[level];
+    lv->um = t->cube ? 2 : t->u_mode; lv->vm = t->cube ? 2 : t->v_mode;
+    lv->stride = 0;
+    lv->rows = word_rows(t, face, level, &lv->stride);
+    lv->quickly = !lv->rows && t->quick && !gxm_tex_plain_paths && t->base && level < t->levels;
+}
+
+static inline void sample_view(const level_view *lv, float u, float v, int linear, float rgba[4]) {
+    const gxm_tex *t = lv->t;
+    int w = lv->w, h = lv->h, um = lv->um, vm = lv->vm;
+    const uint8_t *rows = lv->rows;
+    uint32_t stride = lv->stride;
     if (!linear) {
         int px = wrap((int)floorf(u * (float)w), w, um), py = wrap((int)floorf(v * (float)h), h, vm);
         if (rows) bytes_texel(t, word_at(rows, stride, px, py), rgba);
-        else gxm_tex_texel(t, cache, face, level, px, py, rgba);
+        else if (lv->quickly) quick_texel(t, lv->face, lv->level, px, py, rgba);
+        else gxm_tex_texel(t, lv->cache, lv->face, lv->level, px, py, rgba);
         return;
     }
     float x = u * (float)w - 0.5f, y = v * (float)h - 0.5f;
@@ -379,14 +473,58 @@ static void sample_level(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, 
         return;
     }
     float a[4], b[4], c[4], d[4];
-    gxm_tex_texel(t, cache, face, level, x0, y0, a);
-    gxm_tex_texel(t, cache, face, level, x1, y0, b);
-    gxm_tex_texel(t, cache, face, level, x0, y1, c);
-    gxm_tex_texel(t, cache, face, level, x1, y1, d);
+    if (lv->quickly) {
+        quick_texel(t, lv->face, lv->level, x0, y0, a);
+        quick_texel(t, lv->face, lv->level, x1, y0, b);
+        quick_texel(t, lv->face, lv->level, x0, y1, c);
+        quick_texel(t, lv->face, lv->level, x1, y1, d);
+    } else {
+        gxm_tex_texel(t, lv->cache, lv->face, lv->level, x0, y0, a);
+        gxm_tex_texel(t, lv->cache, lv->face, lv->level, x1, y0, b);
+        gxm_tex_texel(t, lv->cache, lv->face, lv->level, x0, y1, c);
+        gxm_tex_texel(t, lv->cache, lv->face, lv->level, x1, y1, d);
+    }
     for (int i = 0; i < 4; i++) {
         float top = a[i] + (b[i] - a[i]) * fx, bottom = c[i] + (d[i] - c[i]) * fx;
         rgba[i] = top + (bottom - top) * fy;
     }
+}
+
+/* The view of level `n` of the face in hand: made the first time it is asked for. */
+static inline const level_view *view_of(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, level_view *views,
+                                        uint32_t *made, unsigned n) {
+    if (!((*made >> n) & 1)) { view_level(&views[n], t, cache, face, n); *made |= 1u << n; }
+    return &views[n];
+}
+
+/* One sample of one face at (u, v): the level or the two levels it falls
+ * on, the filter, the blend. */
+static inline void sample_point(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, level_view *views, uint32_t *made,
+                                float u, float v, float lod, float rgba[4]) {
+    if (u != u || v != v) { rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0.0f; return; }
+    /* keep the arithmetic of wrapping within what an int holds */
+    if (u > 32768.0f || u < -32768.0f) u = 0.0f;
+    if (v > 32768.0f || v < -32768.0f) v = 0.0f;
+
+    float last = (float)(t->levels - 1), level = lod + t->lod_bias;
+    if (!(level > (float)t->lod_min)) level = (float)t->lod_min;
+    if (level > last) level = last;
+    /* at or below the first level the texture is being enlarged */
+    int filter = level > 0.0f ? t->min_filter : t->mag_filter;
+    int linear = (filter == 1 || filter == 2) && !t->pf.raw;
+    if (t->mip_filter && !t->pf.raw && level < last) {
+        unsigned lower = (unsigned)level;
+        float between = level - (float)lower, a[4], b[4];
+        if (between > 0.0f) {
+            sample_view(view_of(t, cache, face, views, made, lower), u, v, linear, a);
+            sample_view(view_of(t, cache, face, views, made, lower + 1), u, v, linear, b);
+            for (int i = 0; i < 4; i++) rgba[i] = a[i] + (b[i] - a[i]) * between;
+            return;
+        }
+    }
+    unsigned whole = (unsigned)(level + 0.5f);
+    if (whole >= GXM_TEX_LEVELS) whole = GXM_TEX_LEVELS - 1;
+    sample_view(view_of(t, cache, face, views, made, whole), u, v, linear, rgba);
 }
 
 /* The face of a cube a direction points at, and where on it. */
@@ -415,31 +553,30 @@ float gxm_tex_footprint(const gxm_tex *t, float dudx, float dvdx, float dudy, fl
 }
 
 void gxm_tex_sample(const gxm_tex *t, gxm_tex_cache *cache, const float *coord, float lod, float rgba[4]) {
+    level_view views[GXM_TEX_LEVELS];
+    uint32_t made = 0;
     unsigned face = 0;
     float u = coord[0], v = coord[1];
     if (t->cube) cube_face(coord, &face, &u, &v);
-    if (u != u || v != v) { rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0.0f; return; }
-    /* keep the arithmetic of wrapping within what an int holds */
-    if (u > 32768.0f || u < -32768.0f) u = 0.0f;
-    if (v > 32768.0f || v < -32768.0f) v = 0.0f;
+    sample_point(t, cache, face, views, &made, u, v, lod, rgba);
+}
 
-    float last = (float)(t->levels - 1), level = lod + t->lod_bias;
-    if (!(level > (float)t->lod_min)) level = (float)t->lod_min;
-    if (level > last) level = last;
-    /* at or below the first level the texture is being enlarged */
-    int filter = level > 0.0f ? t->min_filter : t->mag_filter;
-    int linear = (filter == 1 || filter == 2) && !t->pf.raw;
-    if (t->mip_filter && !t->pf.raw && level < last) {
-        unsigned lower = (unsigned)level;
-        float between = level - (float)lower, a[4], b[4];
-        if (between > 0.0f) {
-            sample_level(t, cache, face, lower, u, v, linear, a);
-            sample_level(t, cache, face, lower + 1, u, v, linear, b);
-            for (int i = 0; i < 4; i++) rgba[i] = a[i] + (b[i] - a[i]) * between;
-            return;
+void gxm_tex_sample_row(const gxm_tex *t, gxm_tex_cache *cache, unsigned n, const float *const coord[3],
+                        const float *lod, float *const out[4]) {
+    level_view views[GXM_TEX_LEVELS];
+    uint32_t made = 0;
+    unsigned face = 0, views_of = 0;
+    float rgba[4];
+    for (unsigned i = 0; i < n; i++) {
+        float u = coord[0][i], v = coord[1][i];
+        if (t->cube) {
+            float direction[3] = { u, v, coord[2][i] };
+            cube_face(direction, &face, &u, &v);
+            if (face != views_of) { made = 0; views_of = face; }       /* the views are of one face */
         }
+        sample_point(t, cache, face, views, &made, u, v, lod ? lod[i] : 0.0f, rgba);
+        out[0][i] = rgba[0]; out[1][i] = rgba[1]; out[2][i] = rgba[2]; out[3][i] = rgba[3];
     }
-    sample_level(t, cache, face, (unsigned)(level + 0.5f), u, v, linear, rgba);
 }
 
 void gxm_tex_gather(const gxm_tex *t, gxm_tex_cache *cache, const float *coord, float texels[4], float fraction[2]) {
