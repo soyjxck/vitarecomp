@@ -122,6 +122,11 @@ typedef enum {
     OP_NEON_DUP_LANE,   /* every lane from lane imm of vm                   */
     OP_NEON_EXT,        /* bytes imm.. of the pair vm:vn, vn the low half   */
     OP_NEON_SWP,
+    OP_NEON_TRN,        /* the odd lanes of vd change places with the even lanes of vm */
+    OP_NEON_TBL, OP_NEON_TBX,  /* bytes of vm look up a table of imm registers from vn */
+    OP_NEON_PADDL,      /* neighbouring lanes added, into lanes twice as wide */
+    OP_NEON_HALVE,      /* vd (D) = the four singles of vm (Q) as halves */
+    OP_NEON_UNHALVE,    /* vd (Q) = the four halves of vm (D) as singles */
     OP_NEON_MVN, OP_NEON_CLZ, OP_NEON_CNT,
     OP_NEON_REV,        /* reverse the lanes within each imm-bit group      */
     OP_NEON_NEG, OP_NEON_ABS,

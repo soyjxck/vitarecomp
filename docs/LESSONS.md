@@ -895,3 +895,29 @@ pass that wrote the depth, 1,984 in the pass that tested against it.
    programs the title registers at boot never skin anything, so the
    count of "every instruction decoded" had been true of 193 programs
    and said nothing of the 61 more a level brings.
+
+10. **The other instruction set was there all along, as 0.3 % of the
+    module.** The level was black, and each of its frames made thousands
+    of calls that trapped: `blx` from Thumb into 36 hand-written ARM
+    routines, which discovery refused on principle (an ARM target that is
+    not an import stub had only ever been a misdecode) and the decoder
+    read no further than their class. Reading them cost less than it
+    looked. Their SIMD is the Thumb SIMD with the leading bits moved, so
+    it goes through the decoders already written; their integer
+    instructions fit the fields the Thumb decoder fills; and of the whole
+    Advanced SIMD repertoire a title's compiled code had left only three
+    instructions for hand-written code to be first to use: VTRN, VTBL and
+    VPADDL. A fourth turned up in compiled code that had never run
+    before the level did: four singles converted to four halves at once,
+    where the title packs the vertices it builds.
+
+11. **A threshold picked by eye was wrong in both directions.** Which
+    `blx` targets are ARM code was first decided on 24 words, three in
+    four unconditional. Two real routines open with a run of conditional
+    moves and have seventeen in twenty-four. Asking for half let in data:
+    the output trebled, 62 % of it traps. Then the question was put to
+    the module instead: every one of the 2,129 targets, how far it reads
+    cleanly and how much of that is unconditional. The real ones are all
+    above nine in ten over 96 words; the false ones that read cleanly at
+    all sit at one half. The rule now stands in the gap between, and the
+    table that found it took less time than either guess.

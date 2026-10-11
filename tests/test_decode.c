@@ -1275,10 +1275,130 @@ static void test_simd_identified(void) {
     assert(in.cls == A_STORE && in.op == OP_VSTR);
     assert(in.rn == 0 && in.vd == 0 && !in.vfp_dp);
 
-    put32(0, 0xEE000A10);                  /* vmov (ARM)                     */
-    assert(dec(ARM_A32, BASE).cls == A_SIMD);
-
     printf("  simd identified as a class     ok\n");
+}
+
+/* --- ARM -------------------------------------------------------------------- */
+
+/* The integer instructions a hand-written routine is held together with,
+ * each decoded into the fields its Thumb counterpart fills; and the
+ * Advanced SIMD and VFP it is made of, which must decode exactly as their
+ * Thumb encodings do. The words are from a retail title's routines. */
+static void test_arm(void) {
+    arm_insn in;
+    memset(code, 0, sizeof(code));
+
+    put32(0, 0xE3560000); in = dec(ARM_A32, BASE);          /* cmp r6, #0 */
+    assert(in.width == 4 && in.op == OP_CMP && in.rn == 6 && in.rd == ARM_NO_REG);
+    assert(in.has_imm && in.imm == 0 && in.sets_flags && in.cond == ARM_COND_AL && !in.conditional);
+    put32(0, 0xE2866001); in = dec(ARM_A32, BASE);          /* add r6, r6, #1 */
+    assert(in.op == OP_ADD && in.rd == 6 && in.rn == 6 && in.has_imm && in.imm == 1 && !in.sets_flags);
+    put32(0, 0xE28F8E26); in = dec(ARM_A32, BASE);          /* add r8, pc, #608: an immediate rotated into place */
+    assert(in.op == OP_ADD && in.rd == 8 && in.rn == 15 && in.imm == 608);
+    put32(0, 0xE2566001); in = dec(ARM_A32, BASE);          /* subs r6, r6, #1 */
+    assert(in.op == OP_SUB && in.rd == 6 && in.sets_flags);
+    put32(0, 0xE1A060A6); in = dec(ARM_A32, BASE);          /* lsr r6, r6, #1: a move of a shifted register */
+    assert(in.op == OP_MOV && in.rd == 6 && in.rm == 6 && in.shift_type == SH_LSR && in.shift_amt == 1 && !in.has_imm);
+    put32(0, 0xE1A00211); in = dec(ARM_A32, BASE);          /* lsl r0, r1, r2 */
+    assert(in.op == OP_LSL && in.rd == 0 && in.rn == 1 && in.rm == 2);
+    put32(0, 0x01A03001); in = dec(ARM_A32, BASE);          /* moveq r3, r1 */
+    assert(in.op == OP_MOV && in.rd == 3 && in.rm == 1 && in.cond == ARM_COND_EQ && in.conditional);
+    put32(0, 0xA3A07000); in = dec(ARM_A32, BASE);          /* movge r7, #0 */
+    assert(in.op == OP_MOV && in.rd == 7 && in.has_imm && in.imm == 0 && in.cond == ARM_COND_GE);
+    put32(0, 0xE1C7700A); in = dec(ARM_A32, BASE);          /* bic r7, r7, sl */
+    assert(in.op == OP_BIC && in.rd == 7 && in.rn == 7 && in.rm == 10);
+    put32(0, 0xE0030291); in = dec(ARM_A32, BASE);          /* mul r3, r1, r2 */
+    assert(in.op == OP_MUL && in.rd == 3 && in.rn == 1 && in.rm == 2);
+    put32(0, 0xE7EE7057); in = dec(ARM_A32, BASE);          /* ubfx r7, r7, #0, #15 */
+    assert(in.op == OP_UBFX && in.rd == 7 && in.rn == 7 && in.bf_lsb == 0 && in.bf_width == 15);
+    put32(0, 0xE7A0505A); in = dec(ARM_A32, BASE);          /* sbfx r5, sl, #0, #1 */
+    assert(in.op == OP_SBFX && in.rd == 5 && in.rn == 10 && in.bf_lsb == 0 && in.bf_width == 1);
+
+    put32(0, 0xE59D6014); in = dec(ARM_A32, BASE);          /* ldr r6, [sp, #20] */
+    assert(in.op == OP_LDR && in.cls == A_LOAD && in.rt == 6 && in.rn == 13 && in.has_imm && in.imm == 20);
+    assert(in.mem_add && !in.mem_post && !in.writeback);
+    put32(0, 0xE5D37000); in = dec(ARM_A32, BASE);          /* ldrb r7, [r3] */
+    assert(in.op == OP_LDRB && in.rt == 7 && in.rn == 3 && in.imm == 0);
+    put32(0, 0xE1D350B0); in = dec(ARM_A32, BASE);          /* ldrh r5, [r3] */
+    assert(in.op == OP_LDRH && in.cls == A_LOAD && in.rt == 5 && in.rn == 3 && in.has_imm && in.imm == 0);
+    put32(0, 0xE4D13001); in = dec(ARM_A32, BASE);          /* ldrb r3, [r1], #1 */
+    assert(in.op == OP_LDRB && in.mem_post && in.writeback && in.mem_add && in.imm == 1);
+
+    put32(0, 0xE92D0070); in = dec(ARM_A32, BASE);          /* push {r4, r5, r6} */
+    assert(in.op == OP_PUSH && in.cls == A_STOREM && in.reglist == 0x0070);
+    put32(0, 0xE8BD0D80); in = dec(ARM_A32, BASE);          /* pop {r7, r8, sl, fp} */
+    assert(in.op == OP_POP && in.cls == A_LOADM && in.reglist == 0x0D80);
+    put32(0, 0xE8BD8010); in = dec(ARM_A32, BASE);          /* pop {r4, pc} */
+    assert(in.op == OP_POP && in.cls == A_RETURN && in.reglist == 0x8010);
+    put32(0, 0xE49DF004); in = dec(ARM_A32, BASE);          /* pop {pc}, written ldr pc, [sp], #4 */
+    assert(in.op == OP_POP && in.cls == A_RETURN && in.reglist == 0x8000 && in.rn == 13);
+    put32(0, 0xE12FFF1E); in = dec(ARM_A32, BASE);          /* bx lr */
+    assert(in.cls == A_RETURN && !in.conditional);
+    put32(0, 0x012FFF1E); in = dec(ARM_A32, BASE);          /* bxeq lr: a return the function goes on after */
+    assert(in.cls == A_RETURN && in.conditional && in.cond == ARM_COND_EQ);
+    put32(0, 0x0A000098); in = dec(ARM_A32, BASE);          /* beq */
+    assert(in.op == OP_B && in.cls == A_BRANCH && in.conditional && in.cond == ARM_COND_EQ);
+    assert(in.has_target && in.target == BASE + 8 + 0x98 * 4);
+    put32(0, 0xEB000010); in = dec(ARM_A32, BASE);          /* bl */
+    assert(in.cls == A_CALL && in.has_target && in.target == BASE + 8 + 0x40 && !in.switches_mode);
+
+    /* what the emitter has no form for is left without an operation, to trap by name */
+    put32(0, 0xE0E10002); in = dec(ARM_A32, BASE);          /* rsc r0, r1, r2 */
+    assert(in.op == OP_NONE && in.cls == A_ALU);
+    put32(0, 0xE0800211); in = dec(ARM_A32, BASE);          /* add r0, r0, r1, lsl r2 */
+    assert(in.op == OP_NONE && in.cls == A_ALU);
+    put32(0, 0xE99D0003); in = dec(ARM_A32, BASE);          /* ldmib sp, {r0, r1} */
+    assert(in.op == OP_NONE && in.cls == A_LOADM);
+
+    /* Advanced SIMD and VFP: the Thumb encoding with its leading bits moved */
+    static const struct { uint32_t arm; uint16_t h1, h2; } SAME[] = {
+        { 0xF262E812u, 0xEF62, 0xE812 },        /* vtst.32 d30, d2, d2 */
+        { 0xF2078F16u, 0xEF07, 0x8F16 },        /* vrecps.f32 d8, d7, d6 */
+        { 0xF3659E04u, 0xFF65, 0x9E04 },        /* vcgt.f32 d25, d5, d4 */
+        { 0xF322413Eu, 0xFF22, 0x413E },        /* vbit d4, d2, d30 */
+        { 0xF3BA2088u, 0xFFBA, 0x2088 },        /* vtrn.32 d2, d8 */
+        { 0xF3BBB58Au, 0xFFBB, 0xB58A },        /* vrsqrte.f32 d11, d10 */
+        { 0xF2BEE576u, 0xEFBE, 0xE576 },        /* vshl.s32 q7, q11, #30 */
+        { 0xF3FC7B89u, 0xFFFC, 0x7B89 },        /* vtbl.8 d23, {d28-d31}, d9 */
+        { 0xECB22B18u, 0xECB2, 0x2B18 },        /* vldmia r2!, {d2-d13} */
+        { 0xEC874B08u, 0xEC87, 0x4B08 },        /* vstmia r7, {d4-d7} */
+        { 0xECBD8B10u, 0xECBD, 0x8B10 },        /* vpop {d8-d15} */
+        { 0xED9F1BC0u, 0xED9F, 0x1BC0 },        /* vldr d1, [pc, #768] */
+        { 0xEE8EAB90u, 0xEE8E, 0xAB90 },        /* vdup.32 d30, sl */
+        { 0xEE000A10u, 0xEE00, 0x0A10 },        /* vmov s0, r0 */
+    };
+    for (size_t i = 0; i < sizeof(SAME) / sizeof(SAME[0]); i++) {
+        arm_insn a, t;
+        put32(0, SAME[i].arm); a = dec(ARM_A32, BASE);
+        put16(0, SAME[i].h1); put16(2, SAME[i].h2); t = dec(ARM_T32, BASE);
+        assert(a.width == 4 && a.raw == SAME[i].arm);
+        assert(a.op == t.op && a.cls == t.cls && a.cond == ARM_COND_AL);
+        assert(a.vd == t.vd && a.vn == t.vn && a.vm == t.vm && a.rn == t.rn && a.rm == t.rm && a.rt == t.rt);
+        assert(a.imm == t.imm && a.imm64 == t.imm64 && a.reglist == t.reglist && a.writeback == t.writeback);
+        assert(a.neon_q == t.neon_q && a.neon_size == t.neon_size && a.vfp_dp == t.vfp_dp && a.vfp_unsigned == t.vfp_unsigned);
+    }
+    /* the three a retail title's vertex routines needed beyond what its compiled code had */
+    put32(0, 0xF3BA0086); in = dec(ARM_A32, BASE);          /* vtrn.32 d0, d6 */
+    assert(in.op == OP_NEON_TRN && in.vd == 0 && in.vm == 6 && in.neon_size == 32 && !in.neon_q);
+    put32(0, 0xF3B86904); in = dec(ARM_A32, BASE);          /* vtbl.8 d6, {d8-d9}, d4 */
+    assert(in.op == OP_NEON_TBL && in.vd == 6 && in.vn == 8 && in.vm == 4 && in.imm == 2 && !in.neon_q);
+    put32(0, 0xF3FC7B89); in = dec(ARM_A32, BASE);          /* vtbl.8 d23, {d28-d31}, d9 */
+    assert(in.op == OP_NEON_TBL && in.vd == 23 && in.vn == 28 && in.vm == 9 && in.imm == 4);
+    put32(0, 0xF3B0E2CE); in = dec(ARM_A32, BASE);          /* vpaddl.u8 q7, q7 */
+    assert(in.op == OP_NEON_PADDL && in.vd == 14 && in.vm == 14 && in.neon_size == 8 && in.neon_q && in.vfp_unsigned);
+    put32(0, 0xF3B4E2CE); in = dec(ARM_A32, BASE);          /* vpaddl.u16 q7, q7 */
+    assert(in.op == OP_NEON_PADDL && in.neon_size == 16 && in.vfp_unsigned);
+
+    put16(0, 0xFFB6); put16(2, 0x460E); in = dec(ARM_T32, BASE);    /* vcvt.f16.f32 d4, q7 */
+    assert(in.op == OP_NEON_HALVE && in.vd == 4 && in.vm == 14);
+    put16(0, 0xFFB6); put16(2, 0x470E); in = dec(ARM_T32, BASE);    /* vcvt.f32.f16 q2, d14 */
+    assert(in.op == OP_NEON_UNHALVE && in.vd == 4 && in.vm == 14);
+
+    /* and a VFP instruction keeps the condition its Thumb form would get from an IT block */
+    put32(0, 0x1E000A10); in = dec(ARM_A32, BASE);          /* vmovne s0, r0 */
+    assert(in.op == OP_VMOV_TO_V && in.cond == ARM_COND_NE);
+
+    printf("  arm: integer, simd by way of thumb ok\n");
 }
 
 /* --- IT blocks -------------------------------------------------------------- */
@@ -1332,6 +1452,7 @@ int main(void) {
     test_mode_switches();
     test_arm_cond_f();
     test_simd_identified();
+    test_arm();
     test_neon_structure_loads();
     test_pc_relative_loads();
     test_neon_shift_by_register();

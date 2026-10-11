@@ -416,10 +416,69 @@ static inline void vita_neon_ext_q(int d, int n, int m, int pos) {
     vita_d_set(d + 1, hi);
 }
 
+/* VTRN: the two registers as the rows of a matrix two lanes wide, turned
+ * over. The odd lanes of d and the even lanes of m change places. */
+static inline void vita_neon_trn(int d, int m, int size) {
+    uint64_t a = vita_d_get(d), b = vita_d_get(m), mask = vita_lane_mask(size), ra = a, rb = b;
+    for (int s = 0; s < 64; s += 2 * size) {
+        uint64_t odd_of_a = (a >> (s + size)) & mask, even_of_b = (b >> s) & mask;
+        ra = (ra & ~(mask << (s + size))) | (even_of_b << (s + size));
+        rb = (rb & ~(mask << s)) | (odd_of_a << s);
+    }
+    vita_d_set(d, ra);
+    vita_d_set(m, rb);
+}
+
+/* VTBL and VTBX: each byte of m is a place in a table of `count` registers'
+ * bytes, starting at register `first`. Beyond the table VTBL gives zero;
+ * VTBX (`keep`) leaves the byte of d as it was. */
+static inline uint64_t vita_neon_tbl(uint64_t d, int first, int count, uint64_t m, int keep) {
+    uint8_t table[32];
+    uint64_t r = 0;
+    for (int i = 0; i < count && i < 4; i++) {
+        uint64_t v = vita_d_get(first + i);
+        for (int k = 0; k < 8; k++) table[8 * i + k] = (uint8_t)(v >> (8 * k));
+    }
+    for (int i = 0; i < 8; i++) {
+        unsigned at = (unsigned)((m >> (8 * i)) & 0xFF);
+        uint64_t byte = at < (unsigned)(8 * count) ? table[at] : keep ? (d >> (8 * i)) & 0xFF : 0;
+        r |= byte << (8 * i);
+    }
+    return r;
+}
+
+/* VPADDL: neighbouring lanes added, each sum in a lane twice as wide. */
+static inline uint64_t vita_neon_paddl(uint64_t a, int size, int is_unsigned) {
+    uint64_t r = 0, wide = vita_lane_mask(2 * size);
+    for (int lane = 0; lane * size < 64; lane += 2) {
+        int64_t x = is_unsigned ? (int64_t)vita_neon_lane(a, lane, size) : vita_neon_slane(a, lane, size);
+        int64_t y = is_unsigned ? (int64_t)vita_neon_lane(a, lane + 1, size) : vita_neon_slane(a, lane + 1, size);
+        r |= ((uint64_t)(x + y) & wide) << (lane * size);
+    }
+    return r;
+}
+
 /* --- f32 lanes ----------------------------------------------------------------- */
 
 static inline float vita_f32_of(uint32_t b) { float f; memcpy(&f, &b, sizeof(f)); return f; }
 static inline uint32_t vita_f32_bits(float f) { uint32_t b; memcpy(&b, &f, sizeof(b)); return b; }
+
+/* VCVT, four singles to four halves and back (half.h has one of each). */
+static inline uint64_t vita_neon_halve(uint64_t lo, uint64_t hi) {
+    return (uint64_t)vita_f32_to_f16(vita_f32_of((uint32_t)lo))
+         | (uint64_t)vita_f32_to_f16(vita_f32_of((uint32_t)(lo >> 32))) << 16
+         | (uint64_t)vita_f32_to_f16(vita_f32_of((uint32_t)hi)) << 32
+         | (uint64_t)vita_f32_to_f16(vita_f32_of((uint32_t)(hi >> 32))) << 48;
+}
+
+static inline void vita_neon_unhalve(int d, uint64_t m) {
+    uint64_t lo = (uint64_t)vita_f32_bits(vita_f16_to_f32((uint16_t)m))
+                | (uint64_t)vita_f32_bits(vita_f16_to_f32((uint16_t)(m >> 16))) << 32;
+    uint64_t hi = (uint64_t)vita_f32_bits(vita_f16_to_f32((uint16_t)(m >> 32)))
+                | (uint64_t)vita_f32_bits(vita_f16_to_f32((uint16_t)(m >> 48))) << 32;
+    vita_d_set(d, lo);
+    vita_d_set(d + 1, hi);
+}
 
 #define VITA_NEON_DEFAULT_NAN 0x7FC00000u
 

@@ -296,10 +296,12 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
             }
             fb_push(b, &in);
 
-            if (in.cls == A_RETURN && !in_it) break;
+            /* an ARM instruction under a condition, a return included, is followed by the rest */
+            int may_pass = in_it || (in.mode == ARM_A32 && in.conditional);
+            if (in.cls == A_RETURN && !may_pass) break;
             /* A computed transfer ends the block; what follows it is reached
              * by a label if at all, and may be data. */
-            if (in.cls == A_INDIRECT) break;
+            if (in.cls == A_INDIRECT && !(in.mode == ARM_A32 && in.conditional)) break;
 
             /* `bound`, not `fn->end`.
              *
@@ -388,9 +390,13 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
  * known at translation time: reading PC in Thumb yields the instruction's own
  * address plus 4. The high-register ADD/MOV/CMP forms are where this actually
  * shows up, and they are common enough (position-independent address
- * computation) that leaving them to a trap would cost real coverage. */
+ * computation) that leaving them to a trap would cost real coverage.
+ *
+ * Plus 4 in Thumb, plus 8 in ARM: two instructions on, in either. */
+static uint32_t pc_of(const arm_insn *in) { return in->addr + (in->mode == ARM_A32 ? 8u : 4u); }
+
 static void reg_operand(char *dst, size_t cap, int r, const arm_insn *in) {
-    if (r == 15) snprintf(dst, cap, "0x%08Xu", in->addr + 4);
+    if (r == 15) snprintf(dst, cap, "0x%08Xu", pc_of(in));
     else         snprintf(dst, cap, "%s", reg_name(r));
 }
 
@@ -411,7 +417,7 @@ static const char *src_name(const arm_insn *in, int r) {
     static unsigned next;
     if (r != 15) return reg_name(r);
     char *b = buf[next++ & 3];
-    snprintf(b, sizeof(buf[0]), "0x%08Xu", in->addr + 4);
+    snprintf(b, sizeof(buf[0]), "0x%08Xu", pc_of(in));
     return b;
 }
 
@@ -463,7 +469,7 @@ static int address(char *dst, size_t cap, const arm_insn *in) {
          * variable, so a caller that builds its own address expression emits C
          * that does not compile. That is the good failure — the bad one is a
          * `pc` that exists and holds something plausible. */
-        uint32_t pc = (in->addr + 4) & ~3u;
+        uint32_t pc = pc_of(in) & ~3u;
         if (in->rm != ARM_NO_REG && !in->has_imm)
             snprintf(dst, cap, "0x%08X + (%s << %u)", pc, src_name(in, in->rm), in->shift_amt);
         else
@@ -975,6 +981,30 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
                         in->vd + q, in->vd + q, in->vm + q, in->vm + q);
             break;
 
+        case OP_NEON_TRN:
+            for (int q = 0; q <= in->neon_q; q++)
+                fprintf(f, "    vita_neon_trn(%d, %d, %u);\n", in->vd + q, in->vm + q, in->neon_size);
+            break;
+
+        case OP_NEON_TBL: case OP_NEON_TBX:
+            fprintf(f, "    vita_d_set(%d, vita_neon_tbl(vita_d_get(%d), %d, %u, vita_d_get(%d), %d));\n",
+                    in->vd, in->vd, in->vn, in->imm, in->vm, in->op == OP_NEON_TBX);
+            break;
+
+        case OP_NEON_HALVE:
+            fprintf(f, "    vita_d_set(%d, vita_neon_halve(vita_d_get(%d), vita_d_get(%d)));\n", in->vd, in->vm, in->vm + 1);
+            break;
+
+        case OP_NEON_UNHALVE:
+            fprintf(f, "    vita_neon_unhalve(%d, vita_d_get(%d));\n", in->vd, in->vm);
+            break;
+
+        case OP_NEON_PADDL:
+            for (int q = 0; q <= in->neon_q; q++)
+                fprintf(f, "    vita_d_set(%d, vita_neon_paddl(vita_d_get(%d), %u, %u));\n",
+                        in->vd + q, in->vm + q, in->neon_size, in->vfp_unsigned);
+            break;
+
         case OP_NEON_MVN: case OP_NEON_CLZ: case OP_NEON_CNT: case OP_NEON_REV:
         case OP_NEON_NEG: case OP_NEON_ABS: case OP_NEON_CMP0:
         case OP_NEON_FNEG: case OP_NEON_FABS: case OP_NEON_FRECPE: case OP_NEON_FRSQRTE:
@@ -1205,7 +1235,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
 
         case OP_ADR:
             fprintf(f, "    %s = 0x%08X;\n", reg_name(in->rd),
-                    ((in->addr + 4) & ~3u) + in->imm);
+                    (pc_of(in) & ~3u) + in->imm);
             break;
 
         case OP_LDR: case OP_LDRB: case OP_LDRH: case OP_LDRSB: case OP_LDRSH: {
@@ -1215,7 +1245,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
              * access. This is also what stops the pool from being mistaken for
              * code later. */
             if (in->rn == 15 && in->has_imm) {
-                uint32_t pc = (in->addr + 4) & ~3u;
+                uint32_t pc = pc_of(in) & ~3u;
                 /* The offset has a sign: the constant may sit before the
                  * code that uses it. */
                 uint32_t at = in->mem_add ? pc + in->imm : pc - in->imm;
@@ -1504,7 +1534,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
              * constant exactly as the integer path does — same reason, too:
              * it keeps the pool from being read back as code later. */
             if (in->rn == 15) {
-                uint32_t pc = (in->addr + 4) & ~3u;
+                uint32_t pc = pc_of(in) & ~3u;
                 uint32_t at = in->mem_add ? pc + in->imm : pc - in->imm;
                 const uint8_t *p = vm_va(img, at, in->vfp_dp ? 8 : 4);
                 if (p && in->op == OP_VLDR) {

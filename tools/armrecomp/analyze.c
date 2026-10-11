@@ -140,23 +140,79 @@ static void add_func(vf_result *r, uint32_t addr, arm_mode mode, uint16_t reason
                       : (reason & VF_R_RELOC) ? VF_RELOC : VF_PRINCIPLED;
 }
 
+/* Does ARM code start here?
+ *
+ * The ARM encoding is dense: nearly any word is some instruction, under
+ * some condition. What tells written code from data read as code is the
+ * condition. Real ARM code runs unconditionally almost all the time, so
+ * its words begin with E, or with F for the Advanced SIMD it is usually
+ * there to hold; data, and Thumb code read four bytes at a time, spread
+ * their top nibble over all sixteen values.
+ *
+ * The rule was set by measuring, on a retail title, what stands at each of
+ * the 2,129 places a BLX-immediate anywhere in its text points to. Of 36
+ * hand-written routines none has fewer than nine words in ten
+ * unconditional over its first 96, or to its return if that comes sooner,
+ * and none has a word in that stretch that written code does not have: an
+ * undefined one, a supervisor call, a status-register move, a coprocessor
+ * instruction under a condition, an integer form the decoder does not
+ * read. Of the rest two thirds fail on such a word within eight, and the
+ * ones that read cleanly for 96 words are unconditional half the time. So:
+ * no such word, four in five unconditional, and either a return (a real
+ * one, not a load into the PC) or 48 words of it. A first version looked
+ * at 24 words and wanted three in four, which two real routines missed by
+ * one; wanting half instead let through enough data to treble the output. */
+static int arm_code_ok(const vm_image *img, uint32_t target) {
+    const uint8_t *text = img->data + img->seg_file;
+    const uint32_t base = img->seg_vaddr, len = img->seg_len;
+    uint32_t a = target;
+    int seen = 0, plain = 0, returned = 0, ended = 0;
+    if (target & 3) return 0;
+    while (seen < 96 && !ended) {
+        arm_insn in;
+        if (a < base || a + 4 > base + len) return 0;
+        if (arm_decode(text, base, len, a, ARM_A32, &in) == 0) return 0;
+        if (in.cls == A_UNKNOWN || in.cls == A_UNDEF || (in.cls == A_SYS && in.op == OP_NONE) ||
+            (in.cls == A_SIMD && in.cond != ARM_COND_AL) ||
+            (in.op == OP_NONE && (in.cls == A_ALU || in.cls == A_LOAD || in.cls == A_STORE ||
+                                  in.cls == A_LOADM || in.cls == A_STOREM))) {
+            why(target, "as ARM code: refused, the word 0x%08X at 0x%08X (%s) is not one written code has", in.raw, a, in.mnemonic);
+            return 0;
+        }
+        seen++;
+        if (in.cond == ARM_COND_AL) plain++;
+        if ((in.cls == A_RETURN || in.cls == A_BRANCH || in.cls == A_INDIRECT) && !in.conditional) {
+            ended = 1;
+            returned = in.cls == A_RETURN && in.op != OP_NONE;
+        }
+        a += 4;
+    }
+    if (plain * 5 < seen * 4 || !(returned || seen >= 48)) {
+        why(target, "as ARM code: refused, %d of its first %d words run unconditionally%s", plain, seen,
+            returned || seen >= 48 ? "" : ", and they neither return nor go on");
+        return 0;
+    }
+    return 1;
+}
+
 /* Should a mode-switching call be followed into ARM?
  *
- * Only when the target is a known import stub. The stubs are this module's ARM
- * code — placeholder bodies the loader patches — and a BLX to one is the
- * ordinary way a Thumb module calls firmware. A BLX-immediate pointing
- * anywhere else is, on this corpus, a misdecode: the tail of .text is
- * read-only data, and data decoded as Thumb produces plausible BLX encodings
- * in quantity.
+ * When the target is a known import stub: the stubs are ARM, placeholder
+ * bodies the loader patches, and a BLX to one is the ordinary way a Thumb
+ * module calls firmware. Or when what is there reads as ARM code by the
+ * test above. A BLX-immediate pointing anywhere else is a misdecode: the
+ * tail of .text is read-only data, and data decoded as Thumb produces
+ * plausible BLX encodings in quantity.
  *
  * Refusing matters more here than for any other seed, because the two decoders
  * fail differently. The Thumb decoder returns UNKNOWN often enough to stop a
- * runaway walk; the ARM decoder assigns a class to every op value, so it never
- * stops on its own. One bad ARM seed does not produce one bad function, it
- * produces thousands of instructions of confident nonsense — 152,919 of them
- * before this check existed, against 1.58 million real ones. */
-static int arm_seed_ok(const vm_module *mod, uint32_t target) {
-    return vm_find_stub(mod, target) != NULL;
+ * runaway walk; the ARM decoder gives nearly every word a class, so a walk
+ * through data does not stop on its own. One bad ARM seed does not produce
+ * one bad function, it produces thousands of instructions of confident
+ * nonsense: 152,919 of them before this check existed, against 1.58 million
+ * real ones. */
+static int arm_seed_ok(const vm_image *img, const vm_module *mod, uint32_t target) {
+    return vm_find_stub(mod, target) != NULL || arm_code_ok(img, target);
 }
 
 /* --- walking one function --------------------------------------------------- */
@@ -325,7 +381,7 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                      * instructions of confident nonsense — 152,919 of them
                      * before this check existed. */
                     if (cm == ARM_A32 && s.mode == ARM_T32 &&
-                        !arm_seed_ok(mod, in.target)) {
+                        !arm_seed_ok(img, mod, in.target)) {
                         r->seeds_arm_refused++;
                     } else {
                         sq_push(q, in.target, cm, VF_R_CALL);
@@ -343,9 +399,14 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                 continue;
             }
 
-            if (in.cls == A_RETURN) break;
+            /* In ARM any instruction may be conditional, a return among
+             * them, and the function goes on after one that is. */
+            if (in.cls == A_RETURN && !(s.mode == ARM_A32 && in.conditional)) break;
 
-            if (in.cls == A_INDIRECT) { r->indirect_sites++; break; }
+            if (in.cls == A_INDIRECT) {
+                r->indirect_sites++;
+                if (!(s.mode == ARM_A32 && in.conditional)) break;
+            }
 
             /* A branch into the other instruction set (`bx pc`) is a transfer
              * to a function that must be decoded in that set, not local flow:
@@ -826,7 +887,7 @@ int vf_discover(const vm_image *img, const vm_module *mod,
                 /* Same rule as the descent above. This sweep decodes every
                  * halfword of .text including its data, so it is the site that
                  * manufactures bogus mode switches in bulk. */
-                if (in.switches_mode && !arm_seed_ok(mod, in.target)) {
+                if (in.switches_mode && !arm_seed_ok(img, mod, in.target)) {
                     out->seeds_arm_refused++;
                     continue;
                 }

@@ -99,6 +99,34 @@ identified as a class. Coverage, class histogram, and instruction-set
 determination come out of `armrecomp cover`. See
 [`TRANSLATION.md`](TRANSLATION.md).
 
+### ARM, for what is written by hand
+
+Compilers for this console emit Thumb. The ARM a module holds is its
+import stubs, which are bound and never translated, and whatever somebody
+wrote in assembly: in *Golden Abyss* 36 routines, 8,500 instructions,
+Advanced SIMD from end to end with a few dozen integer instructions around
+each to fetch pointers, count a loop and return. Its first level calls
+them 300,000 times in its first fourteen seconds.
+
+Two things kept this from being a second decoder and a second emitter.
+An ARM Advanced SIMD or VFP instruction is its Thumb encoding with the
+leading bits moved (`1111 001U` for `111U 1111`, `1111 0100` for
+`1111 1001`, and the coprocessor forms with a condition where Thumb has
+`1110`), so it is re-encoded and handed to the decoders that already read
+those: nothing new. And the integer instructions are decoded into the
+same fields the Thumb decoder fills, so the emitter translates them as it
+does their Thumb counterparts; the two things it had to learn are that the
+PC reads as the instruction's address plus 8, not 4, and that a return
+under a condition does not end the function. Every ARM instruction
+carries a condition where Thumb needs an IT block; the condition is filled
+in as an IT block's would be and the guard that wraps an IT block's
+instructions wraps these. What the integer decoder does not read (a
+register shifted by a register as an operand, the two load-multiple
+directions Thumb lacks, a subtracted index) it leaves without an
+operation, to trap by name.
+
+Which calls into ARM to believe is the harder half (below, in discovery).
+
 ## Stage 4 — discovery
 
 ### `e_entry` does not point at code
@@ -180,6 +208,23 @@ whose own branch had already sent everything larger elsewhere. Without a
 count the table is a computed transfer like any other, and traps by
 address; with one that is too small, the cases beyond it trap by address
 too, so a wrong reading is loud.
+
+### ARM targets are believed when they read as ARM
+
+A `blx` to an address is the one way into ARM code, and data decoded as
+Thumb is full of things that look like `blx`: of the 2,129 distinct
+targets in *Golden Abyss*'s text, 36 are routines, some are import
+stubs, and most are nothing. The ARM encoding is dense, so
+"does it decode" refuses almost none of them, and a walk begun in data
+does not stop on its own. What separates written code from data is the
+condition field: real ARM runs unconditionally nine words in ten, and
+data, or Thumb code read four bytes at a time, spreads its top nibble over
+all sixteen values. The rule is measured, not guessed: no word in the
+first 96 (or up to a return) that written code does not have, four in five
+of them unconditional, and either a return or 48 words of it. Every one of
+the 36 passes with room, and what else passes is a handful of one-word
+returns that nothing calls. `VITARECOMP_WHY=<address>` says which part of
+the rule refused a target.
 
 ### Relocatable modules: the stream names the pointers
 

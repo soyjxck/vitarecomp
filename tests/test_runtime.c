@@ -491,6 +491,34 @@ static uint64_t f32x2(float lo, float hi) {
 }
 
 static void test_neon_more(void) {
+    /* VTRN: two registers as the rows of a matrix, transposed. In 32-bit
+     * lanes d = {a0, a1}, m = {b0, b1} become {a0, b0} and {a1, b1}. */
+    vita_d_set(4, 0xA1A1A1A1A0A0A0A0ull); vita_d_set(5, 0xB1B1B1B1B0B0B0B0ull);
+    vita_neon_trn(4, 5, 32);
+    assert(vita_d_get(4) == 0xB0B0B0B0A0A0A0A0ull && vita_d_get(5) == 0xB1B1B1B1A1A1A1A1ull);
+    vita_d_set(4, 0x0706050403020100ull); vita_d_set(5, 0x1716151413121110ull);
+    vita_neon_trn(4, 5, 8);
+    assert(vita_d_get(4) == 0x1606140412021000ull && vita_d_get(5) == 0x1707150513031101ull);
+
+    /* VTBL: bytes looked up in a table of registers; beyond it, zero, or
+     * with VTBX the byte that was there. */
+    vita_d_set(8, 0x0706050403020100ull); vita_d_set(9, 0x0F0E0D0C0B0A0908ull);
+    assert(vita_neon_tbl(0x5555555555555555ull, 8, 2, 0xFF100F0800010207ull, 0) == 0x00000F0800010207ull);
+    assert(vita_neon_tbl(0x5555555555555555ull, 8, 2, 0xFF100F0800010207ull, 1) == 0x55550F0800010207ull);
+    assert(vita_neon_tbl(0, 8, 1, 0x0807060504030201ull, 0) == 0x0007060504030201ull);
+
+    /* VPADDL: neighbours added into a lane twice as wide, so nothing is lost. */
+    assert(vita_neon_paddl(0xFFFF000102030405ull, 8, 1) == 0x01FE000100050009ull);
+    assert(vita_neon_paddl(0xFFFF000102030405ull, 8, 0) == 0xFFFE000100050009ull);
+    assert(vita_neon_paddl(0xFFFFFFFF00000002ull, 32, 1) == 0x0000000100000001ull);
+    assert(vita_neon_paddl(0xFFFFFFFF00000002ull, 32, 0) == 0x0000000000000001ull);
+
+    /* VCVT, four singles to four halves and back: 1, -2, 0.5 and 65536, which
+     * no half holds and which becomes infinity. */
+    assert(vita_neon_halve(0xC00000003F800000ull, 0x478000003F000000ull) == 0x7C003800C0003C00ull);
+    vita_neon_unhalve(10, 0x7C003800C0003C00ull);
+    assert(vita_d_get(10) == 0xC00000003F800000ull && vita_d_get(11) == 0x7F8000003F000000ull);
+
     /* Lanes, signed and not. */
     assert(vita_neon_lane(0x1122334455667788ull, 1, 32) == 0x11223344u);
     assert(vita_neon_lane(0x1122334455667788ull, 3, 16) == 0x1122u);

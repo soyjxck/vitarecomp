@@ -187,8 +187,10 @@ and functions are emitted in address order, so a prefix is not a sample.
 - [x] Save data: slots, files under a `savedata0` mount, and the system's
       dialog as the two-level machine a title drives, answered for the
       player (`src/hle_savedata.c`)
-- [ ] The ARM instruction set, for the hand-written routines a title calls
-      from Thumb: decoded only as far as width and class so far
+- [x] The ARM instruction set, for the hand-written routines a title calls
+      from Thumb: its SIMD through the Thumb decoders, its integer
+      instructions into the same fields; a `blx` target is believed when it
+      reads as ARM by a measured rule
 - [ ] Movies: SceMp4, `sceAvcdec`, `sceAudiodec`. Until then the movie
       library is reported absent and titles skip their movies
 
