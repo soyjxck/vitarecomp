@@ -83,4 +83,12 @@ int vita_display_current(vita_framebuf *out) {
     return 1;
 }
 
+int vita_display_show(void *window, uint32_t *width, uint32_t *height) {
+    uint32_t bytes = g_fb.pitch * g_fb.height * 4;
+    if (width) *width = g_set ? g_fb.width : 0;
+    if (height) *height = g_set ? g_fb.height : 0;
+    if (!g_set) return gxm_gpu_show(window, NULL, 0, 0, 0);
+    return gxm_gpu_show(window, vita_mem_ptr(g_fb.base, bytes), g_fb.width, g_fb.height, g_fb.pitch);
+}
+
 uint32_t vita_display_flips(void) { return g_flips; }

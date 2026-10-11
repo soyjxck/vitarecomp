@@ -1176,3 +1176,32 @@ picture was nearly right.
 same card, the same shaders, every surface through memory. Whatever
 differs between the two is the keeping.
 
+## Showing the picture (2026-10-12)
+
+The frame was on the card and the window was a metre away, by way of the
+title's memory. Putting the one in the other was not much code. What
+was learnt was on either side of it.
+
+1. **A picture shown twice is waited for twice.** The first measurement
+   said showing cost more than fetching had: three to twelve milliseconds
+   a frame. Handing a picture to the screen waits for the card to have
+   drawn what is in it, half a millisecond when the card has finished
+   and several when it has not, and the host showed at every vertical
+   blank what the title changes at every other. Shown only when it is
+   another picture, 0.3 ms a frame. Timed apart, the call and the wait
+   for the card, before anything was changed: the first guess had been
+   the screen's own timing, and three other ways of asking the screen
+   not to be waited for had made no difference.
+2. **The system stretched the finished picture.** A window 960 across
+   came out 1200 across on a screen the system enlarges things for, and
+   soft: a program that does not say it knows about such screens is
+   drawn at the size it asked for and enlarged afterwards. Nothing in
+   the renderer could have been sharp through that. The host says it
+   knows, and a size asked for is a size in the screen's pixels.
+3. **Look at the window, not the screen.** The first picture taken of the
+   window to check it was a picture of another program's text: the
+   screen was photographed where the window was, and something lay over
+   it. The system will hand over a window's own contents whatever
+   covers it, and those were compared with the frames the host wrote to
+   files: at twice the size, every pixel of the window the colour of its
+   block and the frame matched to the byte.

@@ -222,7 +222,11 @@ static int parse_stick(const char *s) {
  * sixtieth of a second. Closing the window ends the run. */
 static void window_vblank(void) {
     vita_framebuf fb;
-    if (vita_display_current(&fb)) {
+    uint32_t width, height;
+    /* a card that drew the frame shows it; otherwise it is read from the program's memory */
+    if (vita_display_show(vita_window_native(), &width, &height)) {
+        vita_window_drawn((int)width, (int)height);
+    } else if (vita_display_current(&fb)) {
         const uint8_t *px = (const uint8_t *)vita_mem_ptr(fb.base, fb.pitch * fb.height * 4);
         if (px) vita_window_present(px, (int)fb.width, (int)fb.height, (int)fb.pitch);
     }

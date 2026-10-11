@@ -2,13 +2,21 @@
  *
  * One thread owns the window and its message loop. Presenting a frame copies
  * it, swapped into the byte order a DIB wants, into a buffer the paint
- * handler stretches over the client area; the keyboard is tracked from the
+ * handler stretches over the client area. A graphics card that holds the
+ * frame draws it in the window for itself instead (vita_window_native), and
+ * the window then paints nothing. The keyboard is tracked from the
  * window's own key messages, so it reads nothing while another window has
  * the focus. The left mouse button is a finger on the front panel: where it
  * is held on the picture is where the panel is touched. The picture keeps
  * the frame's shape in a window of any other, centred, and F11 or Alt and
  * Enter put the window over the whole screen and back. The window's icon
  * is the program's resource 101, when it has one: a game's program does.
+ *
+ * The window's pixels are the screen's. On a screen the system enlarges
+ * things for, a program that does not say it knows is given a smaller
+ * window than it is shown in and its finished picture is stretched to
+ * fit, which blurs it; so the program says it knows, and a size asked for
+ * is a size in the screen's own pixels.
  *
  * The keys are where a player of this console's games on a keyboard looks
  * for them: the arrows are the directional pad, W A S D the left stick and
@@ -39,6 +47,7 @@ static struct {
     CRITICAL_SECTION lock;
     uint32_t        *frame;             /* B, G, R, x: what StretchDIBits reads */
     int              fw, fh;            /* the frame's size */
+    volatile LONG    drawn;             /* someone else draws the picture: nothing is painted here */
     int              ww, wh;            /* the client size asked for */
     volatile LONG    buttons, closed;
     volatile LONG    finger;            /* bit 31 while the button is held; y above x, eleven bits each */
@@ -219,6 +228,7 @@ static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
         RECT rc, pic;
+        if (W.drawn) { EndPaint(h, &ps); return 0; }
         GetClientRect(h, &rc);
         EnterCriticalSection(&W.lock);
         picture(h, &pic);
@@ -286,8 +296,20 @@ static DWORD WINAPI ui_thread(LPVOID arg) {
     return 0;
 }
 
+/* Tell the system that sizes here are in the screen's own pixels. The call
+ * is looked for by name: a system from before screens differed has the
+ * older one, which says the same of the first screen only. */
+static void own_pixels(void) {
+    typedef BOOL (WINAPI *set_context)(HANDLE);
+    HMODULE user = GetModuleHandleA("user32.dll");
+    set_context set = user ? (set_context)(void *)GetProcAddress(user, "SetProcessDpiAwarenessContext") : NULL;
+    if (!set || !set((HANDLE)(LONG_PTR)-4))         /* each screen by its own measure, as the system's header numbers it */
+        SetProcessDPIAware();
+}
+
 int vita_window_open(const char *title, int width, int height) {
     if (W.thread) return 0;
+    own_pixels();
     InitializeCriticalSection(&W.lock);
     W.ww = width;
     W.wh = height;
@@ -320,6 +342,20 @@ void vita_window_present(const uint8_t *pixels, int width, int height, int pitch
     }
     LeaveCriticalSection(&W.lock);
     InvalidateRect(W.hwnd, NULL, FALSE);
+}
+
+void *vita_window_native(void) { return W.hwnd; }
+
+void vita_window_drawn(int width, int height) {
+    if (width > 0 && height > 0 && (W.fw != width || W.fh != height)) {
+        EnterCriticalSection(&W.lock);
+        free(W.frame);
+        W.frame = NULL;
+        W.fw = width;
+        W.fh = height;
+        LeaveCriticalSection(&W.lock);
+    }
+    InterlockedExchange(&W.drawn, 1);
 }
 
 void vita_window_fullscreen(void) {

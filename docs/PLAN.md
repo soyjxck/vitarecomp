@@ -395,20 +395,24 @@ of a texture's level is taken out of the comparison. Surfaces stay on the
 card from one list to the next, a draw's geometry from one frame to the
 next, and bytes that were not written are not read again: a frame of play
 takes 23 ms against the processor's 85, which is past the console's
-thirty a second. It is switched on by `VITARECOMP_GXM_GPU=1` and is not
-yet the default. What is left:
+thirty a second. The frame is shown in the host's window by the card
+that drew it, and does not pass through the title's memory on the way.
+It is switched on by `VITARECOMP_GXM_GPU=1` and is not yet the default.
+What is left:
 
-1. **The picture shown from the card.** A window reads the frame back
-   out of the title's memory to stretch it; the card has it already.
-2. **A watch on the pages of a surface the card holds**, so that the
+1. **A watch on the pages of a surface the card holds**, so that the
    title's own code reading it is noticed. Today that is known only for
    surfaces of a few pixels, by sending those back always.
-3. **The rest of a frame.** Sixteen of the 23 ms are neither the card
+2. **The rest of a frame.** Sixteen of the 23 ms are neither the card
    nor its path: the title's code and the graphics library's handling
    of each draw as it is made. Not yet looked at.
-4. **Textures in their own form.** A compressed texture goes to the card
+3. **Textures in their own form.** A compressed texture goes to the card
    as four floats a texel; the card has the compressed forms. It costs
    memory and the first frame of a scene, not the frames after.
+4. **Drawing larger than the console did.** The card draws 960 by 544
+   because the title asks for that; a window three times the size shows
+   each of those pixels nine times. Surfaces some whole number of times
+   the size the title names, and the picture is the card's own.
 5. A second implementation of `src/gpu.h` for hosts without Direct3D.
 6. Making it the default where there is a card, with the processor's
    renderer for what a card's path leaves and for checking it.

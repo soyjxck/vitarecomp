@@ -14,6 +14,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d11.h>
+#include <dxgi1_2.h>
 #include <d3dcompiler.h>
 
 #include <stdio.h>
@@ -78,6 +79,15 @@ static struct {
 
     ID3D11Query *queries[QUERIES];
     unsigned query_count;
+
+    /* for gpu_show: the window, what draws into it, and the picture of the two that is drawn to next */
+    HWND window, no_window;
+    IDXGISwapChain1 *chain;
+    ID3D11RenderTargetView *back;
+    LONG back_width, back_height;
+    ID3D11PixelShader *show;
+    gpu_surface *shown;                             /* the surface the window has a picture of */
+    int shown_once;
 } G;
 
 #define RELEASE(p) do { if (p) { IUnknown_Release((IUnknown *)(p)); (p) = NULL; } } while (0)
@@ -613,6 +623,7 @@ void gpu_surface_free(gpu_surface *s) {
     if (!s) return;
     if (G.colour == s) G.colour = NULL;
     if (G.depth == s) G.depth = NULL;
+    if (G.shown == s) G.shown_once = 0;             /* another may be made where it was */
     RELEASE(s->target); RELEASE(s->ordered); RELEASE(s->depth); RELEASE(s->view); RELEASE(s->view2);
     RELEASE(s->copy_view); RELEASE(s->copy); RELEASE(s->tex);
     free(s);
@@ -743,14 +754,18 @@ int gpu_surface_depth_corner(gpu_surface *into, gpu_surface *from, uint8_t stenc
     return 0;
 }
 
+/* No test of depth or stencil, and neither written. */
+static int untested_made(void) {
+    D3D11_DEPTH_STENCIL_DESC d;
+    if (G.untested) return 1;
+    memset(&d, 0, sizeof(d));
+    d.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    return SUCCEEDED(ID3D11Device_CreateDepthStencilState(G.dev, &d, &G.untested));
+}
+
 int gpu_convert(gpu_texture *into, gpu_surface *from, gpu_shader *program, const void *constants, uint32_t constants_bytes) {
-    if (!G.ok || G.in_list || !into || !into->target || !from || !from->view || !program || !program->ps || !whole_made()) return -1;
-    if (!G.untested) {
-        D3D11_DEPTH_STENCIL_DESC d;
-        memset(&d, 0, sizeof(d));
-        d.DepthFunc = D3D11_COMPARISON_ALWAYS;
-        if (FAILED(ID3D11Device_CreateDepthStencilState(G.dev, &d, &G.untested))) return -1;
-    }
+    if (!G.ok || G.in_list || !into || !into->target || !from || !from->view || !program || !program->ps || !whole_made() ||
+        !untested_made()) return -1;
     ID3D11RasterizerState *raster = raster_state(0);
     uint8_t block[CONSTANT_BYTES];
     if (!raster) return -1;
@@ -778,6 +793,148 @@ int gpu_convert(gpu_texture *into, gpu_surface *from, gpu_shader *program, const
     /* neither stays bound: the texture is about to be sampled and the surface drawn to */
     ID3D11DeviceContext_PSSetShaderResources(G.ctx, 0, 2, none);
     ID3D11DeviceContext_OMSetRenderTargets(G.ctx, 0, NULL, NULL);
+    return 0;
+}
+
+/* --- the picture in a window -------------------------------------------------------------------- */
+
+/* What draws into a window: pictures the size of its inside that take
+ * turns at being the one shown. */
+static int chain_for(HWND window) {
+    /* the newest way first, in which the picture drawn is handed to the screen as it is and not copied; then the ways before it */
+    static const DXGI_SWAP_EFFECT WAYS[3] = { DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_SWAP_EFFECT_DISCARD };
+    IDXGIDevice *dxgi = NULL;
+    IDXGIAdapter *adapter = NULL;
+    IDXGIFactory2 *factory = NULL;
+    RECT rc;
+    if (G.chain && G.window == window) return 1;
+    if (G.no_window == window) return 0;
+    RELEASE(G.back);
+    RELEASE(G.chain);
+    G.window = NULL;
+    G.no_window = window;                           /* asked once: a window that cannot be drawn in is not asked about again */
+    if (!IsWindow(window) || !GetClientRect(window, &rc)) return 0;
+    if (SUCCEEDED(ID3D11Device_QueryInterface(G.dev, &IID_IDXGIDevice, (void **)&dxgi)) &&
+        SUCCEEDED(IDXGIDevice_GetAdapter(dxgi, &adapter)) &&
+        SUCCEEDED(IDXGIAdapter_GetParent(adapter, &IID_IDXGIFactory2, (void **)&factory))) {
+        DXGI_SWAP_CHAIN_DESC1 d;
+        memset(&d, 0, sizeof(d));
+        d.Width = (UINT)(rc.right > 0 ? rc.right : 1);
+        d.Height = (UINT)(rc.bottom > 0 ? rc.bottom : 1);
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        d.SampleDesc.Count = 1;
+        d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        d.Scaling = DXGI_SCALING_STRETCH;
+        d.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        for (int k = 0; k < 3 && !G.chain; k++) {
+            d.SwapEffect = WAYS[k];
+            d.BufferCount = k < 2 ? 2 : 1;
+            if (FAILED(IDXGIFactory2_CreateSwapChainForHwnd(factory, (IUnknown *)G.dev, window, &d, NULL, NULL, &G.chain))) G.chain = NULL;
+        }
+        /* the window's keys and its size are the window's own business: nothing is to be made of Alt and Enter here */
+        if (G.chain) IDXGIFactory2_MakeWindowAssociation(factory, window, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+        G.back_width = (LONG)d.Width;
+        G.back_height = (LONG)d.Height;
+    }
+    RELEASE(factory);
+    RELEASE(adapter);
+    RELEASE(dxgi);
+    if (!G.chain) return 0;
+    G.window = window;
+    G.no_window = NULL;
+    G.shown_once = 0;
+    return 1;
+}
+
+int gpu_show(void *window, gpu_surface *s, int fresh) {
+    /* Where in the surface a pixel of the window looks. A pixel of the window that lies wholly within one of the
+     * surface's is that one; one that lies across two is as much of each as it covers, which is what the card's own
+     * blending of four neighbours gives when it is asked a little to one side of where the pixel is. */
+    static const char SHOW[] =
+        "cbuffer C : register(b0) { float4 RECT; float4 SIZE; };\n"
+        "Texture2D<float4> SRC : register(t0);\n"
+        "SamplerState SMOOTH : register(s0);\n"
+        "float4 main(float4 pos : SV_Position) : SV_Target {\n"
+        "    float2 at = (pos.xy - RECT.xy) * SIZE.zw, cell = floor(at), part = at - cell;\n"
+        "    float2 grown = max(1.0 / SIZE.zw, 1.0);\n"
+        "    float2 from = cell + clamp(part * grown, 0.0, 0.5) + clamp((part - 1.0) * grown + 0.5, 0.0, 0.5);\n"
+        "    return float4(SRC.SampleLevel(SMOOTH, from / SIZE.xy, 0.0).rgb, 1.0);\n"
+        "}\n";
+    static const float BLACK[4] = { 0.0f, 0.0f, 0.0f, 1.0f }, NO_FACTOR[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    static const gpu_sampler SMOOTH = { 1, 1, 0, 2, 2, 0.0f, 0.0f, 0.0f };
+    RECT rc;
+    if (!G.ok || G.in_list || !window) return -1;
+    if (s && (!s->view || (s->format != GPU_RGBA8 && s->format != GPU_RGBA8_SRGB))) return -1;
+    if (!chain_for((HWND)window) || !whole_made() || !untested_made()) return -1;
+    if (!G.show) {
+        ID3DBlob *code = NULL;
+        if (FAILED(D3DCompile(SHOW, sizeof(SHOW) - 1, NULL, NULL, NULL, "main", "ps_5_0", 0, 0, &code, NULL))) return -1;
+        HRESULT hr = ID3D11Device_CreatePixelShader(G.dev, ID3D10Blob_GetBufferPointer(code), ID3D10Blob_GetBufferSize(code), NULL, &G.show);
+        RELEASE(code);
+        if (FAILED(hr)) { G.show = NULL; return -1; }
+    }
+    /* put away, or of no size: there is nothing of it to see */
+    if (!GetClientRect((HWND)window, &rc) || rc.right <= 0 || rc.bottom <= 0) return 0;
+    if (!fresh && G.shown_once && G.shown == s && G.back && rc.right == G.back_width && rc.bottom == G.back_height) return 0;
+    if (!G.back || rc.right != G.back_width || rc.bottom != G.back_height) {
+        ID3D11Texture2D *picture = NULL;
+        RELEASE(G.back);
+        if (rc.right != G.back_width || rc.bottom != G.back_height) {
+            /* the window has another size: its pictures are let go of, all of them, and made again */
+            ID3D11DeviceContext_Flush(G.ctx);
+            if (FAILED(IDXGISwapChain1_ResizeBuffers(G.chain, 0, (UINT)rc.right, (UINT)rc.bottom, DXGI_FORMAT_UNKNOWN, 0))) return -1;
+            G.back_width = rc.right;
+            G.back_height = rc.bottom;
+        }
+        if (FAILED(IDXGISwapChain1_GetBuffer(G.chain, 0, &IID_ID3D11Texture2D, (void **)&picture))) return -1;
+        HRESULT hr = ID3D11Device_CreateRenderTargetView(G.dev, (ID3D11Resource *)picture, NULL, &G.back);
+        RELEASE(picture);
+        if (FAILED(hr)) { G.back = NULL; return -1; }
+    }
+
+    ID3D11DeviceContext_OMSetRenderTargets(G.ctx, 1, &G.back, NULL);
+    ID3D11DeviceContext_ClearRenderTargetView(G.ctx, G.back, BLACK);
+    ID3D11RasterizerState *raster = raster_state(0);
+    ID3D11SamplerState *smooth = sampler_state(&SMOOTH);
+    if (s && raster && smooth) {
+        /* as large as fits at the surface's shape, in the middle */
+        LONGLONG sw = s->width, sh = s->height;
+        LONG w = rc.right, t = rc.bottom;
+        if (w * sh > t * sw) w = (LONG)(t * sw / sh);
+        else                 t = (LONG)(w * sh / sw);
+        if (w < 1) w = 1;
+        if (t < 1) t = 1;
+        LONG left = (rc.right - w) / 2, top = (rc.bottom - t) / 2;
+        float place[8] = { (float)left, (float)top, (float)w, (float)t,
+                           (float)s->width, (float)s->height, (float)s->width / (float)w, (float)s->height / (float)t };
+        uint8_t block[CONSTANT_BYTES];
+        ID3D11ShaderResourceView *none = NULL;
+        D3D11_VIEWPORT port = { (float)left, (float)top, (float)w, (float)t, 0.0f, 1.0f };
+        D3D11_RECT all = { left, top, left + w, top + t };
+        memset(block, 0, sizeof(block));
+        memcpy(block, place, sizeof(place));
+        if (fill(G.constants[1], block, CONSTANT_BYTES)) {
+            ID3D11DeviceContext_RSSetViewports(G.ctx, 1, &port);
+            ID3D11DeviceContext_RSSetScissorRects(G.ctx, 1, &all);
+            ID3D11DeviceContext_RSSetState(G.ctx, raster);
+            ID3D11DeviceContext_OMSetDepthStencilState(G.ctx, G.untested, 0);
+            ID3D11DeviceContext_OMSetBlendState(G.ctx, NULL, NO_FACTOR, 0xFFFFFFFFu);
+            ID3D11DeviceContext_IASetInputLayout(G.ctx, NULL);
+            ID3D11DeviceContext_IASetPrimitiveTopology(G.ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ID3D11DeviceContext_VSSetShader(G.ctx, G.whole, NULL, 0);
+            ID3D11DeviceContext_PSSetShader(G.ctx, G.show, NULL, 0);
+            ID3D11DeviceContext_PSSetConstantBuffers(G.ctx, 0, 1, &G.constants[1]);
+            ID3D11DeviceContext_PSSetSamplers(G.ctx, 0, 1, &smooth);
+            ID3D11DeviceContext_PSSetShaderResources(G.ctx, 0, 1, &s->view);
+            ID3D11DeviceContext_Draw(G.ctx, 3, 0);
+            ID3D11DeviceContext_PSSetShaderResources(G.ctx, 0, 1, &none);
+        }
+    }
+    ID3D11DeviceContext_OMSetRenderTargets(G.ctx, 0, NULL, NULL);
+    /* now, and not at the screen's next turn: the host keeps its own time */
+    if (FAILED(IDXGISwapChain1_Present(G.chain, 0, 0))) return -1;
+    G.shown = s;
+    G.shown_once = 1;
     return 0;
 }
 

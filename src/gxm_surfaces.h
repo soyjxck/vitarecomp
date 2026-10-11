@@ -35,6 +35,17 @@
  * planes are what the scene's depth is, fetched from the card if they
  * were not. */
 void gxm_gpu_memory_wanted(const void *bytes, size_t count);
+
+/* And one asking that is not for memory at all. The display's frame is
+ * these bytes, `height` rows of `pitch` pixels of four bytes, red first,
+ * `width` of each row to be seen: show it in the host's window (gpu.h says
+ * what a window is). The card shows the surface it holds for those bytes
+ * if it holds one newer than they are, and the bytes themselves if not;
+ * nothing is sent back to memory on the frame's account. With no bytes the
+ * window is made black. Returns 1 when the card showed it, and 0 when the
+ * card is not drawing or shows nothing in windows: the host then shows
+ * what memory holds, as it would have. */
+int gxm_gpu_show(void *window, const void *bytes, uint32_t width, uint32_t height, uint32_t pitch);
 void gxm_gpu_for_processor(const gxm_draw_state *s);
 int gxm_gpu_scene_begin(const uint32_t control[5], uint32_t width, uint32_t height, uint32_t depth_bits, int load, int store,
                         float depth, uint8_t stencil);

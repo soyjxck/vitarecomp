@@ -156,7 +156,8 @@ name; every one it does not traps by name on first use
 (`VITARECOMP_TRACE=1` to log and continue). It is headless by default: input
 is scripted, buttons, sticks and touches alike, and frames are written as
 PPM. With `--window` the five functions of `include/vitarecomp/host.h` have
-a window behind them: the frames as they are shown, the keyboard and a
+a window behind them: the frames as they are shown (by the graphics
+card itself, when it is the card that draws them), the keyboard and a
 controller as the buttons and the sticks, the left mouse button as a
 finger on the screen. A
 title's files are found under the directories given as mounts: `app0` its

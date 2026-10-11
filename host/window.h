@@ -24,6 +24,16 @@ void vita_window_fullscreen(void);
 /* Show a frame: `pixels` is R, G, B, A bytes, `pitch` pixels to a row. */
 void vita_window_present(const uint8_t *pixels, int width, int height, int pitch);
 
+/* The window as the system names it, an HWND on Windows, for whoever would
+ * draw the picture in it for themselves: a graphics card that holds the
+ * frame already. NULL when there is no window. */
+void *vita_window_native(void);
+
+/* Say that someone has, a frame `width` by `height`: the window paints
+ * nothing of its own from here on, and places the mouse on a picture of
+ * that shape. */
+void vita_window_drawn(int width, int height);
+
 /* The buttons the keyboard and a controller are holding, as a VITA_CTRL_*
  * mask. */
 uint32_t vita_window_buttons(void);

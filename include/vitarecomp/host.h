@@ -77,6 +77,16 @@ typedef struct {
  * set to NULL, which blanks the display. */
 int vita_display_current(vita_framebuf *out);
 
+/* The same framebuffer shown in a window of the host's, by the graphics
+ * card when it is the card that drew it: the frame is on the card already,
+ * and vita_display_current would fetch it into memory for the host to send
+ * back. `window` is the window as the system names it, an HWND on Windows.
+ * Returns 1 when it was shown, with the frame's size (nothing by nothing
+ * when the display is blank, and the window black); the window is then the
+ * card's and the host draws nothing in it. Returns 0 when there is no card
+ * drawing: the host shows vita_display_current as it would have. */
+int vita_display_show(void *window, uint32_t *width, uint32_t *height);
+
 /* sceDisplaySetFrameBuf calls so far. */
 uint32_t vita_display_flips(void);
 

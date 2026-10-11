@@ -674,13 +674,18 @@ where sixty frames of RIGHT and thirty of DOWN put it — is the fixture.
 
 `--window` is the same five functions with a window behind them
 (`host/window_win32.c`, GDI and nothing else): the frame shown at each
-vertical blank, the keyboard added to the scripted buttons and sticks
+vertical blank, stretched from the program's memory, or, when a graphics
+card drew it, shown by the card that holds it (`vita_display_show`: the
+host hands over the window and paints nothing in it afterwards), the
+keyboard added to the scripted buttons and sticks
 (arrows for the pad, W A S D and I J K L for the sticks, X C Z V for
 cross, circle, square and triangle, Q and E for the shoulders, Enter for
 START, Shift for SELECT), and the left mouse button as a finger, wherever
 on the picture it is held. The picture keeps the frame's shape in a window
 of any other, with black beside it; `--window-size WxH` says how large it
-starts, `--fullscreen`, F11 or Alt and Enter put the window over the whole
+starts, in the screen's own pixels (the program tells the system it knows
+how dense the screen is, or the system would stretch the finished picture
+and blur it), `--fullscreen`, F11 or Alt and Enter put the window over the whole
 screen, `--title` names it, and its icon is the program's own when it has
 one. A controller is read with the keyboard: the first pad XInput reports,
 its buttons added to the keys held and its sticks the sticks wherever no
@@ -982,6 +987,27 @@ frame from the same bytes.
   keeps count the answer is "perhaps", and the bytes are hashed as
   before.
 
+And the frame itself does not come back to be looked at. A host with a
+window asks for the display's frame to be shown in it
+(`vita_display_show`, `gxm_gpu_show`, `gpu_show`): when the card holds
+the surface those bytes are, newer than they are, it draws that surface
+into the window and nothing goes to memory; when it does not, a film the
+processor decoded or a list the processor drew, the bytes are sent to the
+card and shown the same way, once for each time they are written. The
+window is the card's from the first frame it shows, because the system
+lets nothing else draw in such a window. A frame is shown when it is
+another frame than the last or the window another size, and not
+otherwise: showing waits for the card to have drawn, and a title that
+makes thirty frames a second was shown sixty times, half of them for
+nothing and at several milliseconds a frame.
+
+The picture is as large as fits at the frame's shape, in the middle. A
+pixel of the window that lies wholly within one pixel of the frame is
+that pixel; one that lies across two is as much of each as it covers. So
+at twice or three times the frame's size every pixel of the frame is a
+whole block of the window's, to the byte, and at one and a half times
+its edges are blended and its middle is not.
+
 What is not yet known is when a title's own code reads a larger surface.
 The plan for that is a watch on the pages (PLAN.md).
 
@@ -991,7 +1017,7 @@ telling a fault in the keeping from a fault in the drawing.
 `VITARECOMP_GXM_GPU_LOG=1` says each surface filled from memory and each
 sent back, and the stage profile (`VITARECOMP_GXM_PROFILE`) has a line
 for the card: what a frame spent looking over textures' bytes, making
-textures, on targets, on vertices, in draws, waiting.
+textures, on targets, on vertices, in draws, waiting, showing.
 
 A frame of play takes 23 ms so (2026-10-11, Direct3D 11, GeForce RTX
 4090, nothing else at work on the machine), against 85 for the

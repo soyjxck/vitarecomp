@@ -50,7 +50,7 @@ static uint32_t g_now;                      /* the moment the list in hand began
 
 /* What the path costs, for the stage profile (VITARECOMP_GXM_PROFILE):
  * nanoseconds since the last report, by what was being done. */
-enum { P_HASH = 0, P_TEXTURE, P_IN, P_VERTICES, P_DRAW, P_BACK, P_OUT, P_STAGES };
+enum { P_HASH = 0, P_TEXTURE, P_IN, P_VERTICES, P_DRAW, P_BACK, P_OUT, P_SHOW, P_STAGES };
 static uint64_t g_ns[P_STAGES], g_hashed, g_made, g_lists, g_draws, g_backs, g_puts, g_views;
 static uint64_t g_mesh_hits, g_mesh_made, g_mesh_passed;
 static int g_timed = -1;
@@ -66,7 +66,7 @@ static uint64_t now_ns(void) {
 void gxm_gpu_profile(uint32_t frames) {
     static const char *const NAME[P_STAGES] = { "textures' bytes looked over", "textures made from memory", "targets and textures made ready",
                                                 "vertices made ready", "draws handed over", "the card waited for and surfaces read back",
-                                                "surfaces put back in memory" };
+                                                "surfaces put back in memory", "the picture shown" };
     double per = frames ? 1e-6 / (double)frames : 0.0;
     if (!g_lists) return;
     fprintf(stderr, "    on the card, ms a frame:");
@@ -947,6 +947,63 @@ static void surfaces_back(const uint8_t *lo, const uint8_t *hi, const colour_rec
 void gxm_gpu_memory_wanted(const void *bytes, size_t count) {
     if (g_mode != GXM_GPU_DRAW || !bytes) return;
     surfaces_back(bytes, (const uint8_t *)bytes + count, NULL);
+}
+
+int gxm_gpu_show(void *window, const void *bytes, uint32_t width, uint32_t height, uint32_t pitch) {
+    static struct { gpu_surface *card; const uint8_t *lo; uint32_t width, height, pitch, moment; int filled; } own;
+    static struct { const colour_record *record; uint32_t version; } last;
+    static int no_way;
+    const uint8_t *lo = (const uint8_t *)bytes, *hi = lo + (size_t)pitch * height * 4;
+    if (gxm_gpu_mode() != GXM_GPU_DRAW || no_way || !window) return 0;
+    uint64_t began = now_ns();
+    gpu_surface *shown = NULL;
+    int fresh = 0;
+    if (bytes && width && height) {
+        /* the surface the card holds newer than those bytes, when there is one and it is all of them as the display reads them */
+        colour_record *top = NULL;
+        unsigned over = 0;
+        for (unsigned i = 0; i < g_colour_count; i++) {
+            colour_record *r = &g_colours[i];
+            if (!r->newer || r->lo >= hi || r->hi <= lo) continue;
+            over++;
+            if (!top || r->drawn > top->drawn) top = r;
+        }
+        if (over == 1 && top->lo == lo && top->s.width == width && top->s.height == height && top->s.colour_stride == pitch &&
+            top->s.colour_layout == GXM_SURFACE_LINEAR && top->way.mode == AS_BYTES &&
+            (top->way.format == GPU_RGBA8 || top->way.format == GPU_RGBA8_SRGB)) {
+            shown = top->card;
+            fresh = last.record != top || last.version != top->version;
+            last.record = top;
+            last.version = top->version;
+        } else {
+            /* otherwise memory is what the display reads, with whatever the card holds of it put there first */
+            if (over) surfaces_back(lo, hi, NULL);
+            if (!own.card || own.width != width || own.height != height) {
+                gpu_surface_free(own.card);
+                own.card = gpu_surface_make(GPU_RGBA8, width, height);
+                own.width = width;
+                own.height = height;
+                own.filled = 0;
+            }
+            uint32_t moment = vita_mem_moment();
+            if (own.card && (!own.filled || own.lo != lo || own.pitch != pitch || vita_mem_written(lo, (size_t)(hi - lo), own.moment))) {
+                own.filled = !gpu_surface_put(own.card, lo, pitch * 4);
+                fresh = 1;
+            }
+            own.lo = lo;
+            own.pitch = pitch;
+            own.moment = moment;
+            shown = own.card && own.filled ? own.card : NULL;
+            last.record = NULL;
+        }
+    }
+    if (gpu_show(window, shown, fresh)) {
+        no_way = 1;
+        fprintf(stderr, "gxm gpu: the card shows nothing in the host's window; the picture goes by way of memory\n");
+        return 0;
+    }
+    g_ns[P_SHOW] += now_ns() - began;
+    return 1;
 }
 
 static void forget_views_of(const void *record);

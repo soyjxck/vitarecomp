@@ -48,3 +48,4 @@ int gpu_ordered(unsigned format) { (void)format; return 0; }
 int gpu_begin(gpu_surface *colour, gpu_surface *depth) { (void)colour; (void)depth; return -1; }
 int gpu_draw(const gpu_draw_call *d) { (void)d; return -1; }
 int gpu_end(uint64_t *counts, unsigned max_counts) { (void)counts; (void)max_counts; return -1; }
+int gpu_show(void *window, gpu_surface *s, int fresh) { (void)window; (void)s; (void)fresh; return -1; }

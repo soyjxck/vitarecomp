@@ -182,4 +182,23 @@ int gpu_draw(const gpu_draw_call *d);
  * card when there are any. 0 when every draw was taken. */
 int gpu_end(uint64_t *counts, unsigned max_counts);
 
+/* A surface shown in a window of the host's. `window` is the window as the
+ * system names it, an HWND on Windows; the surface is one of bytes of
+ * colour, red first. It is shown as large as fits at its own shape, in the
+ * middle, and what is over is black. A pixel of it stays as sharp as the
+ * size leaves it: whole where the picture is a whole number of times the
+ * surface's size, and blended only along its edges where it is not. With
+ * no surface the window is made black.
+ *
+ * `fresh` says the surface holds something it did not when it was last
+ * shown. Without it, and with the window the size it was, nothing is done:
+ * the window keeps the picture it has, and showing one waits for the card
+ * to have drawn it.
+ *
+ * 0 when it is shown; -1 when this card shows nothing in windows, and
+ * whoever asked shows the picture another way. A window that has been
+ * shown in is the card's from then on: the system lets nothing else draw
+ * in it. */
+int gpu_show(void *window, gpu_surface *s, int fresh);
+
 #endif /* VITARECOMP_GPU_H */
