@@ -20,6 +20,12 @@ gpu_texture *gpu_texture_make(unsigned format, unsigned width, unsigned height, 
 }
 void gpu_texture_free(gpu_texture *t) { (void)t; }
 
+gpu_mesh *gpu_mesh_make(const void *vertices, uint32_t vertex_count, uint32_t stride, const uint32_t *indices, uint32_t index_count) {
+    (void)vertices; (void)vertex_count; (void)stride; (void)indices; (void)index_count;
+    return NULL;
+}
+void gpu_mesh_free(gpu_mesh *m) { (void)m; }
+
 gpu_surface *gpu_surface_make(unsigned format, uint32_t width, uint32_t height) { (void)format; (void)width; (void)height; return NULL; }
 void gpu_surface_free(gpu_surface *s) { (void)s; }
 int gpu_surface_put(gpu_surface *s, const void *rows, uint32_t pitch) { (void)s; (void)rows; (void)pitch; return -1; }

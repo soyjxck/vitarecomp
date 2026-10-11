@@ -39,6 +39,7 @@ enum {
 
 typedef struct gpu_shader gpu_shader;
 typedef struct gpu_texture gpu_texture;
+typedef struct gpu_mesh gpu_mesh;
 
 /* Find a card and get ready. 0, or -1 when there is none to draw with. */
 int gpu_open(void);
@@ -60,6 +61,12 @@ gpu_texture *gpu_texture_make(unsigned format, unsigned width, unsigned height, 
                               const void *const *images);
 void gpu_texture_free(gpu_texture *t);
 
+/* Vertices and indices that will be drawn with again as they are: kept on
+ * the card. The vertices are words, `stride` bytes each; the indices are
+ * words too. */
+gpu_mesh *gpu_mesh_make(const void *vertices, uint32_t vertex_count, uint32_t stride, const uint32_t *indices, uint32_t index_count);
+void gpu_mesh_free(gpu_mesh *m);
+
 typedef struct {
     uint8_t min_linear, mag_linear;
     uint8_t mip;                    /* 0 the first level only, 1 the nearest level, 2 between two */
@@ -75,6 +82,7 @@ typedef struct { uint8_t func, fail, depth_fail, pass; } gpu_stencil_face;
 
 typedef struct {
     gpu_shader *vertex, *fragment;          /* no fragment program: depth and stencil only */
+    gpu_mesh   *mesh;                       /* the vertices and indices, kept on the card; or NULL, and then: */
     const void *vertices;                   /* each a vertex's primary attributes, words */
     uint32_t    vertex_count, vertex_stride;
     const void *indices;

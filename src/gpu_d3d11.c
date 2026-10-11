@@ -33,6 +33,8 @@ struct gpu_texture {
     uint32_t width, height;
 };
 
+struct gpu_mesh { ID3D11Buffer *vertices, *indices; uint32_t index_count, stride; };
+
 struct gpu_surface {
     unsigned format;
     uint32_t width, height;
@@ -331,6 +333,40 @@ void gpu_texture_free(gpu_texture *t) {
     RELEASE(t->view);
     RELEASE(t->tex);
     free(t);
+}
+
+/* --- vertices and indices that stay ------------------------------------------------------------- */
+
+gpu_mesh *gpu_mesh_make(const void *vertices, uint32_t vertex_count, uint32_t stride, const uint32_t *indices, uint32_t index_count) {
+    D3D11_BUFFER_DESC d;
+    D3D11_SUBRESOURCE_DATA init;
+    /* a program fed nothing still draws from a buffer: four bytes of nothing */
+    static const uint32_t NOTHING = 0;
+    uint32_t bytes = vertex_count * stride;
+    if (!G.ok || !indices || !index_count) return NULL;
+    gpu_mesh *m = calloc(1, sizeof(*m));
+    if (!m) return NULL;
+    memset(&d, 0, sizeof(d));
+    memset(&init, 0, sizeof(init));
+    d.Usage = D3D11_USAGE_IMMUTABLE;
+    d.ByteWidth = bytes ? bytes : 4;
+    d.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    init.pSysMem = bytes ? vertices : &NOTHING;
+    if (FAILED(ID3D11Device_CreateBuffer(G.dev, &d, &init, &m->vertices))) { gpu_mesh_free(m); return NULL; }
+    d.ByteWidth = index_count * 4;
+    d.BindFlags = D3D11_BIND_INDEX_BUFFER;
+    init.pSysMem = indices;
+    if (FAILED(ID3D11Device_CreateBuffer(G.dev, &d, &init, &m->indices))) { gpu_mesh_free(m); return NULL; }
+    m->index_count = index_count;
+    m->stride = stride;
+    return m;
+}
+
+void gpu_mesh_free(gpu_mesh *m) {
+    if (!m) return;
+    RELEASE(m->vertices);
+    RELEASE(m->indices);
+    free(m);
 }
 
 /* --- buffers that grow -------------------------------------------------------------------------- */
@@ -763,7 +799,7 @@ int gpu_begin(gpu_surface *colour, gpu_surface *depth) {
 int gpu_draw(const gpu_draw_call *c) {
     static const float NO_FACTOR[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     int counted = -1;
-    if (!G.in_list || !c->vertex || !c->vertex->vs || !c->index_count || !c->vertex_count) return -1;
+    if (!G.in_list || !c->vertex || !c->vertex->vs || (!c->mesh && (!c->index_count || !c->vertex_count))) return -1;
 
     ID3D11RasterizerState *raster = raster_state(c->cull);
     ID3D11DepthStencilState *depth = depth_state(c);
@@ -771,9 +807,10 @@ int gpu_draw(const gpu_draw_call *c) {
     if (!raster || !depth || !blend) { G.failed = 1; return -1; }
 
     uint32_t vertex_bytes = c->vertex_count * c->vertex_stride, index_bytes = c->index_count * c->index_size;
-    if (!room(&G.vertices, &G.vertices_cap, vertex_bytes ? vertex_bytes : 4, D3D11_BIND_VERTEX_BUFFER, NULL) ||
-        !room(&G.indices, &G.indices_cap, index_bytes, D3D11_BIND_INDEX_BUFFER, NULL) ||
-        (vertex_bytes && !fill(G.vertices, c->vertices, vertex_bytes)) || !fill(G.indices, c->indices, index_bytes)) { G.failed = 1; return -1; }
+    if (!c->mesh &&
+        (!room(&G.vertices, &G.vertices_cap, vertex_bytes ? vertex_bytes : 4, D3D11_BIND_VERTEX_BUFFER, NULL) ||
+         !room(&G.indices, &G.indices_cap, index_bytes, D3D11_BIND_INDEX_BUFFER, NULL) ||
+         (vertex_bytes && !fill(G.vertices, c->vertices, vertex_bytes)) || !fill(G.indices, c->indices, index_bytes))) { G.failed = 1; return -1; }
 
     for (int k = 0; k < 2; k++) {
         uint8_t block[CONSTANT_BYTES];
@@ -838,11 +875,16 @@ int gpu_draw(const gpu_draw_call *c) {
     else
         ID3D11DeviceContext_OMSetRenderTargets(G.ctx, colour ? 1 : 0, colour ? &colour->target : NULL, G.depth->depth);
 
-    UINT stride = c->vertex_stride, offset = 0;
+    UINT stride = c->mesh ? c->mesh->stride : c->vertex_stride, offset = 0;
     D3D11_RECT scissor = { c->scissor[0], c->scissor[1], c->scissor[2], c->scissor[3] };
     ID3D11DeviceContext_IASetInputLayout(G.ctx, c->vertex->layout);
-    ID3D11DeviceContext_IASetVertexBuffers(G.ctx, 0, 1, &G.vertices, &stride, &offset);
-    ID3D11DeviceContext_IASetIndexBuffer(G.ctx, G.indices, c->index_size == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT, 0);
+    if (c->mesh) {
+        ID3D11DeviceContext_IASetVertexBuffers(G.ctx, 0, 1, &c->mesh->vertices, &stride, &offset);
+        ID3D11DeviceContext_IASetIndexBuffer(G.ctx, c->mesh->indices, DXGI_FORMAT_R32_UINT, 0);
+    } else {
+        ID3D11DeviceContext_IASetVertexBuffers(G.ctx, 0, 1, &G.vertices, &stride, &offset);
+        ID3D11DeviceContext_IASetIndexBuffer(G.ctx, G.indices, c->index_size == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT, 0);
+    }
     ID3D11DeviceContext_IASetPrimitiveTopology(G.ctx, c->strip ? D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ID3D11DeviceContext_VSSetShader(G.ctx, c->vertex->vs, NULL, 0);
     ID3D11DeviceContext_PSSetShader(G.ctx, c->fragment ? c->fragment->ps : NULL, NULL, 0);
@@ -860,7 +902,7 @@ int gpu_draw(const gpu_draw_call *c) {
             ID3D11DeviceContext_Begin(G.ctx, (ID3D11Asynchronous *)query);
         }
     }
-    ID3D11DeviceContext_DrawIndexed(G.ctx, c->index_count, 0, 0);
+    ID3D11DeviceContext_DrawIndexed(G.ctx, c->mesh ? c->mesh->index_count : c->index_count, 0, 0);
     if (query) ID3D11DeviceContext_End(G.ctx, (ID3D11Asynchronous *)query);
     return counted;
 }

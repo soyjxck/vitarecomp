@@ -51,6 +51,7 @@ static uint32_t g_list = 1;                 /* counts lists */
  * nanoseconds since the last report, by what was being done. */
 enum { P_HASH = 0, P_TEXTURE, P_IN, P_VERTICES, P_DRAW, P_BACK, P_OUT, P_STAGES };
 static uint64_t g_ns[P_STAGES], g_hashed, g_made, g_lists, g_draws, g_backs, g_puts, g_views;
+static uint64_t g_mesh_hits, g_mesh_made, g_mesh_passed;
 static int g_timed = -1;
 
 static uint64_t now_ns(void) {
@@ -70,11 +71,14 @@ void gxm_gpu_profile(uint32_t frames) {
     fprintf(stderr, "    on the card, ms a frame:");
     for (int k = 0; k < P_STAGES; k++) fprintf(stderr, "%s %s %.1f", k ? "," : "", NAME[k], (double)g_ns[k] * per);
     fprintf(stderr, "; %.1f lists and %.0f draws a frame, %.1f MB of textures looked over, %.1f textures made from memory and %.1f from "
-                    "surfaces on the card, %.1f surfaces filled from memory and %.1f sent back to it\n",
+                    "surfaces on the card, %.1f surfaces filled from memory and %.1f sent back to it; of the draws' geometry %.0f was "
+                    "kept from before, %.0f made and kept, %.0f made for the once\n",
             (double)g_lists / (double)frames, (double)g_draws / (double)frames, (double)g_hashed / (double)frames / 1048576.0,
-            (double)g_made / (double)frames, (double)g_views / (double)frames, (double)g_puts / (double)frames, (double)g_backs / (double)frames);
+            (double)g_made / (double)frames, (double)g_views / (double)frames, (double)g_puts / (double)frames, (double)g_backs / (double)frames,
+            (double)g_mesh_hits / (double)frames, (double)g_mesh_made / (double)frames, (double)g_mesh_passed / (double)frames);
     memset(g_ns, 0, sizeof(g_ns));
     g_hashed = g_made = g_lists = g_draws = g_backs = g_puts = g_views = 0;
+    g_mesh_hits = g_mesh_made = g_mesh_passed = 0;
 }
 
 /* VITARECOMP_GXM_GPU_LOG=1 says, besides each texture made from memory,
@@ -341,6 +345,141 @@ static int geometry(const queued *q, uint32_t pa_words, uint32_t *vertices, uint
     *vertices = used;
     *indices = made;
     return made >= 3;
+}
+
+/* --- geometry kept ----------------------------------------------------------------------------
+ * Most of what a title draws it drew the frame before from the same
+ * bytes: a wall is a wall, and a character's bones move in the uniforms,
+ * not in the vertices. So what `geometry` makes of a draw is kept on the
+ * card, found again by where the draw's indices and streams lie and how
+ * they are read, and trusted for as long as a hash of the indices and of
+ * the vertices they reach is what it was. A draw whose bytes keep changing,
+ * a sheet of particles written anew each frame, is noticed and no longer
+ * kept: making a mesh costs more than using one once. */
+
+typedef struct {
+    uint8_t  key[16 * 16 + 24];             /* how the draw reads its streams, where its indices are, how many */
+    uint64_t indices_stamp, vertices_stamp;
+    uint32_t low, high;                     /* the vertices the indices reach */
+    gpu_mesh *mesh;
+    uint32_t bytes, used;
+    uint8_t  strip, held, changes;          /* changes: times running its bytes were found different */
+} mesh_slot;
+
+#define MESHES 8192
+#define MESH_BYTES (256u << 20)             /* what all of them together may take of the card */
+#define RESTLESS 3                          /* changes after which a draw's geometry is made each time and not kept */
+static mesh_slot g_meshes[MESHES];
+static uint64_t g_mesh_bytes;
+
+/* A hash of the vertices the indices reach, over the streams' records: each run of bytes once, however many
+ * attributes are read from it. */
+static uint64_t vertices_stamp(const draw *d, uint32_t low, uint32_t high) {
+    uint32_t lo[16], hi[16], n = 0;
+    uint64_t h = 0;
+    for (uint32_t i = 0; i < d->inputs; i++) {
+        uint32_t stride = d->in[i].stride, a = d->in[i].base + (d->in[i].per_instance ? 0 : low * stride);
+        uint32_t b = d->in[i].base + (d->in[i].per_instance ? 0 : high * stride) + (stride ? stride : 64);
+        uint32_t merged = 0;
+        for (uint32_t k = 0; k < n && !merged; k++)
+            if (a <= hi[k] && b >= lo[k]) { if (a < lo[k]) lo[k] = a; if (b > hi[k]) hi[k] = b; merged = 1; }
+        if (!merged) { lo[n] = a; hi[n] = b; n++; }
+    }
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t avail = vita_mem_avail(lo[k]), bytes = hi[k] - lo[k];
+        const uint8_t *p = avail ? vita_mem_ptr(lo[k], 1) : NULL;
+        if (bytes > avail) bytes = avail;
+        if (p) h = fold(h ^ lo[k], p, bytes);
+    }
+    return h;
+}
+
+/* The draw's geometry on the card: kept from before, or made now and kept;
+ * or NULL, and then `vertices`, `indices` and `strip` are as `geometry`
+ * left them, to be drawn from once. 0 when there is nothing to draw. */
+static int mesh_for(const queued *q, uint32_t pa_words, gpu_mesh **mesh, uint32_t *vertices, uint32_t *indices, int *strip) {
+    const draw *d = &q->d;
+    uint8_t key[sizeof(g_meshes[0].key)];
+    uint32_t index_bytes = q->count * q->index_size, tail[6] = { q->indices, q->count, q->index_size, q->primitive, pa_words, d->inputs };
+    const uint8_t *index_data = vita_mem_ptr(q->indices, index_bytes);
+    *mesh = NULL;
+    if (!index_data) return 0;
+    memset(key, 0, sizeof(key));
+    memcpy(key, d->in, d->inputs * sizeof(d->in[0]));
+    memcpy(key + 16 * 16, tail, sizeof(tail));
+    uint64_t h = fold(0, key, sizeof(key));
+    mesh_slot *slot = NULL;
+    for (unsigned tries = 0, at = (unsigned)(h % MESHES); tries < 16; tries++, at = (at + 1) % MESHES) {
+        mesh_slot *m = &g_meshes[at];
+        if (m->held && memcmp(m->key, key, sizeof(key))) continue;
+        slot = m;
+        break;
+    }
+    if (!slot) return geometry(q, pa_words, vertices, indices, strip);         /* a crowded corner of the table: made, not kept */
+    if (slot->held && slot->changes >= RESTLESS) {
+        g_mesh_passed++;
+        slot->used = g_list;
+        return geometry(q, pa_words, vertices, indices, strip);
+    }
+    uint64_t indices_stamp = fold(0, index_data, index_bytes);
+    if (slot->held && slot->mesh && slot->indices_stamp == indices_stamp && slot->vertices_stamp == vertices_stamp(d, slot->low, slot->high)) {
+        slot->used = g_list;
+        slot->changes = 0;
+        *mesh = slot->mesh;
+        *strip = slot->strip;
+        g_mesh_hits++;
+        return 1;
+    }
+    /* made anew */
+    if (!geometry(q, pa_words, vertices, indices, strip)) return 0;
+    uint32_t low = 0xFFFFFFFFu, high = 0;
+    for (uint32_t i = 0; i < q->count; i++) {
+        uint32_t v = index_at(index_data, q->index_size, i);
+        if (v < low) low = v;
+        if (v > high) high = v;
+    }
+    if (slot->held) {
+        if (slot->changes < 255) slot->changes++;
+        gpu_mesh_free(slot->mesh);
+        g_mesh_bytes -= slot->bytes;
+        slot->mesh = NULL;
+        slot->bytes = 0;
+        if (slot->changes >= RESTLESS) { slot->used = g_list; return 1; }
+    } else {
+        memcpy(slot->key, key, sizeof(key));
+        slot->held = 1;
+        slot->changes = 0;
+    }
+    slot->used = g_list;
+    slot->indices_stamp = indices_stamp;
+    slot->low = low;
+    slot->high = high;
+    slot->vertices_stamp = vertices_stamp(d, low, high);
+    slot->strip = (uint8_t)*strip;
+    slot->bytes = *vertices * pa_words * 4 + *indices * 4;
+    if (g_mesh_bytes + slot->bytes > MESH_BYTES) {
+        /* room: what has not been drawn for longest goes, a tenth of the table at a time */
+        for (unsigned round = 0; round < 8 && g_mesh_bytes + slot->bytes > MESH_BYTES; round++) {
+            uint32_t oldest = 0xFFFFFFFFu;
+            for (unsigned i = 0; i < MESHES; i++) if (g_meshes[i].mesh && g_meshes[i].used < oldest) oldest = g_meshes[i].used;
+            uint32_t until = oldest + (g_list - oldest) / 4;
+            for (unsigned i = 0; i < MESHES; i++) {
+                mesh_slot *m = &g_meshes[i];
+                if (!m->mesh || m == slot || m->used > until) continue;
+                gpu_mesh_free(m->mesh);
+                g_mesh_bytes -= m->bytes;
+                m->mesh = NULL;
+                m->bytes = 0;
+                m->held = 0;
+            }
+        }
+    }
+    slot->mesh = gpu_mesh_make(g_vertex_words, *vertices, pa_words * 4, g_index_words, *indices);
+    if (!slot->mesh) { slot->bytes = 0; return 1; }           /* drawn from what geometry left, this once */
+    g_mesh_bytes += slot->bytes;
+    g_mesh_made++;
+    *mesh = slot->mesh;
+    return 1;
 }
 
 /* --- the constants, and the memory a load instruction reads ---------------------------------- */
@@ -1649,13 +1788,15 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
         counted[i] = -1;
         if (pa_words > 64) pa_words = 64;
         lap = now_ns();
-        if (!geometry(q, pa_words, &vertices, &indices, &strip)) continue;
+        gpu_mesh *mesh = NULL;
+        if (!mesh_for(q, pa_words, &mesh, &vertices, &indices, &strip)) continue;
         at = now_ns(); g_ns[P_VERTICES] += at - lap; lap = at;
 
         memset(&call, 0, sizeof(call));
         memset(c, 0, sizeof(c));
         call.vertex = shaders[i].vertex;
         call.fragment = shaders[i].fragment;
+        call.mesh = mesh;
         call.vertices = g_vertex_words;
         call.vertex_count = vertices;
         call.vertex_stride = pa_words * 4;
