@@ -207,6 +207,15 @@ refused as text, except inside a run of four or more adjacent relocated
 Thumb-tagged words, which is a pointer table and settles the matter the way
 the data-segment scan does.
 
+The text test has a blind side, here and wherever else it is applied (the
+MOVW/MOVT pairs, the lone stored words): the commonest instructions of the
+smallest functions are printable. `bx lr` is "pG", `ldr r0, [r0, #4]` is
+"@h", `movs r1, #70` is "F!", and an accessor that is two of those, set
+between two more accessors, is eight printable bytes. Text read as Thumb
+is loads and stores for as long as it lasts and does not come to a return,
+so bytes that return within six instructions, each one claimed and none a
+branch, are a function whatever they spell.
+
 ```
 $ armrecomp relocs vitashell.elf
 entries:  63334  ->  63334 relocations
@@ -383,21 +392,43 @@ translates cleanly, every instruction claimed and every branch resolved. Data
 read as code never manages that for long; a prologue-less leaf that only a
 pointer names always does, and `.init_array` is full of those.
 
+The scan of stored words reads two shapes besides a run of four pointers.
+One is the head of a virtual table: the C++ ABI puts the offset to the top
+of the object, then a pointer to the class's type information, then the
+functions, so a run of any length that follows a zero (or a small negative
+number) and an aligned address inside the module is a table. It has to be
+read, because the commonest table of all has two entries, a class's two
+destructors, and the first of them, with nothing to do but store the
+table's address, has no prologue. The other is the lone word: odd, into
+`.text`, no prologue, no table, no vtable in front. That is weak evidence
+too, and gets the weak treatment above, where it used to be refused
+outright. Both are read only in a module without relocations. Where there
+are relocations they name every stored pointer, and a module linked at
+address zero is full of small odd numbers that land in its own `.text`:
+on VitaShell the lone-word reading alone named 30,000 of them.
+
 `armrecomp emit` reports the three counts: discovered, not emitted, and weak
 targets promoted.
 
 ### Building the output at full scale
 
 **The functions arrive in parts.** `armrecomp emit` writes the bodies into
-`recomp_funcs_000.c`, `_001.c`, ... of 2,000 functions each
-(`VITARECOMP_EMIT_SPLIT` in the environment changes the size; 0 keeps one
-file), every part including a generated `recomp_funcs.h` that declares every
-import and every function, and the main `recomp_funcs.c` keeps the dispatch
-table and the module constants. `host/CMakeLists.txt` globs the parts. One
-translation unit per module was fine at a homebrew's size and is not at a
-retail title's: a compiler works on one file for as long as it takes, and
-*Golden Abyss* in one file is SINGLE_MIN of one core where PARTS parts are
-SPLIT_MIN of all of them, most of that the link and the import defaults.
+`recomp_funcs_000.c`, `_001.c`, ... of at most 2,000 functions and at most
+120,000 instructions each (`VITARECOMP_EMIT_SPLIT` and
+`VITARECOMP_EMIT_SPLIT_INSNS` in the environment change the sizes; a split
+of 0 keeps one file), every part including a generated `recomp_funcs.h`
+that declares every import and every function, and the main
+`recomp_funcs.c` keeps the dispatch table and the module constants.
+`host/CMakeLists.txt` globs the parts. One translation unit per module was
+fine at a homebrew's size and is not at a retail title's: a compiler works
+on one file for as long as it takes, and a build waits for its slowest
+file. Functions are not of a size, which is why the second limit: of
+*Golden Abyss*'s thirteen parts of 2,000 functions one was 1.65 million
+lines and took MSVC twelve minutes while everything else waited, fourteen
+minutes for the host in all; in 22 parts of at most 450,000 lines it is
+four, eight compilers at a time. (Eight, not one a core: each of these
+takes half a gigabyte and more, and twenty-two at once ran a 32 GB machine
+with other work on it out of memory.)
 
 Two things about compiling a whole recompiled module are worth knowing before
 meeting them as errors.
@@ -607,6 +638,18 @@ frames:
 | Textures | `VITARECOMP_GXM_TEXTURES=<dir>` | each texture a draw samples, once, as an image, with its layout on stderr; a format not decoded yet as its bytes |
 | One frame's scenes | `VITARECOMP_GXM_SCENES=<dir>`, with the frame switch above | what each scene of that frame left in its colour surface, as an image: the geometry buffer, the lit scene, each pass of the chain that ends on the display |
 | Programs | `VITARECOMP_GXP_DUMP=<dir>`, then `armrecomp gxp <file>` | the shader programs a title registers, and each one's tables and code as text |
+
+Two switches are for time, not for looking. `VITARECOMP_GXM_PROFILE=<n>`
+prints, every n frames, what a frame cost by stage: the drawing thread's
+own time in setting a draw up, shading its vertices, setting up its
+triangles and filling them, and, summed over the threads that fill, the
+fragment programs' inputs, their texture samples, the programs, the tests
+and the store, with how many pixels went through a program in rows and how
+many one at a time. `VITARECOMP_GXM_SKIP=<first>-<last>`
+counts the draws of those frames and draws none of them, which takes a
+title past a screen it holds for a fixed time, a health warning over a
+costly scene, in seconds. What those frames would have left in any
+surface is missing afterwards.
 
 And the frames themselves: `vita_host --window` shows them as they are
 flipped, `--dump out.ppm@N` writes one, `--dump-dir DIR@N` one every N

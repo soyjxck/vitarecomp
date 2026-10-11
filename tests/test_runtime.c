@@ -12,6 +12,7 @@
 #include "vitarecomp/host.h"
 #include "../src/hle_format.h"
 #include "../src/sched.h"
+#include "../src/clock.h"
 #include <string.h>
 
 #include <assert.h>
@@ -958,6 +959,100 @@ static void test_touch(void) {
     printf("  touch panel                    ok\n");
 }
 
+void vita_hle_sceAppUtilSaveDataSlotCreate(void);
+void vita_hle_sceAppUtilSaveDataSlotGetParam(void);
+void vita_hle_sceSaveDataDialogInit(void);
+void vita_hle_sceSaveDataDialogContinue(void);
+void vita_hle_sceSaveDataDialogFinish(void);
+void vita_hle_sceSaveDataDialogSubClose(void);
+void vita_hle_sceSaveDataDialogGetStatus(void);
+void vita_hle_sceSaveDataDialogGetSubStatus(void);
+void vita_hle_sceSaveDataDialogGetResult(void);
+void vita_hle_sceSaveDataDialogTerm(void);
+
+/* The save data dialog, driven as a title drives it: a list to choose a
+ * slot from, a "saving" screen the title closes itself, and the end. Nobody
+ * answers the list; it is answered for them, with the slot it had focused,
+ * once it has been up for half a second of the title's time. This test is
+ * the last, because it makes time the program's own. */
+static void test_save_dialog(void) {
+    assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
+    vita_mem_bad_access = 0;
+    vita_clock_virtual();
+    uint32_t param = 0x81001000u, list_param = 0x81001100u, list = 0x81001180u, sys_param = 0x81001200u;
+    uint32_t result = 0x81001300u, info = 0x81001380u, finish = 0x81001400u, record = 0x81002000u, got = 0x81003000u;
+
+    /* slot 2 exists, with a record that can be told from zeros; slot 3 does not */
+    vita_write16(record + 4, 'A');
+    r0 = 2; r1 = record; r2 = 0; vita_hle_sceAppUtilSaveDataSlotCreate();
+    assert(r0 == 0);
+    r0 = 2; r1 = record; r2 = 0; vita_hle_sceAppUtilSaveDataSlotCreate();
+    assert((int32_t)r0 < 0);                                    /* it is there already */
+    r0 = 3; r1 = got; r2 = 0; vita_hle_sceAppUtilSaveDataSlotGetParam();
+    assert((int32_t)r0 < 0);
+    r0 = 2; r1 = got; r2 = 0; vita_hle_sceAppUtilSaveDataSlotGetParam();
+    assert(r0 == 0 && vita_read16(got + 4) == 'A' && vita_read16(got + 0x30C) >= 2025);    /* and dated */
+
+    /* a list of slots 2 and 3 to save into, the first empty one focused */
+    vita_write32(list, 2); vita_write32(list + 16, 3);
+    vita_write32(list_param, list); vita_write32(list_param + 4, 2); vita_write32(list_param + 8, 2);
+    vita_write32(param + 0x50, 2); vita_write32(param + 0x54, 1); vita_write32(param + 0x5C, list_param);
+    vita_write32(param + 0x78, 0x1234u);
+    vita_hle_sceSaveDataDialogGetStatus();
+    assert(r0 == 0);                                            /* no dialog yet */
+    r0 = param; vita_hle_sceSaveDataDialogInit();
+    assert(r0 == 0);
+    r0 = param; vita_hle_sceSaveDataDialogInit();
+    assert((int32_t)r0 < 0);                                    /* one at a time */
+    vita_hle_sceSaveDataDialogGetStatus();    assert(r0 == 1);
+    vita_hle_sceSaveDataDialogGetSubStatus(); assert(r0 == 1);
+    vita_write32(result + 16, info);
+    r0 = result; vita_hle_sceSaveDataDialogGetResult();
+    assert((int32_t)r0 < 0);                                    /* not answered yet */
+    r0 = finish; vita_hle_sceSaveDataDialogFinish();
+    assert((int32_t)r0 < 0);
+
+    vita_clock_wait(600000);
+    vita_hle_sceSaveDataDialogGetSubStatus(); assert(r0 == 2);
+    vita_hle_sceSaveDataDialogGetStatus();    assert(r0 == 1);
+    r0 = result; vita_hle_sceSaveDataDialogGetResult();
+    assert(r0 == 0 && vita_read32(result) == 2 && vita_read32(result + 4) == 0);
+    assert(vita_read32(result + 12) == 3 && vita_read32(result + 20) == 0x1234u);
+    assert(vita_read32(result + 16) == info && vita_read32(info) == 0);     /* the slot chosen is empty */
+
+    /* "saving", which has no buttons: up until the title takes it down */
+    vita_write32(sys_param, 5); vita_write32(sys_param + 8, 3);
+    vita_write32(param + 0x50, 4); vita_write32(param + 0x54, 0); vita_write32(param + 0x64, sys_param);
+    r0 = param; vita_hle_sceSaveDataDialogContinue();
+    assert(r0 == 0);
+    vita_clock_wait(5000000);
+    vita_hle_sceSaveDataDialogGetSubStatus(); assert(r0 == 1);
+    vita_hle_sceSaveDataDialogSubClose();     assert(r0 == 0);
+    vita_hle_sceSaveDataDialogGetSubStatus(); assert(r0 == 2);
+
+    /* "saved", with an OK button: answered in its turn */
+    vita_write32(sys_param, 6);
+    r0 = param; vita_hle_sceSaveDataDialogContinue();
+    assert(r0 == 0);
+    vita_hle_sceSaveDataDialogGetSubStatus(); assert(r0 == 1);
+    vita_clock_wait(600000);
+    vita_hle_sceSaveDataDialogGetSubStatus(); assert(r0 == 2);
+    r0 = result; vita_hle_sceSaveDataDialogGetResult();
+    assert(r0 == 0 && vita_read32(result) == 4 && vita_read32(result + 8) == 1);
+
+    vita_hle_sceSaveDataDialogTerm();
+    assert((int32_t)r0 < 0);                                    /* not before it is finished */
+    r0 = finish; vita_hle_sceSaveDataDialogFinish();
+    assert(r0 == 0);
+    vita_hle_sceSaveDataDialogGetStatus();    assert(r0 == 2);
+    vita_hle_sceSaveDataDialogTerm();         assert(r0 == 0);
+    vita_hle_sceSaveDataDialogGetStatus();    assert(r0 == 0);
+
+    assert(vita_mem_bad_access == 0);
+    vita_mem_free();
+    printf("  save data slots and dialog     ok\n");
+}
+
 static void test_memory(void) {
     assert(vita_mem_init(0x81000000u, 64 * 1024) == 0);
     vita_mem_bad_access = 0;
@@ -1011,6 +1106,7 @@ int main(void) {
     test_time_slice();
     test_ngs();
     test_touch();
+    test_save_dialog();
     printf("all runtime tests passed\n");
     return 0;
 }

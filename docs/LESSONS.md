@@ -784,7 +784,7 @@ What found the fifth and sixth was not the picture, which was only
 scrambled, but the per-draw pixel counts beside it: 3,787 pixels in the
 pass that wrote the depth, 1,984 in the pass that tested against it.
 
-## Between the first pictures and the title screen (2026-10-11)
+## Between the first pictures and the menus (2026-10-11)
 
 1. **A failure the title cannot hear is a hang.** The title's first logo
    movie stopped it. The open was made to fail, with no handle, and the
@@ -841,3 +841,57 @@ pass that wrote the depth, 1,984 in the pass that tested against it.
    flags since. Four of the seven tables were of this shape. With traps
    set to continue the run had gone on regardless, which is why it was
    seen at all only as a count of one at the end.
+
+6. **The commonest vtable has two entries.** Leaving the main menu, the
+   title destroyed ten objects and each call missed: a destructor, called
+   through the first slot of its class's table, that nothing had emitted.
+   The table was two words long, the two destructors every class with a
+   virtual destructor has, and the first of them stores the table's
+   address and returns: four instructions, the first a MOVW. Discovery
+   wanted either a run of four pointers or a prologue at the target, and
+   this had neither. What it does have is the two words in front that
+   every vtable has, the offset to the top and the pointer to the type
+   information. Reading those found 193 such functions in the title;
+   treating the remaining lone pointers to prologue-less code as weak
+   evidence, emitted if their bodies translate cleanly, found most of 420
+   more. 613 stored pointers had led nowhere; 81 still do, to things that
+   do not read as functions.
+
+7. **A dialog that answers "cancelled" has not answered.** Starting a
+   campaign dimmed the screen and stopped there. The title had put up the
+   system's save data dialog, which a title neither draws nor sees: it
+   starts it, polls it, and is told what the player chose. The stub for
+   it said "finished" to every poll and "cancelled" to every result, and
+   wiped the result structure, where a title leaves a pointer for part
+   of the answer to be written through. The dialog is a machine
+   of two levels, a dialog running until the title ends it and inside it
+   one screen at a time, each running until answered or, where it has no
+   buttons, until the title takes it down; a title walks it screen by
+   screen, here a list of slots, "save?", "saving", "saved". It is now
+   that machine, with the answer a player pressing confirm would give,
+   and the title creates its slot, writes its file and goes on to load
+   its first level.
+
+8. **The smallest functions spell words.** Loading that level missed
+   three functions: `bx lr`, `ldr r0, [r0, #4]; bx lr`, and `movs r1, #70;
+   str r1, [r0]; bx lr`. Their addresses are built by MOVW/MOVT pairs, 51
+   of them for the first alone, and discovery had seen every pair and
+   refused each: the bytes at the target were printable, and a pointer
+   into printable bytes had been taken for a pointer into a string.
+   `bx lr` is "pG". An accessor between two accessors is eight printable
+   bytes and no prologue. What tells it from a string is that it
+   returns: text decoded as Thumb is loads and stores without end. 130
+   more functions in the title, and 32 in VitaShell that the same test
+   had refused through its relocations.
+
+9. **The census said which draws, and the tool said which instruction.**
+   In the level 25 draws of every frame were counted as "without a
+   program". Eighteen vertex programs had four instructions each that
+   the decoder did not know: the 32-bit integer multiply-add, two
+   sixteen-bit halves multiplied and a word added. They are the
+   skinning programs, and the instruction is how a bone's number becomes
+   the address of its matrix in a buffer of 96 of them: `IMAD2 pa4.x
+   pa4.x 48 sa37.x`, then a load of 48 bytes through the result. The
+   programs the title registers at boot never skin anything, so the
+   count of "every instruction decoded" had been true of 193 programs
+   and said nothing of the 61 more a level brings.

@@ -29,7 +29,6 @@ static void zero(uint32_t addr, uint32_t size) {
     for (uint32_t k = size & ~3u; k < size; k++) vita_write8(addr + k, 0);
 }
 
-static uint32_t arg(int n) { return vita_read32(sp + 4u * (uint32_t)(n - 4)); }
 
 /* --- touch, motion, camera -------------------------------------------------------- */
 
@@ -113,7 +112,6 @@ static uint32_t handle(void) {
 
 /* --- application services ------------------------------------------------------------- */
 
-#define SCE_APPUTIL_ERROR_SAVEDATA_SLOT_NOT_FOUND 0x80100641u
 #define SCE_APPMGR_ERROR_NO_EVENT                 0x80802004u
 
 /* int sceAppUtilSystemParamGetInt(unsigned int paramId, int *value): English, cross is enter */
@@ -126,24 +124,14 @@ void vita_hle_sceAppUtilSystemParamGetInt(void) {
 }
 void vita_hle_sceAppUtilSystemParamGetString(void) { if (vita_mem_ptr(r1, 2)) vita_write16(r1, 0); r0 = 0; }
 
-/* Save data slots: none exist yet, creating one succeeds, saving succeeds. */
-void vita_hle_sceAppUtilSaveDataSlotCreate(void)   { vita_hle_trace("sceAppUtilSaveDataSlotCreate(%u)", r0); r0 = 0; }
-void vita_hle_sceAppUtilSaveDataSlotDelete(void)   { r0 = 0; }
-void vita_hle_sceAppUtilSaveDataSlotSetParam(void) { r0 = 0; }
-void vita_hle_sceAppUtilSaveDataSlotGetParam(void) { vita_hle_trace("sceAppUtilSaveDataSlotGetParam(%u): none", r0); r0 = SCE_APPUTIL_ERROR_SAVEDATA_SLOT_NOT_FOUND; }
-void vita_hle_sceAppUtilSaveDataDataSave(void)     { if (vita_mem_ptr(arg(4), 4)) vita_write32(arg(4), 0); r0 = 0; }
-void vita_hle_sceAppUtilSaveDataDataRemove(void)   { r0 = 0; }
-void vita_hle_sceAppUtilSaveDataGetQuota(void)     { if (vita_mem_ptr(r0, 4)) vita_write32(r0, 1024 * 1024); if (vita_mem_ptr(r1, 4)) vita_write32(r1, 0); r0 = 0; }
-void vita_hle_sceAppUtilSaveDataMount(void)        { r0 = 0; }
-void vita_hle_sceAppUtilSaveDataUmount(void)       { r0 = 0; }
-
 /* SceAppMgr: no system events are pending; the app is running in the foreground. */
 void vita_hle_sceAppMgrReceiveSystemEvent(void) { r0 = SCE_APPMGR_ERROR_NO_EVENT; }
 void vita_hle__sceAppMgrGetAppState(void)       { zero(r0, r1); r0 = 0; }
 void vita_hle_sceAppMgrAcquireBgmPort(void)     { r0 = 0; }
 void vita_hle_sceAppMgrReleaseBgmPort(void)     { r0 = 0; }
 
-/* The common dialogs: every one finishes at once as cancelled. */
+/* The common dialogs: every one finishes at once as cancelled, but the one
+ * about save data, which a title cannot get past that way (hle_savedata.c). */
 #define SCE_COMMON_DIALOG_STATUS_FINISHED 2
 #define SCE_COMMON_DIALOG_RESULT_USER_CANCELED 1
 void vita_hle_sceCommonDialogSetConfigParam(void) { r0 = 0; }
@@ -159,15 +147,6 @@ void vita_hle_sceImeDialogGetStatus(void) { r0 = SCE_COMMON_DIALOG_STATUS_FINISH
 void vita_hle_sceImeDialogGetResult(void) { zero(r0, 16); if (vita_mem_ptr(r0, 16)) vita_write32(r0 + 4, SCE_COMMON_DIALOG_RESULT_USER_CANCELED); r0 = 0; }
 void vita_hle_sceImeDialogTerm(void)      { r0 = 0; }
 void vita_hle_sceImeDialogAbort(void)     { r0 = 0; }
-void vita_hle_sceSaveDataDialogInit(void)      { r0 = 0; }
-void vita_hle_sceSaveDataDialogGetStatus(void) { r0 = SCE_COMMON_DIALOG_STATUS_FINISHED; }
-void vita_hle_sceSaveDataDialogGetSubStatus(void) { r0 = SCE_COMMON_DIALOG_STATUS_FINISHED; }
-void vita_hle_sceSaveDataDialogGetResult(void) { zero(r0, 0x40); if (vita_mem_ptr(r0, 0x40)) vita_write32(r0 + 4, SCE_COMMON_DIALOG_RESULT_USER_CANCELED); r0 = 0; }
-void vita_hle_sceSaveDataDialogContinue(void)  { r0 = 0; }
-void vita_hle_sceSaveDataDialogFinish(void)    { r0 = 0; }
-void vita_hle_sceSaveDataDialogSubClose(void)  { r0 = 0; }
-void vita_hle_sceSaveDataDialogTerm(void)      { r0 = 0; }
-void vita_hle_sceSaveDataDialogAbort(void)     { r0 = 0; }
 void vita_hle_sceNetCheckDialogInit(void)      { r0 = 0; }
 void vita_hle_sceNetCheckDialogGetStatus(void) { r0 = SCE_COMMON_DIALOG_STATUS_FINISHED; }
 void vita_hle_sceNetCheckDialogGetResult(void) { zero(r0, 16); if (vita_mem_ptr(r0, 16)) vita_write32(r0 + 4, SCE_COMMON_DIALOG_RESULT_USER_CANCELED); r0 = 0; }

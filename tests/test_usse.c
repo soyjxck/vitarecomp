@@ -92,6 +92,14 @@ static usse_insn insn(uint64_t w, int secondary, const char *text) {
 
 static void run1(const usse_insn *in) { assert(usse_run(in, 1, &st) == 0); }
 
+/* An instruction decoded, with no opinion on how it prints. */
+static usse_insn decoded(uint64_t w) {
+    usse_insn in;
+    assert(usse_decode(w, 0, &in));
+    assert(usse_can_run(&in));
+    return in;
+}
+
 /* --- moves ------------------------------------------------------------------------------ */
 
 static void test_moves(void) {
@@ -308,6 +316,31 @@ static void test_integers(void) {
     run1(&mad); run1(&via);
     assert(st.index[0] == 11);
     assert(bitsf(st.temp[0]) == 3.0f && bitsf(st.temp[1]) == 4.0f);
+
+    /* a bone's number into the address of its matrix: pa7.x = pa4.x (as a
+     * short) * 48 + sa37.x (a whole word), the instruction as a title's
+     * skinning programs have it, and with the upper half of pa4 for the number */
+    usse_insn bone = decoded(0xA8820886B0811825ull);
+    assert(bone.op == USSE_OP_IMAD32 && bone.dest.bank == USSE_PA && bone.src0.bank == USSE_PA);
+    fresh();
+    st.pa[bone.src0.num] = 0x00070003u;
+    {
+        uint32_t before = 0x40000000u;
+        int32_t times = bone.src1.bank == USSE_IMMEDIATE ? (int32_t)bone.src1.num : 0;
+        if (bone.src2.bank == USSE_SA) sa[bone.src2.num] = before; else if (bone.src2.bank == USSE_PA) st.pa[bone.src2.num] = before;
+        assert(times != 0);
+        run1(&bone);
+        assert(st.pa[bone.dest.num] == before + 3u * (uint32_t)times);
+    }
+    usse_insn upper = decoded(word(USSE_F_I32MAD, U_I32MAD_IS_SIGNED, 1, U_I32MAD_SRC0_HIGH, 1, U_I32MAD_SRC2_TYPE, 2,
+                                U_I32MAD_DEST_BANK, D_PA, U_I32MAD_DEST_N, 9, U_I32MAD_SRC0_BANK, S0_PA, U_I32MAD_SRC0_N, 4,
+                                U_I32MAD_SRC1_BANK, S_IMMEDIATE, U_I32MAD_SRC1_BANK_EXT, 1, U_I32MAD_SRC1_N, 48,
+                                U_I32MAD_SRC2_BANK, S_PA, U_I32MAD_SRC2_N, 6, -1));
+    fresh();
+    st.pa[4] = 0xFFFE0003u;                     /* the upper half is -2 */
+    st.pa[6] = 1000u;
+    run1(&upper);
+    assert(st.pa[9] == 1000u - 96u);
 
     /* a 32-bit literal */
     usse_insn imm = insn(word(USSE_F_LIMM, U_LIMM_DEST_BANK, D_PA, U_LIMM_DEST_NUM, 3, U_LIMM_IMM_VALUE_FIRST_21BITS, 0x12345,

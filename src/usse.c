@@ -511,6 +511,28 @@ static int decode_i16mad(uint64_t word, int sec, usse_insn *in) {
     return 1;
 }
 
+/* Two sixteen-bit halves multiplied and a third operand added, in thirty-two
+ * bits: how a vertex program turns a bone's number into the address of its
+ * matrix. Each of the three may be the upper half of its register; the
+ * third may be a whole word. */
+static int decode_i32mad(uint64_t word, int sec, usse_insn *in) {
+    in->op = USSE_OP_IMAD32;
+    in->pred = SHORT_PRED[F(I32MAD, PRED)];
+    in->dest = dest_operand(F(I32MAD, DEST_N), F(I32MAD, DEST_BANK), F(I32MAD, DEST_BANK_EXT), 0, 7, sec);
+    in->src0 = src0_operand(F(I32MAD, SRC0_N), F(I32MAD, SRC0_BANK), 0, 0, 7, sec);
+    in->src1 = src12_operand(F(I32MAD, SRC1_N), F(I32MAD, SRC1_BANK), F(I32MAD, SRC1_BANK_EXT), 0, 7, sec, 1);
+    in->src2 = src12_operand(F(I32MAD, SRC2_N), F(I32MAD, SRC2_BANK), F(I32MAD, SRC2_BANK_EXT), 0, 7, sec, 2);
+    in->a = (uint8_t)(F(I32MAD, SRC0_HIGH) | F(I32MAD, SRC1_HIGH) << 1 | F(I32MAD, SRC2_HIGH) << 2);
+    in->b = (uint8_t)F(I32MAD, SRC2_TYPE);
+    in->d = (uint8_t)(F(I32MAD, IS_SIGNED) | F(I32MAD, IS_SAT) << 1);
+    in->mask = in->src_mask = 1;
+    in->repeat = (uint8_t)F(I32MAD, REPEAT_COUNT);
+    in->repeat_mode = 3;
+    set_mult(in, 1, 1, 1, 1);
+    set_type(in, F(I32MAD, IS_SIGNED) ? USSE_S32 : USSE_U32);
+    return 1;
+}
+
 int usse_decode(uint64_t word, int secondary, usse_insn *in) {
     memset(in, 0, sizeof(*in));
     in->raw = word;
@@ -535,6 +557,7 @@ int usse_decode(uint64_t word, int secondary, usse_insn *in) {
     case USSE_F_VLDST:   return decode_vldst(word, secondary, in);
     case USSE_F_SMP:     return decode_smp(word, secondary, in);
     case USSE_F_I16MAD:  return decode_i16mad(word, secondary, in);
+    case USSE_F_I32MAD:  return decode_i32mad(word, secondary, in);
     case USSE_F_PHAS:    in->op = USSE_OP_PHAS; return 1;
     case USSE_F_NOP:     in->op = USSE_OP_NOP; return 1;
     case USSE_F_SPEC:
@@ -824,6 +847,15 @@ size_t usse_disassemble(const usse_insn *in, usse_state *s, char *out, size_t ca
             put_operand(&t, &in->src0, 1, 0); put(&t, " ");
             put_operand(&t, &in->src1, (in->a && (in->c & 1)) ? 2 : 1, 0); put(&t, "%s ", in->a ? "-8bits" : "");
             put_operand(&t, &in->src2, (in->b && (in->c & 2)) ? 2 : 1, 0); put(&t, "%s\n", in->b ? "-8bits" : "");
+        }
+        break;
+    case USSE_OP_IMAD32:
+        for (int r = 0; r <= in->repeat; r++) {
+            HEAD(); put(&t, "%sIMAD2 ", pred_text(in->pred));
+            put_operand(&t, &in->dest, 1, 0); put(&t, " ");
+            put_operand(&t, &in->src0, 1, 0); put(&t, " ");
+            put_operand(&t, &in->src1, 1, 0); put(&t, " ");
+            put_operand(&t, &in->src2, 1, 0); put(&t, "\n");
         }
         break;
     case USSE_OP_SMLSI: {
@@ -1506,6 +1538,23 @@ static int execute(usse_state *s, const usse_insn *in) {
             usse_operand dest = in->dest;
             value out = one_integer(((uint32_t)a * (uint32_t)b + (uint32_t)c) & 0xFFFFu, V_SINT);
             dest.type = base;
+            store(s, &dest, &out, 1, repeat_offset(s, in, &in->dest, r));
+        }
+        return 1;
+    }
+
+    case USSE_OP_IMAD32: {
+        /* src0 times src1, sixteen bits each, plus src2, in thirty-two */
+        int is_signed = in->d & 1;
+        uint8_t half = is_signed ? USSE_S16 : USSE_U16, whole = is_signed ? USSE_S32 : USSE_U32;
+        for (int r = 0; r <= in->repeat; r++) {
+            int32_t a = integer_element(s, &in->src0, half, in->a & 1, repeat_offset(s, in, &in->src0, r));
+            int32_t b = integer_element(s, &in->src1, half, (in->a >> 1) & 1, repeat_offset(s, in, &in->src1, r));
+            int32_t c = in->b == 2 ? integer_element(s, &in->src2, whole, 0, repeat_offset(s, in, &in->src2, r))
+                                   : integer_element(s, &in->src2, half, (in->a >> 2) & 1, repeat_offset(s, in, &in->src2, r));
+            usse_operand dest = in->dest;
+            value out = one_integer((uint32_t)a * (uint32_t)b + (uint32_t)c, is_signed ? V_SINT : V_UINT);
+            dest.type = whole;
             store(s, &dest, &out, 1, repeat_offset(s, in, &in->dest, r));
         }
         return 1;

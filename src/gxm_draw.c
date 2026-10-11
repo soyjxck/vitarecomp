@@ -14,8 +14,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 gxm_draw_counters gxm_counters;
+
+/* --- where the time went -------------------------------------------------------------
+ * VITARECOMP_GXM_PROFILE=<n>: every n frames, a line on stderr saying what
+ * a frame of them cost, by stage. The first four are the drawing thread's
+ * own time, one after another; the rest are summed over every thread that
+ * shaded, so on sixteen threads they add up to many times the fill they
+ * are part of. Clocks are read once a batch of pixels, not once a pixel,
+ * and not at all when this is off. */
+enum { T_BEGIN, T_VERTICES, T_SETUP, T_FILL, T_MAIN };                  /* the drawing thread */
+enum { T_INPUTS, T_SAMPLES, T_PROGRAM, T_STORE, T_BAND, T_WORKER };     /* each shading thread */
+static uint32_t g_profile;
+static uint64_t g_main_ns[T_MAIN];
+
+static uint64_t now_ns(void) {
+    struct timespec t;
+    timespec_get(&t, TIME_UTC);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
 
 static float bits_to_float(uint32_t u) { float f; memcpy(&f, &u, sizeof(f)); return f; }
 static uint32_t float_to_bits(float f) { uint32_t u; memcpy(&u, &f, sizeof(u)); return u; }
@@ -111,7 +130,12 @@ static unpacked *g_unpacked;
 static uint32_t g_unpacked_count, g_unpacked_cap, g_frame = 1;
 static size_t g_unpacked_bytes;
 
-void gxm_draw_frame(void) { g_frame++; }
+static void profile_report(void);
+
+void gxm_draw_frame(void) {
+    g_frame++;
+    if (g_profile && (g_frame - 1) % g_profile == 0) profile_report();
+}
 
 static uint64_t stamp(const gxm_tex *t) {
     uint32_t n = t->bytes < t->avail ? t->bytes : t->avail;
@@ -328,6 +352,8 @@ typedef struct {
     gxm_draw_counters counters;
     uint32_t pixels;
     struct batch *b;                        /* the pixels waiting for the program, when they go in rows */
+    uint64_t ns[T_WORKER];                  /* for the profile */
+    uint64_t in_rows, alone;                /* program runs: pixels that went in rows, and one at a time */
 } worker;
 
 static const uint8_t ATTRIBUTE_BYTES[11] = { 1, 1, 2, 2, 1, 1, 2, 2, 2, 4, 4 };
@@ -549,6 +575,7 @@ static void run_fragment(worker *wk, int x, int y, float depth, const float *var
     }
     if ((p->flags & GXP_FLAG_FRAGCOLOR) && d->s->has_colour) preload(d->s, p, x, y, st->out);
     run(&wk->f, p->primary, p->primary_count);
+    wk->alone++;
 }
 
 static float blend_factor(unsigned f, int alpha, int c, const float s[4], const float dst[4]) {
@@ -783,6 +810,8 @@ static void flush(worker *wk) {
     usse_wide *w = &b->w;
     float scratch[USSE_LANES], v[4], dx[4], dy[4], rgba[4];
     uint32_t reg[4];
+    uint64_t lap = g_profile ? now_ns() : 0, at;
+#define LAP(stage) do { if (g_profile) { at = now_ns(); wk->ns[stage] += at - lap; lap = at; } } while (0)
 
     for (uint32_t i = 0; i < p->input_count; i++) {
         const gxp_input *in = &p->inputs[i];
@@ -794,6 +823,7 @@ static void flush(worker *wk) {
                 else if (in->type == USSE_F16) vita_floats_to_halves(from, row[k >> 1], (int)(k & 1), n);
                 else for (unsigned l = 0; l < n; l++) pack(&row[k >> 2][l], GXP_U8, k & 3, roundf(unit_clamp(from[l]) * 255.0f));
             }
+            LAP(T_INPUTS);
         }
         if (in->has_texture && in->texture_reg < USSE_WORDS - 4) {
             uint32_t (*row)[USSE_LANES] = &w->pa[in->texture_reg];
@@ -805,6 +835,7 @@ static void flush(worker *wk) {
                 store_sample(in, t, rgba, got, reg);
                 for (int k = 0; k < 4; k++) row[k][l] = reg[k];
             }
+            LAP(T_SAMPLES);
         }
     }
     if ((p->flags & GXP_FLAG_FRAGCOLOR) && s->has_colour) {
@@ -818,7 +849,10 @@ static void flush(worker *wk) {
     w->sa = wk->f.sa;
     w->env = &wk->f.env;
     w->lanes = n;
+    LAP(T_INPUTS);
     usse_run_wide(p->primary, p->primary_count, w);
+    LAP(T_PROGRAM);
+    wk->in_rows += n;
 
     uint32_t (*result)[USSE_LANES] = (p->flags & GXP_FLAG_NATIVECOLOR) ? w->out : w->pa;
     for (unsigned l = 0; l < n; l++) {
@@ -832,6 +866,8 @@ static void flush(worker *wk) {
         for (int k = 0; k < 4; k++) reg[k] = result[k][l];
         write_colour(wk, x, y, reg);
     }
+    LAP(T_STORE);
+#undef LAP
     b->n = 0;
 }
 
@@ -893,6 +929,29 @@ static uint32_t g_pieces_cap, g_piece_count;
 static size_t g_planes_cap;
 
 static worker *g_workers;
+
+static void profile_report(void) {
+    uint64_t ns[T_WORKER] = { 0 }, in_rows = 0, alone = 0;
+    for (unsigned w = 0; g_workers && w < vita_pool_size(); w++) {
+        worker *wk = &g_workers[w];
+        for (int k = 0; k < T_WORKER; k++) ns[k] += wk->ns[k];
+        in_rows += wk->in_rows;
+        alone += wk->alone;
+        memset(wk->ns, 0, sizeof(wk->ns));
+        wk->in_rows = wk->alone = 0;
+    }
+    double per = 1e-6 / (double)g_profile;              /* nanoseconds over the frames, to milliseconds a frame */
+    uint64_t batched = ns[T_INPUTS] + ns[T_SAMPLES] + ns[T_PROGRAM] + ns[T_STORE];
+    fprintf(stderr, "gxm time, ms a frame over %u frames to %u: begin %.1f, vertices %.1f, triangles %.1f, fill %.1f; "
+                    "in the fill, over %u threads: inputs %.1f, samples %.1f, programs %.1f, tests and store %.1f, "
+                    "the walk and pixels shaded alone %.1f; %.0f pixels a frame in rows, %.0f alone\n",
+            g_profile, g_frame - 1, (double)g_main_ns[T_BEGIN] * per, (double)g_main_ns[T_VERTICES] * per,
+            (double)g_main_ns[T_SETUP] * per, (double)g_main_ns[T_FILL] * per, vita_pool_size(),
+            (double)ns[T_INPUTS] * per, (double)ns[T_SAMPLES] * per, (double)ns[T_PROGRAM] * per, (double)ns[T_STORE] * per,
+            (double)(ns[T_BAND] > batched ? ns[T_BAND] - batched : 0) * per,
+            (double)in_rows / (double)g_profile, (double)alone / (double)g_profile);
+    memset(g_main_ns, 0, sizeof(g_main_ns));
+}
 
 static int reserve(uint32_t vertices, uint32_t range) {
     if (vertices > g_vertices_cap) {
@@ -979,6 +1038,7 @@ static void fill_band(void *ctx, unsigned band, unsigned index) {
     int row0 = job->first_row + (int)band * job->rows, row1 = row0 + job->rows;
     size_t per = raster_plane_floats(job->r);
     if (row1 > job->last_row + 1) row1 = job->last_row + 1;
+    uint64_t began = g_profile ? now_ns() : 0;
     raster_shade shade = shade_pixel;
     if (job->d->wide) {
         if (!wk->b) wk->b = calloc(1, sizeof(*wk->b));
@@ -991,6 +1051,7 @@ static void fill_band(void *ctx, unsigned band, unsigned index) {
         if (job->d->each) flush(wk);
     }
     flush(wk);                              /* nothing waits beyond its band */
+    if (g_profile) wk->ns[T_BAND] += now_ns() - began;
 }
 
 uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, uint32_t indices,
@@ -1006,6 +1067,11 @@ uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, ui
     if (!index_data) return 0;
     if (!g_workers) g_workers = calloc(vita_pool_size(), sizeof(*g_workers));
     if (!g_workers) return 0;
+
+    static int asked;
+    if (!asked) { const char *e = getenv("VITARECOMP_GXM_PROFILE"); asked = 1; g_profile = e ? (uint32_t)strtoul(e, NULL, 0) : 0; }
+    uint64_t lap = g_profile ? now_ns() : 0, at;
+#define LAP(stage) do { if (g_profile) { at = now_ns(); g_main_ns[stage] += at - lap; lap = at; } } while (0)
 
     memset(&d.in, 0, sizeof(d.in));
     d.s = s;
@@ -1076,6 +1142,7 @@ uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, ui
     }
     uint32_t range = high - low + 1, pixels = 0;
     if (range > 0x1000000u || !reserve(range < count ? range : count, range)) return 0;
+    LAP(T_BEGIN);
 
     for (uint32_t instance = 0; instance < instances; instance++) {
         uint32_t used = 0, tri[3];
@@ -1093,6 +1160,7 @@ uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, ui
         vertex_job shading = { &d, used, instance };
         if (used < 4 * VERTEX_RUN) for (unsigned n = 0; n * VERTEX_RUN < used; n++) shade_run(&shading, n, 0);
         else vita_pool_run((used + VERTEX_RUN - 1) / VERTEX_RUN, shade_run, &shading);
+        LAP(T_VERTICES);
         for (uint32_t i = 0; i < count; i++) {
             uint32_t v = index_size == 2 ? (uint32_t)(index_data[2 * i] | index_data[2 * i + 1] << 8)
                                          : (uint32_t)index_data[4 * i] | (uint32_t)index_data[4 * i + 1] << 8 |
@@ -1115,6 +1183,7 @@ uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, ui
                 if (i % 3 == 2) triangle(&r, &g_vertices[tri[0]], &g_vertices[tri[1]], &g_vertices[tri[2]]);
             }
         }
+        LAP(T_SETUP);
         if (!g_piece_count) continue;
 
         /* the rows the instance covers, and whether there is enough in them to share out */
@@ -1133,6 +1202,7 @@ uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, ui
         } else {
             vita_pool_run((unsigned)((rows + BAND_ROWS - 1) / BAND_ROWS), fill_band, &job);
         }
+        LAP(T_FILL);
         for (unsigned w = 0; w < vita_pool_size(); w++) {
             worker *wk = &g_workers[w];
             pixels += wk->pixels;
@@ -1143,6 +1213,7 @@ uint32_t gxm_draw(gxm_draw_state *s, unsigned primitive, unsigned index_size, ui
             memset(&wk->counters, 0, sizeof(wk->counters));
         }
     }
+#undef LAP
     gxm_counters.triangles += r.triangles_drawn;
     gxm_counters.pixels += pixels;
     return pixels;

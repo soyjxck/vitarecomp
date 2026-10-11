@@ -45,6 +45,7 @@ static void sq_push(seedq *q, uint32_t addr, arm_mode mode, uint16_t heur) {
 
 static int looks_like_text(uint16_t h);
 static int text_run(const vm_image *img, uint32_t t);
+static int returns_soon(const vm_image *img, uint32_t addr);
 
 /* VITARECOMP_WHY=<hex address> in the environment: discovery says on stderr
  * what it made of that one address, each time it meets it. A dispatch miss
@@ -264,8 +265,13 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                 if ((v & 1) && (v & ~1u) >= base && (v & ~1u) + 2 <= base + len) {
                     uint32_t t = v & ~1u;
                     uint16_t h = (uint16_t)(text[t - base] | ((uint16_t)text[t - base + 1] << 8));
-                    if (!text_run(img, t) && starts_like_code(img, t)) {
+                    if (text_run(img, t) && !returns_soon(img, t)) {
+                        why(t, "a MOVW/MOVT pair builds it; refused, it lies in text");
+                    } else if (!starts_like_code(img, t)) {
+                        why(t, "a MOVW/MOVT pair builds it; refused, what follows does not read as code");
+                    } else {
                         int strong = has_prologue(h);
+                        why(t, "a MOVW/MOVT pair builds it: seeded%s", strong ? "" : " weakly, no prologue");
                         sq_push(q, t, ARM_T32, strong ? VF_R_POINTER : VF_R_WEAK_PTR);
                         r->seeds_pointer++;
                         if (!strong) r->seeds_weak++;
@@ -443,12 +449,35 @@ static uint32_t shape_run_len(const vm_image *img, const uint8_t *scan,
     return n;
 }
 
+/* Whether the run of code pointers at `off` stands where a virtual table's
+ * functions do. The C++ ABI lays a table out as the offset to the top of
+ * the object, zero or a small negative number; a pointer to the class's
+ * type information, an aligned address inside the module; and then the
+ * functions. A class whose only virtual function is its destructor has two
+ * of them, and the first, a destructor with nothing to do but store the
+ * table's own address, begins with a MOVW: a run too short to be a table by
+ * its length, to a function with no prologue to be one by its looks. The
+ * two words in front are what says so. Each one missed is a dispatch miss
+ * the day an object of that class is destroyed. */
+static int vtable_head(const vm_image *img, const uint8_t *scan, uint32_t off) {
+    if (off < 8) return 0;
+    const uint8_t *p = scan + off - 8;
+    uint32_t top  = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    uint32_t type = (uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+    if (top != 0 && top < 0xFFFFF000u) return 0;
+    if (!type || (type & 3)) return 0;
+    if (type >= img->seg_vaddr && type - img->seg_vaddr < img->seg_len) return 1;
+    for (uint32_t i = 0; i < img->data_seg_count; i++)
+        if (type >= img->data_segs[i].vaddr && type - img->data_segs[i].vaddr < img->data_segs[i].len) return 1;
+    return 0;
+}
+
 /* Sweep one region for words that look like pointers INTO the executable
  * segment. The region being scanned and the region being pointed at are two
  * different things: candidates come from wherever the module stores pointers,
  * but a valid target is always code. */
 static uint32_t shape_scan_region(const vm_image *img, vf_result *r, seedq *q,
-                                  const uint8_t *scan, uint32_t scan_len) {
+                                  const uint8_t *scan, uint32_t scan_len, int enumerated) {
     const uint8_t *text = img->data + img->seg_file;
     const uint32_t base = img->seg_vaddr;
     const uint32_t len  = img->seg_len;
@@ -464,7 +493,7 @@ static uint32_t shape_scan_region(const vm_image *img, vf_result *r, seedq *q,
          * bounded and cheap. */
         if (run_left == 0) {
             uint32_t n = shape_run_len(img, scan, scan_len, off);
-            if (n >= SHAPE_RUN_MIN) run_left = n;
+            if (n >= SHAPE_RUN_MIN || (!enumerated && n && vtable_head(img, scan, off))) run_left = n;
         }
         int in_table = run_left > 0;
         if (run_left) run_left--;
@@ -489,8 +518,12 @@ static uint32_t shape_scan_region(const vm_image *img, vf_result *r, seedq *q,
                 why(t, "already decoded; the stored word makes it a root");
                 sq_push(q, t, ARM_T32, VF_R_SHAPE);
                 r->shape_known++;
+            } else if (!enumerated && !(text_run(img, t) && !returns_soon(img, t)) && starts_like_code(img, t)) {
+                why(t, "already decoded; a lone word to code with no prologue names it weakly");
+                sq_push(q, t, ARM_T32, VF_R_WEAK_PTR);
+                r->seeds_weak++;
             } else {
-                why(t, "already decoded, and a lone word to code with no prologue seeds nothing");
+                why(t, "already decoded, and the lone word that names it does not point at what reads as a function");
             }
             continue;
         }
@@ -524,8 +557,27 @@ static uint32_t shape_scan_region(const vm_image *img, vf_result *r, seedq *q,
                     || (h == 0xE92D)                     /* push.w / stmdb  */
                     || ((h & 0xFF80) == 0xB080);         /* sub sp, #imm    */
 
-        if (!prologue && !in_table) { why(t, "refused: no prologue, and the word is not in a table"); r->rejected_shape++; continue; }
         if (!starts_like_code(img, t)) { why(t, "refused: what follows does not read as code"); r->rejected_shape++; continue; }
+
+        /* Neither a prologue nor a table: one word in megabytes of data
+         * that happens to be odd and to land in .text, or a callback kept
+         * in a structure, to a leaf that saves nothing. Refusing them all
+         * left out real callbacks, and each was a dispatch miss when the
+         * title got as far as calling it. So it is treated as the same
+         * evidence is when a relocation or a MOVW/MOVT pair gives it:
+         * walked, and a root only if its body turns out to be clean.
+         *
+         * Not where relocations enumerate the module's pointers. There a
+         * word they do not name is not a pointer, and a module linked at
+         * zero is full of small odd numbers that land in its own .text. */
+        if (!prologue && !in_table) {
+            if (enumerated) { why(t, "refused: no prologue, and the word is not in a table"); r->rejected_shape++; continue; }
+            if (text_run(img, t) && !returns_soon(img, t)) { why(t, "refused: no prologue, no table, and it lies in text"); r->rejected_shape++; continue; }
+            why(t, "seeded weakly: a lone stored word, no prologue");
+            sq_push(q, t, ARM_T32, VF_R_WEAK_PTR);
+            r->seeds_weak++;
+            continue;
+        }
 
         sq_push(q, t, ARM_T32, VF_R_SHAPE);
         why(t, "seeded as a function by the stored word");
@@ -535,8 +587,11 @@ static uint32_t shape_scan_region(const vm_image *img, vf_result *r, seedq *q,
     return found;
 }
 
-static void shape_scan(const vm_image *img, vf_result *r, seedq *q) {
-    shape_scan_region(img, r, q, img->data + img->seg_file, img->seg_len);
+/* `enumerated`: the module has relocations, which name every pointer it
+ * stores; the readings of this scan that rest on one or two words are then
+ * left out, as more likely to be numbers than what the relocations missed. */
+static void shape_scan(const vm_image *img, vf_result *r, seedq *q, int enumerated) {
+    shape_scan_region(img, r, q, img->data + img->seg_file, img->seg_len, enumerated);
 
     /* The data segments, which is where a C++ module keeps the table of
      * static constructors. Nothing in .text points at them: the only reference
@@ -552,7 +607,7 @@ static void shape_scan(const vm_image *img, vf_result *r, seedq *q) {
         const vm_seg *s = &img->data_segs[i];
         if ((uint64_t)s->file + s->len > img->size) continue;
         r->seeds_shape_data +=
-            shape_scan_region(img, r, q, img->data + s->file, s->len);
+            shape_scan_region(img, r, q, img->data + s->file, s->len, enumerated);
     }
 }
 
@@ -604,6 +659,32 @@ static int text_run(const vm_image *img, uint32_t t) {
         if (c >= 0x20 && c < 0x7F) printable++;
     }
     return seen >= 6 && printable >= seen - 1;
+}
+
+/* Whether what is at `addr` returns within a few instructions, every one of
+ * them claimed and none a branch. The text test above has a blind side:
+ * the commonest instructions of the smallest functions are printable.
+ * `bx lr` is "pG", `ldr r0, [r0, #4]` is "@h", `movs r1, #70` is "F!", and
+ * an accessor that is two of those, between two more accessors, is eight
+ * printable bytes. A string read as Thumb is loads and stores for as long
+ * as it lasts, and does not come to a return unless it happens to hold
+ * "pG" on an even byte; so bytes that do return are a function, whatever
+ * they spell. */
+static int returns_soon(const vm_image *img, uint32_t addr) {
+    const uint8_t *text = img->data + img->seg_file;
+    const uint32_t base = img->seg_vaddr, len = img->seg_len;
+    uint32_t a = addr;
+    for (int k = 0; k < 6; k++) {
+        if (a < base || a + 2 > base + len) return 0;
+        arm_insn in;
+        int n = arm_decode(text, base, len, a, ARM_T32, &in);
+        if (n == 0 || in.cls == A_UNKNOWN || in.cls == A_UNDEF) return 0;
+        if (in.cls == A_RETURN) return !in.conditional;
+        if (in.cls == A_BRANCH || in.cls == A_CALL || in.cls == A_INDIRECT) return 0;
+        if (in.op == OP_NONE && in.cls != A_NOP) return 0;
+        a += (uint32_t)n;
+    }
+    return 0;
 }
 
 /* A relocated word holding a Thumb-tagged address into .text. */
@@ -665,7 +746,7 @@ static void reloc_seeds(const vm_image *img, const vr_table *relocs,
                     || (h == 0xE92D)                     /* push.w / stmdb  */
                     || ((h & 0xFF80) == 0xB080);         /* sub sp, #imm    */
         int tabled = in_table && in_table[i];
-        if (!prologue && !tabled && looks_like_text(h)) { r->rejected_reloc++; continue; }
+        if (!prologue && !tabled && looks_like_text(h) && !returns_soon(img, t)) { r->rejected_reloc++; continue; }
         if (!starts_like_code(img, t)) { r->rejected_reloc++; continue; }
 
         /* Neither a prologue nor a table around it: as likely a record at an
@@ -817,7 +898,7 @@ int vf_discover(const vm_image *img, const vm_module *mod,
     /* 5. Shape recovery, after everything principled has been exhausted, so it
      *    only ever adds what the reliable seeds could not reach. */
     before = q.n;
-    shape_scan(img, out, &q);
+    shape_scan(img, out, &q, relocs && relocs->n);
     head = before;
     while (head < q.n) {
         seed s = q.v[head++];

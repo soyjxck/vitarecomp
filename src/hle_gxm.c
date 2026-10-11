@@ -1188,6 +1188,24 @@ static int draw_logged(void) {
     return frame && g_frames + 1 == frame;
 }
 
+/* VITARECOMP_GXM_SKIP=<first>-<last>: the draws of those frames are counted
+ * and not drawn. A title that shows one costly scene for a fixed time, a
+ * warning say, spends that time here on every run of a bring-up; this is
+ * for getting past it. What the frames left out would have put in any
+ * surface is not there afterwards, so the last of them should be some way
+ * before the screen that matters. */
+static int draw_skipped(void) {
+    static int asked;
+    static uint32_t first, last;
+    if (!asked) {
+        const char *e = getenv("VITARECOMP_GXM_SKIP");
+        asked = 1;
+        if (e && sscanf(e, "%u-%u", &first, &last) != 2) first = last = 0;
+        if (first) vita_hle_trace("gxm: frames %u to %u are not drawn (VITARECOMP_GXM_SKIP)", first, last);
+    }
+    return first && g_frames + 1 >= first && g_frames + 1 <= last;
+}
+
 /* VITARECOMP_GXM_SCENES=<directory>, with VITARECOMP_GXM_FRAME: what each scene
  * of that frame left in its colour surface, as an image, numbered in the
  * order the scenes ended. A frame is a dozen passes into as many surfaces,
@@ -1377,6 +1395,7 @@ void vita_hle_sceGxmFinish(void) { }
 /* --- draws ------------------------------------------------------------------------------ */
 
 static void draw(gxm_draw_state *s, uint32_t primitive, uint32_t index_format, uint32_t indices, uint32_t count, uint32_t instances) {
+    if (draw_skipped()) { g_frame.draws++; return; }
     uint32_t triangles = gxm_counters.triangles;
     struct timespec t0, t1;
     timespec_get(&t0, TIME_UTC);

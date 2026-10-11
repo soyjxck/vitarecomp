@@ -169,10 +169,26 @@ None of that is here, and the runtime says so in the one place the player
 asks first, the loading of the system module (docs/HLE.md, "Movies"); the
 player fails to start, the front end's script is told the movie is over,
 and the title screen follows. A touch on it (`--touch 480,335@1500-1512`,
-or the mouse on the window) brings the main menu. So what comes next is
-twofold: the way in from the menu, which is a new game and its first
-level; and the movie itself, which wants SceMp4's demultiplexer and the
-H.264 and AAC decoders behind `sceAvcdec` and `sceAudiodec`.
+or the mouse on the window) brings the main menu, and three more touches
+start a campaign: New Game, the chapter's picture, Yes. The title then
+saves through the system's dialog (docs/HLE.md), and loads and starts its
+first level:
+
+| Stage | A frame is |
+|---|---|
+| New Game: chapter and difficulty | 1 scene, 17 draws |
+| "Start New Campaign?" | 1 scene, 28 draws |
+| Loading `igc_snake_temple_room_start` | the loading screen again, 7 scenes |
+| The level | 13 scenes, 120 draws (94 precomputed), 6,100 triangles, 5.7 million pixels, 140 ms |
+
+The level's picture is black. What it needs first is the ARM instruction
+set: the title carries some 8,500 instructions of hand-written ARM-mode
+NEON, vertex and matrix work by the look of it, called from Thumb code
+through `blx`, and discovery refuses ARM targets that are not import
+stubs, so every call is a trap (300,000 of them in the level's first
+seven seconds). After that, whatever the picture then shows; and the
+movie, which wants SceMp4's demultiplexer and the H.264 and AAC decoders
+behind `sceAvcdec` and `sceAudiodec`.
 
 1. Accept FAGDec-decrypted `eboot.bin` and `*.suprx` (plain SCE ELF, the
    Vita3K input format) in `armrecomp info/extract`, in addition to fself.
@@ -295,11 +311,11 @@ stays game-agnostic.
   the middle of another.
 - VitaShell's output has grown again: measured 2026-10-11 it is 9,780
   functions and 13.6 M emitted instructions for 802,000 reached, where
-  *Golden Abyss* emits 2.37 M and stays in proportion. Code that several
-  functions run into is written into each; on a module with 23,000
-  tail-call targets that is most of the output. To find: which of the
-  discovery changes since made it worse, and whether shared tails can be
-  emitted once and called.
+  *Golden Abyss* emits 2.43 M of which 2.37 M are distinct. Code that
+  several functions run into is written into each; in GCC's output, where
+  a call in tail position is a plain branch, that is most of the output.
+  To find: which of the discovery changes since made it worse, and whether
+  a branch to another function's start can always be a call.
 
 - CI on Windows and Linux: build, `ctest`, and the smoke run on the VitaShell
   fixture.

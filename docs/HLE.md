@@ -100,6 +100,30 @@ touches the back. The host's side of it is two functions
 (ARCHITECTURE.md, "The contract"), scripted on the command line or read
 from a window.
 
+## Save data, and the system's dialog about it
+
+`src/hle_savedata.c`. A title's saves are slots, each a record of what the
+system's screens show about it, and beside the records the title's own
+files. The files go under whatever the host mounted as `savedata0`
+(`--mount savedata0=DIR`), where the title reads them back as ordinary
+files; a slot's record is one more file there. With no such mount a run
+keeps its slots in memory and its files nowhere.
+
+The dialog is the system's screen for saving and loading, and a title does
+not draw it or see it: it starts it, polls it, and is told what the player
+chose. It is a machine of two levels. The dialog runs from its start until
+the title finishes it; inside that, one screen at a time is up, each
+running until the player answers it or, where it has no buttons
+("saving..."), until the title takes it down. The title reads the result
+of each screen and puts up the next or ends the dialog. A stub that says
+"finished, cancelled" to everything gets a title nowhere: it had asked a
+question and is told nobody answered.
+
+There is no screen here yet and nobody to ask, so a screen that wants an
+answer gets the affirmative one, OK or Yes or the slot the list had
+focused, after half a second of the title's time. That is a policy, and
+the place a host that draws dialogs would replace.
+
 ## SceGxm: what it took
 
 The section after this one is upstream's estimate, kept because it was

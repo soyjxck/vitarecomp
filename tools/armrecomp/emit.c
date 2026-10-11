@@ -1938,6 +1938,15 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
         const char *e = getenv("VITARECOMP_EMIT_SPLIT");
         if (e && *e) split = (uint32_t)strtoul(e, NULL, 10);
     }
+    /* And instructions per part, because functions are not of a size: of a
+     * title's thirteen parts of 2,000 functions the largest was five times
+     * the median, and a build waits for its slowest file. A part is closed
+     * at whichever limit it meets first. */
+    uint32_t split_insns = 120000;
+    {
+        const char *e = getenv("VITARECOMP_EMIT_SPLIT_INSNS");
+        if (e && *e) split_insns = (uint32_t)strtoul(e, NULL, 10);
+    }
     char base[256];
     base_name(base, sizeof(base), outpath);
 
@@ -1999,15 +2008,15 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
     FILE *part = NULL;
     FILE *out  = f;
     st->parts = 0;
+    uint32_t in_part = 0, insns_in_part = 0;
     for (uint32_t li = 0; li < n_funcs; li++) {
         const vf_func *fn = &disc->funcs[list[li]];
-        if (split && li % split == 0) {
+        if (split && (li == 0 || in_part >= split || (split_insns && insns_in_part >= split_insns))) {
             if (part) fclose(part);
             part = open_part(outpath, st->parts, base);
             if (part) { st->parts++; out = part; }
             else      { out = f; }
-            uint32_t here = n_funcs - li < split ? n_funcs - li : split;
-            if (here > st->part_funcs) st->part_funcs = here;
+            in_part = insns_in_part = 0;
         }
         FILE *pf = out;
         fbody b;
@@ -2054,6 +2063,9 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
         }
         fprintf(pf, "}\n\n");
         st->funcs++;
+        in_part++;
+        insns_in_part += b.n;
+        if (split && in_part > st->part_funcs) st->part_funcs = in_part;
 
         free(b.v);
         free(b.labels);

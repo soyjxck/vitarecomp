@@ -44,6 +44,21 @@ target_compile_options(test_decode PRIVATE -UNDEBUG)
 
 add_test(NAME decode COMMAND test_decode)
 
+add_executable(test_discover
+    test_discover.c
+    ${CMAKE_SOURCE_DIR}/tools/armrecomp/analyze.c
+    ${CMAKE_SOURCE_DIR}/tools/armrecomp/decode.c
+    ${CMAKE_SOURCE_DIR}/tools/armrecomp/module.c
+)
+
+target_include_directories(test_discover PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/armrecomp
+)
+
+target_compile_options(test_discover PRIVATE -UNDEBUG)
+
+add_test(NAME discover COMMAND test_discover)
+
 add_executable(test_reloc
     test_reloc.c
     ${CMAKE_SOURCE_DIR}/tools/armrecomp/reloc.c
