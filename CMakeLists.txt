@@ -43,6 +43,7 @@ endif()
 add_library(vitashader STATIC
     src/usse.c
     src/gxp.c
+    src/gxp_hlsl.c
     src/half_rows.c
 )
 target_include_directories(vitashader PUBLIC

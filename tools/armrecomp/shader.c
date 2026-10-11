@@ -9,6 +9,7 @@
  */
 
 #include "gxp.h"
+#include "gxp_hlsl.h"
 #include "usse.h"
 
 #include <stdint.h>
@@ -125,6 +126,59 @@ static void tables(const gxp_program *p) {
         printf("\nresult: %s%u in %s0%s\n", TYPE[p->result_type > 9 ? 9 : p->result_type], p->result_components,
                (p->flags & GXP_FLAG_NATIVECOLOR) ? "o" : "pa", (p->flags & GXP_FLAG_FRAGCOLOR) ? ", after reading the pixel from o0" : "");
     }
+}
+
+/* The program as the HLSL the toolkit writes for it (src/gxp_hlsl.h), for
+ * what would most often be bound: every texture it names a texture of four
+ * bytes, every interpolated quantity carried, the colour as four floats.
+ * `raw` words of the result leave as they are when it is not 0. */
+int cmd_hlsl(const char *path, int raw) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "armrecomp: cannot read %s\n", path); return 1; }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *d = size > 0 ? malloc((size_t)size) : NULL;
+    if (!d || fread(d, 1, (size_t)size, f) != (size_t)size) { fclose(f); free(d); return 1; }
+    fclose(f);
+
+    gxp_program p;
+    int err = gxp_parse(&p, d, (uint32_t)size);
+    if (err) {
+        fprintf(stderr, "armrecomp: %s is not a GXP program this tool can read (%d)\n", path, err);
+        gxp_free(&p);
+        free(d);
+        return 1;
+    }
+    gxp_hlsl_bind bind;
+    char why[200];
+    memset(&bind, 0, sizeof(bind));
+    for (unsigned unit = 0; unit < GXP_TEXTURE_UNITS; unit++)
+        if ((p.textures_used >> unit) & 1) {
+            const uint8_t *param = gxp_find_param(&p, GXP_SAMPLER, unit);
+            bind.tex_components[unit] = 4;
+            bind.tex_type[unit] = USSE_U8;
+            bind.tex_cube[unit] = param && (param[7] >> 4) != 0;
+        }
+    if (p.flags & GXP_FLAG_FRAGMENT) {
+        bind.slots = p.slots_used & ((1u << GXP_SLOT_POSITION) - 1);
+        bind.result_words = (uint8_t)(raw < 0 ? 0 : raw > 4 ? 4 : raw);
+        bind.now = bind.result_words ? 2 : 1;
+        bind.now_words = bind.result_words;
+    } else {
+        for (unsigned slot = 0; slot < GXP_SLOT_POSITION; slot++)
+            if (p.out_count[slot]) bind.slots |= 1u << slot;
+        bind.pa_words = (p.pa_count + 3u) & ~3u;
+        if (bind.pa_words > 64) bind.pa_words = 64;
+    }
+    char *text = gxp_hlsl(&p, &bind, why, sizeof(why));
+    if (!text) fprintf(stderr, "armrecomp: %s is not translated: it has %s\n", path, why);
+    else fputs(text, stdout);
+    int ok = text != NULL;
+    free(text);
+    gxp_free(&p);
+    free(d);
+    return ok ? 0 : 1;
 }
 
 int cmd_gxp(const char *path, int listing_only) {

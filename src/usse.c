@@ -1,6 +1,7 @@
 /* usse.c — the console's shader bytecode, decoded and run. See usse.h. */
 
 #include "usse.h"
+#include "usse_private.h"
 #include "usse_fields.h"
 #include "half_rows.h"
 #include "vitarecomp/half.h"
@@ -372,11 +373,8 @@ static int decode_vbw(uint64_t word, int sec, usse_insn *in) {
     return 1;
 }
 
-/* The operations a test can compute before comparing: by selector and code. */
-enum {
-    T_NONE = 0, T_ADD, T_FRC, T_RCP, T_RSQ, T_LOG, T_EXP, T_DOT, T_MIN, T_MAX, T_DSX, T_DSY, T_MUL, T_SUB,
-    T_AND, T_OR, T_XOR, T_SHL, T_SHR, T_ROL, T_ASR
-};
+/* The operations a test can compute before comparing, by selector and
+ * code, are named in usse_private.h. */
 
 static const uint8_t TEST_FLOAT_OPS[16] = { 0, 0, T_ADD, T_FRC, T_RCP, T_RSQ, T_LOG, T_EXP, T_DOT, T_MIN, T_MAX,
                                         T_DSX, T_DSY, T_MUL, T_SUB, 0 };
@@ -634,6 +632,13 @@ static void apply_smlsi(usse_state *s, const usse_insn *in) {
         }
     }
 }
+
+/* The same for a translator of the bytecode (usse_private.h). */
+int32_t usse_repeat_offset(const usse_state *s, const usse_insn *in, const usse_operand *op, int r) {
+    return repeat_offset(s, in, op, r);
+}
+
+void usse_apply_smlsi(usse_state *s, const usse_insn *in) { apply_smlsi(s, in); }
 
 /* --- text ------------------------------------------------------------------------- */
 
@@ -916,6 +921,8 @@ static const uint32_t CONSTANTS[64][2] = {
     { 0xFFFFFFFF, 0x00000000 }, { 0xFFFFFFFF, 0x00000000 }, { 0xFFFFFFFF, 0x00000000 }, { 0xFFFFFFFF, 0x00000000 },
     { 0x7FFF7FFF, 0x00000000 }, { 0x7FFF7FFF, 0x00000000 }, { 0x7FFF7FFF, 0x00000000 }, { 0x7FFF7FFF, 0x00000000 },
 };
+
+const uint32_t *usse_constant_words(unsigned n) { return CONSTANTS[n & 63]; }
 
 /* --- values ------------------------------------------------------------------------
  * What a load gives and a store takes: up to four components, all floats,
