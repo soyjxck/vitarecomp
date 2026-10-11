@@ -1,0 +1,158 @@
+/* test_pixfmt.c — pixel layouts, on pixels written here byte by byte. */
+
+#include "../src/pixfmt.h"
+
+#include <assert.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+#ifdef NDEBUG
+#error "the tests check with assert(): build them without NDEBUG"
+#endif
+
+static int near(float a, float b) { return fabsf(a - b) < 1.0f / 512.0f; }
+
+static void test_bytes(void) {
+    pixfmt f;
+    float c[4];
+    /* four bytes, named from the top down: ABGR is red first in memory */
+    static const uint8_t px[4] = { 0x00, 0x33, 0x66, 0xFF };
+    assert(pixfmt_texture(0x0C000000u, &f) && f.bytes == 4 && f.components == 4);
+    pixfmt_decode(&f, px, c);
+    assert(c[0] == 0.0f && near(c[1], 0.2f) && near(c[2], 0.4f) && c[3] == 1.0f);
+    assert(pixfmt_texture(0x0C001000u, &f));                    /* ARGB: blue first */
+    pixfmt_decode(&f, px, c);
+    assert(near(c[0], 0.4f) && near(c[1], 0.2f) && c[2] == 0.0f && c[3] == 1.0f);
+    assert(pixfmt_texture(0x0C002000u, &f));                    /* RGBA: alpha first */
+    pixfmt_decode(&f, px, c);
+    assert(c[0] == 1.0f && near(c[1], 0.4f) && near(c[2], 0.2f) && c[3] == 0.0f);
+    assert(pixfmt_texture(0x0C004000u, &f));                    /* 1BGR: the alpha byte is ignored */
+    pixfmt_decode(&f, px, c);
+    assert(c[0] == 0.0f && c[3] == 1.0f);
+
+    /* one byte, as luminance, as alpha, as red alone */
+    static const uint8_t one[1] = { 0x80 };
+    assert(pixfmt_texture(0x00005000u, &f) && f.bytes == 1);    /* 1RRR */
+    pixfmt_decode(&f, one, c);
+    assert(near(c[0], 0.502f) && c[0] == c[1] && c[1] == c[2] && c[3] == 1.0f);
+    assert(pixfmt_texture(0x00006000u, &f));                    /* R000 */
+    pixfmt_decode(&f, one, c);
+    assert(c[0] == 0.0f && near(c[3], 0.502f));
+    assert(pixfmt_texture(0x00000000u, &f) && f.components == 1);
+    pixfmt_decode(&f, one, c);
+    assert(near(c[0], 0.502f) && c[1] == 0.0f && c[3] == 1.0f);
+
+    /* signed bytes: nothing below minus one */
+    static const uint8_t sgn[4] = { 0x7F, 0x81, 0x80, 0x00 };
+    assert(pixfmt_texture(0x0D000000u, &f));
+    pixfmt_decode(&f, sgn, c);
+    assert(c[0] == 1.0f && c[1] == -1.0f && c[2] == -1.0f && c[3] == 0.0f);
+    printf("  bytes and their orders         ok\n");
+}
+
+static void test_packed(void) {
+    pixfmt f;
+    float c[4];
+    /* five, six and five bits with red on top */
+    static const uint8_t rgb565[2] = { 0x1F, 0xF8 };            /* 0xF81F: red and blue full, green none */
+    assert(pixfmt_texture(0x05001000u, &f) && f.bytes == 2);
+    pixfmt_decode(&f, rgb565, c);
+    assert(c[0] == 1.0f && c[1] == 0.0f && c[2] == 1.0f && c[3] == 1.0f);
+    /* four fours as ARGB: blue in the low nibble */
+    static const uint8_t argb4[2] = { 0x0F, 0xF0 };             /* 0xF00F */
+    assert(pixfmt_texture(0x02001000u, &f));
+    pixfmt_decode(&f, argb4, c);
+    assert(c[0] == 0.0f && c[1] == 0.0f && c[2] == 1.0f && c[3] == 1.0f);
+    /* 24 bits of depth under 8 of stencil */
+    static const uint8_t depth[4] = { 0xFF, 0xFF, 0xFF, 0x5A };
+    assert(pixfmt_texture(0x15000000u, &f) && f.components == 1);
+    pixfmt_decode(&f, depth, c);
+    assert(c[0] == 1.0f && c[3] == 1.0f);
+    printf("  packed fields                  ok\n");
+}
+
+static void test_floats(void) {
+    pixfmt f;
+    float c[4], in[4] = { 0.5f, 2.0f, 1000.0f, 1.0f };
+    uint8_t px[8];
+    /* four halves: exact for these */
+    memset(px, 0, sizeof(px));
+    assert(pixfmt_texture(0x1B000000u, &f) && f.bytes == 8);
+    pixfmt_encode(&f, px, in, 15);
+    pixfmt_decode(&f, px, c);
+    assert(c[0] == 0.5f && c[1] == 2.0f && c[2] == 1000.0f && c[3] == 1.0f);
+
+    /* three small unsigned floats and two bits: brighter than one survives, below zero does not */
+    float hdr[4] = { 0.25f, 6.0f, -3.0f, 1.0f };
+    memset(px, 0, sizeof(px));
+    assert(pixfmt_texture(0x9A000000u, &f) && f.bytes == 4);
+    pixfmt_encode(&f, px, hdr, 15);
+    pixfmt_decode(&f, px, c);
+    assert(c[0] == 0.25f && c[1] == 6.0f && c[2] == 0.0f && c[3] == 1.0f);
+    /* five bits of mantissa: the nearest value, within a thirty-second */
+    hdr[0] = 0.7f;
+    pixfmt_encode(&f, px, hdr, 1);
+    pixfmt_decode(&f, px, c);
+    assert(fabsf(c[0] - 0.7f) < 0.7f / 32.0f && c[1] == 6.0f);
+
+    /* a shared exponent: the largest channel sets it */
+    float shared[4] = { 1.0f, 0.5f, 100.0f, 1.0f };
+    assert(pixfmt_texture(0x19000000u, &f));
+    pixfmt_encode(&f, px, shared, 15);
+    pixfmt_decode(&f, px, c);
+    assert(fabsf(c[2] - 100.0f) < 0.5f && fabsf(c[0] - 1.0f) < 0.5f && fabsf(c[1] - 0.5f) < 0.5f);
+
+    /* whole words are not numbers to convert: every bit comes back */
+    uint32_t words[2] = { 0x7FC12345u, 0xFFFFFFFFu }, back[2];
+    assert(pixfmt_texture(0x1F000000u, &f) && f.raw && f.components == 2);
+    pixfmt_decode(&f, (const uint8_t *)words, c);
+    memcpy(back, c, 8);
+    assert(back[0] == words[0] && back[1] == words[1]);
+    printf("  floats, small floats, raw words ok\n");
+}
+
+static void test_colour(void) {
+    pixfmt f;
+    uint8_t px[8];
+    float c[4], in[4] = { 1.0f, 0.5f, 0.25f, 0.0f };
+    /* the display's own format: red in the first byte */
+    assert(pixfmt_colour(0x00000000u, &f) && f.bytes == 4);
+    memset(px, 0xAA, sizeof(px));
+    pixfmt_encode(&f, px, in, 15);
+    assert(px[0] == 0xFF && px[1] == 0x80 && px[2] == 0x40 && px[3] == 0x00);
+    /* a masked write leaves the other channels alone */
+    in[1] = 0.0f;
+    pixfmt_encode(&f, px, in, 2);
+    assert(px[0] == 0xFF && px[1] == 0x00 && px[2] == 0x40);
+    /* out of range is held */
+    float wild[4] = { 7.0f, -7.0f, 0.5f, 1.0f };
+    pixfmt_encode(&f, px, wild, 15);
+    assert(px[0] == 0xFF && px[1] == 0x00);
+    /* a single channel that is alpha */
+    assert(pixfmt_colour(0x80900000u, &f) && f.bytes == 1);
+    px[0] = 0x40;
+    pixfmt_decode(&f, px, c);
+    assert(c[0] == 0.0f && near(c[3], 0.251f));
+    /* and the texture that reads a colour format has the same bytes */
+    assert(pixfmt_colour_texture(0x00100000u) == 0x0C001000u);
+    assert(pixfmt_colour_texture(0x41000000u) == 0x9A000000u);
+    assert(!pixfmt_colour(0x70000000u, &f));
+
+    /* the display curve and its inverse */
+    for (int i = 0; i <= 255; i++) {
+        float v = (float)i / 255.0f, there = pix_srgb_to_linear(v), back = pix_linear_to_srgb(there);
+        assert(fabsf(back - v) < 1e-4f && there <= v + 1e-6f);
+    }
+    printf("  colour surfaces                ok\n");
+}
+
+int main(void) {
+    printf("pixfmt:\n");
+    test_bytes();
+    test_packed();
+    test_floats();
+    test_colour();
+    printf("all pixfmt tests passed\n");
+    return 0;
+}

@@ -128,9 +128,9 @@ What a retail title needs before its first frame, learned by running
   runtime's `type_info` and a named trap for `__cxa_throw`.
 - **Memory.** 416 MiB of guest memory, the console's main memory and CDRAM
   together: the title's first five blocks are 120 MiB.
-- **A null GPU.** `sceGxm` accepted in full and drawn nowhere: contexts,
-  the shader patcher, render targets, surfaces, textures, the display
-  queue calling the title back at once. Milestone D replaces its insides.
+- **A GPU.** First a null one, `sceGxm` accepted in full and drawn
+  nowhere, which is what let the frame loop be reached; now one that
+  draws (milestone D, below).
 - **Variable imports.** The C library's case tables, `_Ctype` and the
   standard streams, bound by the loader at every site that names them; the
   C++ runtime's vtables get zeroed pages until the runtime has them.
@@ -150,25 +150,23 @@ What a retail title needs before its first frame, learned by running
   pointer to a function already walked (docs/LESSONS.md).
 
 Where it stands: the title starts, loads its front end
-(`LOAD LEVEL( /frontend.bsp )`, `LEVEL START` in its own log) and runs its
-frame loop against the null GPU, a flip every second vertical blank. The
-null driver counts what each frame asks for and reports the count when it
-changes, and the counts are the front end's sequence:
+(`LOAD LEVEL( /frontend.bsp )`, `LEVEL START` in its own log) and draws
+it, a flip every second vertical blank. The graphics layer counts what
+each frame asks for and what became of it, and reports the count when
+its shape changes; the counts are the front end's sequence:
 
-| Stage | A frame asks for (indices: of its immediate draws) |
+| Stage | A frame is |
 |---|---|
-| Loading screen, while the front end loads | 7 scenes, 19 draws, 66 indices |
-| Front end | 8 scenes, 282 draws (255 of them precomputed), 1,290 indices |
-| The same, some seconds on | 8 scenes, 270 draws, 90 indices |
-| The opening movie's screen | 1 scene, 2 draws, 12 indices |
+| Loading screen, while the front end loads | 7 scenes, 19 draws, 1,200 triangles, 2 million pixels shaded |
+| The health warning | 8 scenes, 282 draws (255 of them precomputed), 45,000 triangles, 5 million pixels |
+| The first logo movie's screen | 1 scene, 2 draws |
 
-The stages begin at different frames from run to run with the same input,
-so the title times them by the clock and not by frames. It stays on the
-last one: the movie is opened through SceMp4, which is not implemented, and
-neither a failed open nor a button press moves it on. What comes next is
-therefore two things that are not there yet: the movie path (SceMp4's
-demuxer, the H.264 and AAC decoders behind `sceAvcdec` and `sceAudiodec`),
-and a `sceGxm` that draws, which is milestone D and needs neither.
+It stays on the last one. The title asks for `game/movies/bend_logo3.mp4`
+through SceMp4, which opens nothing yet (`src/hle_movie.c`), and the
+title's player does not report that failure onwards, so the front end
+waits for a movie that never ends. What comes next is therefore the
+movie path: SceMp4's demultiplexer, and the H.264 and AAC decoders
+behind `sceAvcdec` and `sceAudiodec`, at first decoding to nothing.
 
 1. Accept FAGDec-decrypted `eboot.bin` and `*.suprx` (plain SCE ELF, the
    Vita3K input format) in `armrecomp info/extract`, in addition to fself.
@@ -217,30 +215,50 @@ input for milestones B, D and E, not the next bring-up. The bundled
 `sce_module/libc.suprx` (relocatable, 42 imports) is Sony's own SceLibc,
 which a per-title host could load instead of writing that HLE.
 
-## Milestone D: `sceGxm` without a shader compiler
+## Milestone D: a `sceGxm` that draws — first pictures 2026-10-11
 
-Upstream measured 107 `SceGxm` imports of which about 85 are struct field
-writes. Order:
+Upstream planned a host graphics API with a fixed substitute shader per
+program, and a shader compiler after it. What was built instead is a
+software renderer that runs the title's shader programs as they are, by
+interpretation, so that the first picture is already the title's own:
 
-1. The shallow 92: state setters, texture accessors, render-target and
-   surface init, memory mapping, sync and display queue. Struct layouts come
-   from vita-headers (MIT).
-2. GXP reflection: parse the program container enough to answer
-   `sceGxmProgramFindParameterByName` and friends.
-3. The pipeline (`BeginScene`, `Draw`, `EndScene`, `MidSceneFlush`) on a host
-   API with a *fixed* substitute shader per program, so geometry and state
-   can be verified before any shader is translated.
+| Piece | File | What it is |
+|---|---|---|
+| State | `src/hle_gxm.c` | the library's functions: nearly all of them only record something, in structures laid out so the title can copy them and read them back |
+| Programs | `src/gxp.c` | the GXP container: where every input of a program arrives, where its outputs leave |
+| Bytecode | `src/usse.c`, `src/usse_fields.h` | the GPU's instruction set, decoded, printed and run |
+| Triangles | `src/raster.c` | clipping, the fill rule, perspective, derivatives |
+| Textures | `src/gxm_tex.c`, `src/texdec.c` | the control words, the layouts, the block formats, filtering |
+| Pixels | `src/pixfmt.c` | every texel and surface format, between bytes and colours |
+| A draw | `src/gxm_draw.c` | vertex fetch to stored pixel: the tests, the fragment program, the blend |
 
-Host API: see [DECISIONS.md](DECISIONS.md). The pipeline is written once
-against a small internal interface so the choice can change.
+How it was kept honest: the decoder's listing is compared line for line
+with the disassembly Vita3K logs for the same programs; each piece has a
+test built from values made in the test, with no title's data; and the
+three switches in ARCHITECTURE.md ("Seeing what was drawn") show a
+frame's draws, the textures they sampled and the programs they ran.
 
-## Milestone E: GXP shader translation
+Not there yet, in the order the title will want them:
 
-The compiler. The USSE instruction set of the SGX543MP4+ is documented only by
-Vita3K's translator (~300 KB of C++, years of work) and by the homebrew
-community's notes. Options are in [DECISIONS.md](DECISIONS.md); this is the
-decision that sets the project's licence and its timeline, so it is taken
-before milestone D's step 3 is finished, not after.
+1. PVRTC textures, both generations: the title's normal maps. They read
+   as one flat colour for now.
+2. Speed. One pixel at a time through an interpreter is a second a
+   frame. The bytecode is already decoded once per program; what is left
+   is to stop interpreting it per pixel (milestone E).
+3. Lines and points, depth bias, the mask-update program, multisampled
+   targets, the YUV textures a movie arrives in, the transfer calls.
+   Each is counted or named where it is skipped, none is silent.
+
+## Milestone E: the renderer at speed
+
+The interpreter is the definition; what runs every frame should be
+generated from it. Two routes, not exclusive: translate each program's
+bytecode to C once, the way the title's own code is translated, and
+shade tiles on several threads; or translate it to a host GPU's shading
+language and draw there (DECISIONS.md, 3). The first keeps the pipeline
+exactly as it is and needs no graphics API; the second is where real
+time at full resolution is. Either is checked against the interpreter,
+frame for frame.
 
 ## Milestone F: first title repo
 

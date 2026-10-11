@@ -3,7 +3,7 @@
 Open decisions, each with the options, the consequence, and a recommendation.
 Decided items move to the bottom with a date.
 
-## 1. Licence boundary with Vita3K (open)
+## 1. Licence boundary with Vita3K (decided 2026-10-11: A)
 
 Vita3K is GPLv2. Upstream chose MIT and treats the emulator as reference and
 oracle only. That holds as long as every line is written here; it breaks the
@@ -16,9 +16,14 @@ piece nobody wants to write twice.
 | **B. Whole repo GPLv2.** Vendor Vita3K's `shader/` (and possibly `gxm/`, `renderer/`) directly. | Shortest path to pixels. Every per-game repo and every recompiled game becomes GPLv2, which is fine for non-commercial preservation and rules out nothing the project wants. Loses upstream's "fork and keep your licence" property. |
 | **C. Split.** Toolkit and runtime core stay MIT; a separate GPLv2 component (own directory with its own `LICENSE`, or its own repo) holds Vita3K-derived graphics code behind a small C interface. A game host that links it is GPLv2; one that links a future MIT replacement is not. | Keeps the recompiler reusable, gets pixels early, makes the boundary explicit. Needs discipline: the GPL component may include nothing from the MIT side's generated code, only call it. |
 
-Recommendation: **C**, with the GPL component as a sibling repo
-(`psvitarecomp-gxm`) so the licence boundary is a repository boundary. Decide
-before milestone D step 3 in [PLAN.md](PLAN.md).
+The recommendation had been **C**. What was done is **A**, and by a
+shorter road than the table assumed: not a translator to SPIR-V but an
+interpreter of the bytecode (`src/usse.c`), written from what the
+instructions do and checked against the text of Vita3K's disassembly for
+the same programs. An interpreter needs no host shading language, no
+control-flow reconstruction and no graphics API, which is most of what
+made the translator the largest task in the project. The repository stays
+MIT throughout.
 
 ## 2. Retail inputs (decided 2026-10-10)
 
@@ -31,7 +36,10 @@ DECRYPT.md. The procedure (`tools/vita3k-decrypt.ps1`,
 `tools/import-vita3k.sh`) is in PLAN.md under milestone C, and the first
 title through it is *Uncharted: Golden Abyss*.
 
-## 3. Host graphics API (open)
+## 3. Host graphics API (open; not needed for a first picture)
+
+The first renderer is software and writes into the title's own surfaces,
+so it needs none. The question returns with speed (PLAN.md, milestone E).
 
 | Option | Notes |
 |---|---|

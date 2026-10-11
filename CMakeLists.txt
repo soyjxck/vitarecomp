@@ -57,12 +57,19 @@ add_library(vitarecomp STATIC
     src/hle_gxm.c
     src/hle_ngs.c
     src/hle_stubs.c
+    src/hle_movie.c
     src/hle_vars.c
     src/hle_scanf.c
     src/hle_rtc.c
     src/sched.c
     src/profile.c
     src/raster.c
+    src/texdec.c
+    src/usse.c
+    src/gxp.c
+    src/pixfmt.c
+    src/gxm_tex.c
+    src/gxm_draw.c
     src/symbols.c
 )
 

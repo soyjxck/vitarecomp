@@ -27,17 +27,21 @@ typedef struct {
 
 enum { RASTER_CULL_NONE = 0, RASTER_CULL_CW, RASTER_CULL_CCW };
 
+/* Which ends of the depth range triangles are cut at. */
+enum { RASTER_CLIP_FAR = 1, RASTER_CLIP_NEAR = 2 };
+
 /* Comparisons of the incoming depth against the stored one. */
 enum {
     RASTER_NEVER = 0, RASTER_LESS, RASTER_EQUAL, RASTER_LESS_EQUAL,
     RASTER_GREATER, RASTER_NOT_EQUAL, RASTER_GREATER_EQUAL, RASTER_ALWAYS
 };
 
-/* One pixel a triangle covers, after the depth test passed. `var` holds the
- * varyings at the pixel's centre; `ddx` and `ddy` their change per pixel
- * across and down, for choosing a mip level. Return 0 to discard the pixel:
- * its depth is then left as it was. */
-typedef int (*raster_shade)(void *user, int x, int y, float depth, int front,
+/* One pixel a triangle covers, after the depth test passed. `clockwise` says
+ * which way the triangle turns on the screen; `var` holds the varyings at
+ * the pixel's centre; `ddx` and `ddy` their change per pixel across and
+ * down, for choosing a mip level. Return 0 to discard the pixel: its depth
+ * is then left as it was. */
+typedef int (*raster_shade)(void *user, int x, int y, float depth, int clockwise,
                             const float *var, const float *ddx, const float *ddy);
 
 typedef struct {
@@ -50,7 +54,8 @@ typedef struct {
     float  x_offset, x_scale, y_offset, y_scale, z_offset, z_scale;
 
     int    cull;                            /* RASTER_CULL_*, by winding in window space */
-    int    clip_z;                          /* clip against 0 <= z <= w as well as against w */
+    int    clip_z;                          /* RASTER_CLIP_*: cut where depth leaves 0..1, as well as at w */
+    int    clamp_depth;                     /* what is not cut is held to 0..1 */
     int    depth_func;                      /* RASTER_* */
     int    depth_write;
     int    want_derivatives;                /* fill ddx and ddy */

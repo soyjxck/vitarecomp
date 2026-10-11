@@ -582,3 +582,27 @@ the trace is as silent while it computes as while it spins, and the samples
 tell the two apart in one period. And a dispatch miss names an address the
 output has no function for; the last row is how to ask why.
 
+### Seeing what was drawn
+
+A renderer that is wrong is wrong in a picture, and a picture does not say
+which of two hundred draws spoiled it. Four more ways of looking, for
+frames:
+
+| Tool | Switch | What it shows |
+|---|---|---|
+| The frame census | `VITARECOMP_TRACE=1` | at each flip whose shape differs from the last: scenes, draws, triangles, pixels, and what was not drawn and why (lines or points, a program that could not be run, a program run that stopped, a sample of a unit with nothing bound); each kind of scene once, with its target, formats and what its depth surface loads and stores |
+| One frame's draws | `VITARECOMP_GXM_FRAME=<n>` | every draw of frame n: its programs by name, its geometry, how many pixels came of it, the depth, stencil, cull, blend and viewport state |
+| Textures | `VITARECOMP_GXM_TEXTURES=<dir>` | each texture a draw samples, once, as an image, with its layout on stderr; a format not decoded yet as its bytes |
+| Programs | `VITARECOMP_GXP_DUMP=<dir>`, then `armrecomp gxp <file>` | the shader programs a title registers, and each one's tables and code as text |
+
+And the frames themselves: `vita_host --window` shows them as they are
+flipped, `--dump out.ppm@N` writes one, `--dump-dir DIR@N` one every N
+vertical blanks.
+
+The first scrambled picture went through all four in that order. The
+census said every program ran. The textures were right. The geometry
+buffer, dumped as the texture the light pass reads, was right. The draw
+list had the answer in one column: a pass drawn with the depth test
+"equal" kept half the pixels of the pass that had laid that depth down
+(LESSONS.md).
+

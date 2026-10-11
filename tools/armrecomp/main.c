@@ -39,6 +39,7 @@ static const char *USAGE =
     "  armrecomp relocs  <file.elf>      the relocation stream, decoded and classified\n"
     "  armrecomp discover <file.elf>     function discovery\n"
     "  armrecomp emit    <file.elf> <out.c> [n] [niddb]  translate to C\n"
+    "  armrecomp gxp     <file.gxp> [--listing]  a compiled shader: its tables and its code\n"
     "\n"
     "Accepts a SELF (eboot.bin, *.suprx) or a plain ELF/velf. A PFS-encrypted\n"
     "NoNpDrm dump is reported as such rather than parsed as garbage.\n";
@@ -74,6 +75,8 @@ static const char *flags_str(uint32_t f, char *tmp) {
     tmp[3] = '\0';
     return tmp;
 }
+
+int cmd_gxp(const char *path, int listing_only);      /* shader.c */
 
 static int cmd_info(const char *path) {
     size_t size = 0;
@@ -1004,6 +1007,9 @@ int main(int argc, char **argv) {
 
     if (strcmp(argv[1], "cover") == 0 && argc >= 3)
         return cmd_cover(argv[2]);
+
+    if (strcmp(argv[1], "gxp") == 0 && argc >= 3)
+        return cmd_gxp(argv[2], argc >= 4 && strcmp(argv[3], "--listing") == 0);
 
     fputs(USAGE, stderr);
     return 2;

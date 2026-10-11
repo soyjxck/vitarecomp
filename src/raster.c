@@ -16,11 +16,12 @@
 
 enum { P_W = 0, P_Z_NEAR, P_Z_FAR, P_LEFT, P_RIGHT, P_TOP, P_BOTTOM };
 
-static float distance(const raster_vertex *v, int plane) {
+/* The depth planes are where the viewport puts depth 0 and depth 1. */
+static float distance(const raster *r, const raster_vertex *v, int plane) {
     switch (plane) {
     case P_W:      return v->pos[3] - W_MIN;
-    case P_Z_NEAR: return v->pos[2];
-    case P_Z_FAR:  return v->pos[3] - v->pos[2];
+    case P_Z_NEAR: return r->z_offset * v->pos[3] + r->z_scale * v->pos[2];
+    case P_Z_FAR:  return (1.0f - r->z_offset) * v->pos[3] - r->z_scale * v->pos[2];
     case P_LEFT:   return v->pos[0] + GUARD * v->pos[3];
     case P_RIGHT:  return GUARD * v->pos[3] - v->pos[0];
     case P_TOP:    return v->pos[1] + GUARD * v->pos[3];
@@ -33,11 +34,11 @@ static void lerp(raster_vertex *out, const raster_vertex *a, const raster_vertex
     for (int i = 0; i < varyings; i++) out->var[i] = a->var[i] + (b->var[i] - a->var[i]) * t;
 }
 
-static int clip(const raster_vertex *in, int n, raster_vertex *out, int plane, int varyings) {
+static int clip(const raster *r, const raster_vertex *in, int n, raster_vertex *out, int plane, int varyings) {
     int m = 0;
     for (int i = 0; i < n && m < POLY_MAX - 1; i++) {
         const raster_vertex *a = &in[i], *b = &in[(i + 1) % n];
-        float da = distance(a, plane), db = distance(b, plane);
+        float da = distance(r, a, plane), db = distance(r, b, plane);
         if (da >= 0) out[m++] = *a;
         if ((da >= 0) != (db >= 0)) lerp(&out[m++], a, b, da / (da - db), varyings);
     }
@@ -150,6 +151,7 @@ static void fill(raster *r, const screen_vertex *a, const screen_vertex *b, cons
             float lb = (float)(w_ca + bias_ca) * inv_area;
             float lc = (float)(w_ab + bias_ab) * inv_area;
             float z = za + zb * lb + zc * lc;
+            if (r->clamp_depth) z = z < 0.0f ? 0.0f : z > 1.0f ? 1.0f : z;
             if (depth_row && !depth_passes(r->depth_func, z, depth_row[x])) continue;
             float q = qa + qb * lb + qc * lc;
             float w = 1.0f / q;
@@ -178,7 +180,8 @@ void raster_triangle(raster *r, const raster_vertex *a, const raster_vertex *b, 
      * when asked; against the guard band only if a vertex is beyond it. */
     int planes[7], np = 0;
     planes[np++] = P_W;
-    if (r->clip_z) { planes[np++] = P_Z_NEAR; planes[np++] = P_Z_FAR; }
+    if (r->clip_z & RASTER_CLIP_NEAR) planes[np++] = P_Z_NEAR;
+    if (r->clip_z & RASTER_CLIP_FAR) planes[np++] = P_Z_FAR;
     for (int i = 0; i < 3; i++) {
         const float *p = poly[0][i].pos;
         float lim = GUARD * (p[3] > 0 ? p[3] : -p[3]);
@@ -189,10 +192,10 @@ void raster_triangle(raster *r, const raster_vertex *a, const raster_vertex *b, 
     }
     for (int k = 0; k < np && n >= 3; k++) {
         int inside = 0;
-        for (int i = 0; i < n; i++) inside += distance(&poly[cur][i], planes[k]) >= 0;
+        for (int i = 0; i < n; i++) inside += distance(r, &poly[cur][i], planes[k]) >= 0;
         if (inside == n) continue;
         if (inside == 0) return;
-        n = clip(poly[cur], n, poly[cur ^ 1], planes[k], varyings);
+        n = clip(r, poly[cur], n, poly[cur ^ 1], planes[k], varyings);
         cur ^= 1;
     }
     if (n < 3) return;

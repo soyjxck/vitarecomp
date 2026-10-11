@@ -10,6 +10,7 @@
  *                          [--press BUTTON@FROM[-TO]]... [--window]
  *
  *   --frames N      stop after N vertical blanks (0: run until the program exits)
+ *   --dump-dir D[@N] write it into directory D every N vblanks (60 if not given)
  *   --dump P[@F]    write the framebuffer as a binary PPM at vblank F, or at
  *                   exit when no frame is given
  *   --press B@F-T   hold button B (START, CROSS, UP, ...) from vblank F to T
@@ -63,6 +64,8 @@ static struct {
     uint32_t    frames_max;
     const char *dump_path;
     uint32_t    dump_frame;      /* 0: at exit */
+    const char *dump_dir;        /* --dump-dir: a frame every so many vertical blanks */
+    uint32_t    dump_every;
     press       presses[16];
     int         press_count;
     uint32_t    frame;
@@ -173,6 +176,11 @@ void vita_host_vblank(void) {
     g.frame++;
     if (g.window) window_vblank();
     if (g.dump_path && g.frame == g.dump_frame) write_ppm(g.dump_path);
+    if (g.dump_dir && g.frame % g.dump_every == 0) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/vblank-%06u.ppm", g.dump_dir, g.frame);
+        write_ppm(path);
+    }
     if (g.frames_max && g.frame >= g.frames_max) {
         fprintf(stderr, "vita_host: frame limit %u reached\n", g.frames_max);
         finish(0);
@@ -195,7 +203,8 @@ void vita_host_exit(int status) {
 /* --- main ------------------------------------------------------------------- */
 
 static int usage(void) {
-    fputs("usage: vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--press BUTTON@FROM[-TO]]...\n"
+    fputs("usage: vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--dump-dir DIR[@EVERY]]\n"
+          "                 [--press BUTTON@FROM[-TO]]...\n"
           "                 [--syms module.sym] [--trace-fns] [--window]\n"
           "  --window       show each frame in a window at sixty a second; arrows, Z X A S for\n"
           "                 cross circle square triangle, Enter for START, Backspace for SELECT,\n"
@@ -221,6 +230,13 @@ int main(int argc, char **argv) {
             char *at = strrchr(spec, '@');
             if (at) { *at = '\0'; g.dump_frame = (uint32_t)strtoul(at + 1, NULL, 0); }
             g.dump_path = spec;
+        } else if (strcmp(argv[i], "--dump-dir") == 0 && i + 1 < argc) {
+            char *spec = argv[++i];
+            char *at = strrchr(spec, '@');
+            g.dump_every = 60;
+            if (at) { *at = '\0'; g.dump_every = (uint32_t)strtoul(at + 1, NULL, 0); }
+            if (!g.dump_every) g.dump_every = 1;
+            g.dump_dir = spec;
         } else if (strcmp(argv[i], "--press") == 0 && i + 1 < argc) {
             if (parse_press(argv[++i])) { fprintf(stderr, "vita_host: bad --press %s\n", argv[i]); return 2; }
         } else if (strcmp(argv[i], "--syms") == 0 && i + 1 < argc) {

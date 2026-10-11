@@ -65,6 +65,38 @@ The voice definitions' module chains and the parameter structures' sizes
 are the console's interface, taken from Vita3K's documentation of it
 (`vita3k/ngs`).
 
+## SceGxm: what it took
+
+The section after this one is upstream's estimate, kept because it was
+right about the shape: most of the library is bookkeeping and the work is
+in a few places. What it took, now that it draws:
+
+- **The bookkeeping has to be visible.** A title copies textures,
+  surfaces and precomputed draws by value and reads them back field by
+  field, so their state lives in the title's memory in layouts with the
+  SDK's sizes: the texture's four hardware control words, 0x30 bytes of
+  colour surface holding a texture over the same pixels, 0x14 bytes of
+  depth surface, the precomputed structures with their arrays in the
+  block the title supplies. Programs are read in place from the title's
+  GXP data. Only what a title cannot see is kept on the host side.
+- **A scene is finished when it ends.** The console renders a scene
+  after the call returns and signals the title through notification
+  words; here the scene is drawn as its draws arrive, into the colour
+  surface's own memory, so every notification is already true and the
+  display queue's callback runs at once.
+- **Depth lives beside the scene.** The console keeps depth, stencil and
+  the mask bit in tile memory, and touches the title's depth surface
+  only when asked to load or store. The title relies on that: it points
+  the display's depth surface at memory that is a colour buffer it is
+  still reading from.
+- **The shader path is an interpreter**, not a compiler: `src/usse.c`
+  runs a program's bytecode as it is, once per vertex and once per
+  pixel. It is slow and it is the definition (PLAN.md, milestones D and
+  E).
+
+`armrecomp gxp <file.gxp>` prints what the renderer makes of a program:
+its parameters, where each input arrives, and its code.
+
 ## SceGxm is 107 functions, and that number is misleading
 
 `SceGxm` is the largest single import — over a fifth of everything. But the
@@ -164,6 +196,9 @@ separate process and compared against. No code copied, linked, or vendored.
 5. **The pipeline.** `BeginScene`/`Draw`/`EndScene` against a host graphics API.
 6. **GXP shader translation.** The compiler. Last, because everything above can
    be built and tested against a stub that returns a fixed shader.
+
+(Steps 5 and 6 went another way: a software pipeline, and an interpreter
+in place of the compiler. See "SceGxm: what it took" above.)
 
 ## What a single-player bring-up does not need
 

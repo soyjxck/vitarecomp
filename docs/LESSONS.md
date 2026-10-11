@@ -732,3 +732,54 @@ a third reent. The disassembly shows it: `_impure_ptr` is read in `main`
 and in `_reclaim_reent` and written nowhere. The hour spent proving that
 the write never happened ended at the toolchain, not the translation; real
 homebrew logs through `sceClibPrintf`, and so does the sample.
+
+## What the first pictures found (2026-10-11)
+
+Writing a renderer under a title that already ran found faults in what had
+been written while nothing was drawn, and a few in the renderer's own first
+day.
+
+1. **Two header offsets nobody had read.** The null driver answered
+   "vertex or fragment?" from the word at 0x10 of a program and the size of
+   its default uniform buffer from 0x6C. They are at 0x14 and 0x64. The
+   title never acted on either answer while nothing was drawn. Parsing 200
+   real programs found both at once, because nothing else fitted.
+
+2. **Texture fields one bit out.** The mip count, the level bias and the
+   gamma mode were each stored a bit below their place in the control word.
+   Written and read back by the same code they agreed with themselves; the
+   first reader that was not that code was the sampler.
+
+3. **A flag that was not a bank bit.** The reference reads bit 50 of a
+   conditional move as part of the tested operand's register bank. Over the
+   title's programs that bit is set exactly where a phase of a program ends,
+   as the same bit is in every other instruction that has it; read the
+   reference's way, two programs test a register that holds a texture's
+   control word. The corpus was the evidence, not either reading.
+
+4. **A discard names the survivor.** `KILL p1` discards the pixel when p1
+   is false. Every use in the title follows a comparison whose truth means
+   "keep".
+
+5. **One is not 16,777,216.** The depth surface stores 24 bits. Depth 1.0
+   times 16,777,215, plus a half, is not a float: it rounds up, the store
+   wrote zero into the depth and one into the stencil above it, and the
+   whole background came back as the nearest thing there is.
+
+6. **An integer depth buffer compares integers.** The title lays depth
+   down in one scene, stores it, loads it in the next and draws the same
+   geometry with the test "equal". Kept as floats and rounded only on the
+   way to the surface, half the pixels no longer equalled themselves. The
+   depth is now rounded to the surface's precision before it is compared
+   or kept, the same way on every path.
+
+7. **A trap that returned its argument.** With traps set to continue, an
+   unimplemented import returns whatever was in r0. For the movie open
+   that is the path's address, and the title took it for a handle: the
+   "movie" opened, and what followed was the title waiting on a stream that
+   did not exist. The trace mode says of itself that what it reports past
+   the first trap is not to be believed; this was that, at length.
+
+What found the fifth and sixth was not the picture, which was only
+scrambled, but the per-draw pixel counts beside it: 3,787 pixels in the
+pass that wrote the depth, 1,984 in the pass that tested against it.

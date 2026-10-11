@@ -164,7 +164,7 @@ and functions are emitted in address order, so a prefix is not a sample.
       are present — indistinguishable from missing coverage
 - [x] **Traps name the firmware function**, not just its NID. A NID is a hash;
       "implement 0xBFE02B3A" is not a task anyone can start
-- [ ] The shallow ~92 of `SceGxm`: state setters, texture accessors, mapping
+- [x] The shallow ~92 of `SceGxm`: state setters, texture accessors, mapping
 - [x] **The link arrangement.** Import defaults are one file per import, built
       as a static library listed after the runtime. A linker pulls an archive
       member only for a symbol still undefined, so implementing an import is
@@ -179,8 +179,9 @@ and functions are emitted in address order, so a prefix is not a sample.
 - [ ] `SceLibc` remainder (44) and `SceLibm` (28), largely host-forwardable
 - [ ] **A real allocator.** The heap is a bump allocator; `free` is a no-op
 - [ ] `sceKernel` — threads, memory blocks, sync primitives
-- [ ] GXP reflection, then the scene pipeline
-- [ ] GXP shader translation — a compiler, and the largest single piece
+- [x] GXP reflection, then the scene pipeline: a software one, in `src/gxm_draw.c`
+- [x] GXP shader translation, as an interpreter of the bytecode rather than a
+      compiler (`src/usse.c`); a compiled path is what speed will need
 
 **Measured, not estimated:** `SceGxm` is 107 functions, but ~85 of them are
 struct field writes. The real work is ~15 functions, one of which is a shader
