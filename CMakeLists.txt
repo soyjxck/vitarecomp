@@ -62,6 +62,7 @@ add_library(vitarecomp STATIC
     src/hle_rtc.c
     src/sched.c
     src/profile.c
+    src/raster.c
     src/symbols.c
 )
 

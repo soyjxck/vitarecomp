@@ -26,6 +26,8 @@
 #include "vitarecomp/recomp_rt.h"
 #include "hle_sysmem.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define SCE_GXM_ERROR_INVALID_VALUE   0x805B0003u
@@ -420,9 +422,34 @@ void vita_hle_sceGxmShaderPatcherCreate(void) {
 }
 void vita_hle_sceGxmShaderPatcherDestroy(void) { r0 = 0; }
 
+/* VITARECOMP_GXP_DUMP=<directory>: each program a title registers is written
+ * there once, named by a hash of its bytes, so the shaders a title actually
+ * uses can be read, disassembled and given to another translator to compare. */
+static void dump_program(uint32_t header) {
+    static const char *dir;
+    static int asked;
+    if (!asked) { asked = 1; dir = getenv("VITARECOMP_GXP_DUMP"); }
+    if (!dir || !*dir || !vita_mem_ptr(header, 0x80) || vita_read32(header) != 0x00505847u) return;
+    uint32_t size = vita_read32(header + 8);
+    const uint8_t *bytes = size >= 0x80 && size < 0x100000 ? vita_mem_ptr(header, size) : NULL;
+    if (!bytes) return;
+    uint64_t h = 1469598103934665603ull;
+    for (uint32_t i = 0; i < size; i++) h = (h ^ bytes[i]) * 1099511628211ull;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s_%016llx.gxp", dir, (vita_read32(header + 0x10) & 1) ? "f" : "v",
+             (unsigned long long)h);
+    FILE *f = fopen(path, "rb");
+    if (f) { fclose(f); return; }
+    f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(bytes, 1, size, f);
+    fclose(f);
+}
+
 /* int sceGxmShaderPatcherRegisterProgram(patcher, const SceGxmProgram *programHeader, SceGxmShaderPatcherId *programId) */
 void vita_hle_sceGxmShaderPatcherRegisterProgram(void) {
     if (!vita_mem_ptr(r2, 4)) { r0 = SCE_GXM_ERROR_INVALID_POINTER; return; }
+    dump_program(r1);
     vita_write32(r2, r1);
     r0 = 0;
 }

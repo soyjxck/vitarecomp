@@ -19,12 +19,23 @@ file(GLOB VITARECOMP_IMPORT_DEFAULTS "${VITARECOMP_RECOMP_DIR}/recomp_funcs_impo
 # parallel. A module small enough for one part has just the one.
 file(GLOB VITARECOMP_RECOMP_PARTS "${VITARECOMP_RECOMP_DIR}/recomp_funcs_[0-9][0-9][0-9].c")
 
+# The window is the platform's own: GDI on Windows, none elsewhere yet.
+if(WIN32)
+    set(VITARECOMP_HOST_WINDOW window_win32.c)
+else()
+    set(VITARECOMP_HOST_WINDOW window_none.c)
+endif()
+
 add_executable(vita_host
     main.c
+    ${VITARECOMP_HOST_WINDOW}
     "${VITARECOMP_RECOMP_DIR}/recomp_funcs.c"
     ${VITARECOMP_RECOMP_PARTS}
 )
 target_link_libraries(vita_host PRIVATE vitarecomp)
+if(WIN32)
+    target_link_libraries(vita_host PRIVATE user32 gdi32)
+endif()
 
 if(VITARECOMP_IMPORT_DEFAULTS)
     add_library(recomp_imports STATIC ${VITARECOMP_IMPORT_DEFAULTS})

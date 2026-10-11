@@ -1,12 +1,13 @@
 /* vita_host — load a module, bind its recompiled functions, run module_start.
  *
- * Headless. Input is scripted on the command line and frames go to files, so
- * the same binary proves a module runs on a developer's machine and in CI,
- * with nothing to click. A windowed host is the same program with the three
- * host.h functions pointed at a window; see docs/PLAN.md.
+ * Headless by default. Input is scripted on the command line and frames go
+ * to files, so the same binary proves a module runs on a developer's machine
+ * and in CI, with nothing to click. With --window it also shows each frame
+ * as it is displayed, paced to sixty a second, and adds the keyboard to the
+ * scripted buttons (window.h).
  *
  *   vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]]
- *                          [--press BUTTON@FROM[-TO]]...
+ *                          [--press BUTTON@FROM[-TO]]... [--window]
  *
  *   --frames N      stop after N vertical blanks (0: run until the program exits)
  *   --dump P[@F]    write the framebuffer as a binary PPM at vblank F, or at
@@ -24,6 +25,7 @@
 #include "vitarecomp/loader.h"
 #include "vitarecomp/mem.h"
 #include "vitarecomp/recomp_rt.h"
+#include "window.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,6 +66,8 @@ static struct {
     press       presses[16];
     int         press_count;
     uint32_t    frame;
+    int         window;          /* --window: show frames and read the keyboard */
+    uint32_t    shown_flips;     /* at the last title update */
 } g;
 
 static const struct { const char *name; uint32_t bit; } BUTTONS[] = {
@@ -141,8 +145,33 @@ static void finish(int status) {
     exit(status);
 }
 
+/* The window's turn at a vertical blank: the frame the program is showing,
+ * a title that says how fast it is flipping, and the wait for the next
+ * sixtieth of a second. Closing the window ends the run. */
+static void window_vblank(void) {
+    vita_framebuf fb;
+    if (vita_display_current(&fb)) {
+        const uint8_t *px = (const uint8_t *)vita_mem_ptr(fb.base, fb.pitch * fb.height * 4);
+        if (px) vita_window_present(px, (int)fb.width, (int)fb.height, (int)fb.pitch);
+    }
+    if (g.frame % 60 == 0) {
+        char title[160];
+        uint32_t flips = vita_display_flips();
+        snprintf(title, sizeof(title), "vita_host | %s | %u flips a second | vblank %u",
+                 g.elf, flips - g.shown_flips, g.frame);
+        g.shown_flips = flips;
+        vita_window_title(title);
+    }
+    vita_window_pace();
+    if (vita_window_closed()) {
+        fprintf(stderr, "vita_host: window closed at vblank %u\n", g.frame);
+        finish(0);
+    }
+}
+
 void vita_host_vblank(void) {
     g.frame++;
+    if (g.window) window_vblank();
     if (g.dump_path && g.frame == g.dump_frame) write_ppm(g.dump_path);
     if (g.frames_max && g.frame >= g.frames_max) {
         fprintf(stderr, "vita_host: frame limit %u reached\n", g.frames_max);
@@ -154,6 +183,7 @@ uint32_t vita_host_buttons(void) {
     uint32_t m = 0;
     for (int i = 0; i < g.press_count; i++)
         if (g.frame >= g.presses[i].from && g.frame < g.presses[i].to) m |= g.presses[i].mask;
+    if (g.window) m |= vita_window_buttons();
     return m;
 }
 
@@ -166,7 +196,10 @@ void vita_host_exit(int status) {
 
 static int usage(void) {
     fputs("usage: vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--press BUTTON@FROM[-TO]]...\n"
-          "                 [--syms module.sym] [--trace-fns]\n"
+          "                 [--syms module.sym] [--trace-fns] [--window]\n"
+          "  --window       show each frame in a window at sixty a second; arrows, Z X A S for\n"
+          "                 cross circle square triangle, Enter for START, Backspace for SELECT,\n"
+          "                 Q W for the triggers\n"
           "  --mount P=DIR  where the guest mount P (app0, ux0, ...) lives on the host\n"
           "  --syms F       names from an `nm -n` listing, for traces\n"
           "  --trace-fns    log every function entry (VITARECOMP_TRACE=1 logs traps and bad accesses;\n"
@@ -201,6 +234,8 @@ int main(int argc, char **argv) {
             vita_io_mount(spec, eq + 1);
         } else if (strcmp(argv[i], "--trace-fns") == 0) {
             vita_trace_fns = 1;
+        } else if (strcmp(argv[i], "--window") == 0) {
+            g.window = 1;
         } else if (strcmp(argv[i], "--trace-insns") == 0 && i + 1 < argc) {
             unsigned lo, hi;
             if (sscanf(argv[++i], "%x-%x", &lo, &hi) != 2) { fprintf(stderr, "vita_host: bad --trace-insns window\n"); return 2; }
@@ -210,6 +245,11 @@ int main(int argc, char **argv) {
         } else {
             return usage();
         }
+    }
+
+    if (g.window && vita_window_open("vita_host", 960, 544)) {
+        fprintf(stderr, "vita_host: this build has no window; running headless\n");
+        g.window = 0;
     }
 
     vita_load_info info;
