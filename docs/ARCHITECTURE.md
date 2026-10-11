@@ -746,7 +746,13 @@ with how many pixels a triangle covered, how many went through a program
 in rows and how many one at a time; and on a second line what drawing cost
 by the size of the surface drawn to, with how many lists of draws and how
 many draws went to each, which says whether a frame's time is in its
-picture or in the small passes around it. `VITARECOMP_GXM_SKIP=<first>-<last>`
+picture or in the small passes around it; and after that the fragment
+programs the fill's time went to, the dearest first, each by the name a
+dump of it has (`VITARECOMP_GXP_DUMP`, `armrecomp gxp`), with the pixels
+it shaded, the pixels its triangles covered, and what a shaded pixel
+cost. A program that covers a third of a million pixels to shade one
+shows there, and so does the one whose four samples are a seventh of the
+frame. `VITARECOMP_GXM_SKIP=<first>-<last>`
 counts the draws of those frames and draws none of them, which takes a
 title past a screen it holds for a fixed time, a health warning over a
 costly scene, in seconds. What those frames would have left in any

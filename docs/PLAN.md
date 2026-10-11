@@ -368,6 +368,24 @@ no graphics API; the second is where real time at full resolution is.
 Either is checked against the interpreter, frame for frame, as the rows
 were (`VITARECOMP_GXM_SCALAR=1` is the interpreter one pixel at a time).
 
+What the first route has left, measured on a frame of play (2026-10-11,
+74 ms, of which the fill is 52 on twenty-four threads): the title draws
+fifteen screens' worth of pixels a frame, 4.3 million, at 270 ns of a
+thread each. No part of that stands out. By function the bilinear read
+of a texel is 14 % of the threads' work, the triangle walk 10 %, and
+everything else is pieces of 2 to 5 %: the conversions to and from
+halves, the loads and stores of rows, the tests. By program, two
+materials of four samples each and the ambient pass take 37 % between
+them, at 380 to 470 ns a pixel, and they are what they look like, long
+programs over every pixel. Two guesses were measured and dropped: the
+sampler's floors and blends done without a call and four channels at a
+time changed nothing, and the logarithm that chooses a level of detail
+is 1.2 %. Translating the programs to C would take the decoding and the
+row traffic out of a third of the work, a sampler rewritten for several
+samples at a time some of another third: together perhaps a frame and a
+half where there is one. Thirty frames a second is not on that route.
+It is on the second.
+
 ## Milestone F: first title repo
 
 A per-game repo consuming this one as a submodule, as upstream intended:

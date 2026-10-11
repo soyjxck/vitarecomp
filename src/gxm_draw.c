@@ -34,6 +34,24 @@ static uint64_t g_main_ns[T_MAIN];
 /* and the same by the size of the surface drawn to: a frame is a dozen scenes, of a few sizes */
 static struct { uint32_t width, height, lists, draws; uint64_t ns; } g_by_target[16];
 
+/* What a fragment program cost in the fill: the time its draws took in
+ * their tiles, walk and all, and the pixels that came of it. A table by the
+ * program's name, small and open: a frame has a few dozen programs. */
+#define BY_PROGRAM 128
+typedef struct { uint64_t name, ns, pixels, covered; uint32_t draws, used; } program_cost;
+
+static void cost_add(program_cost *table, uint64_t name, uint64_t ns, uint64_t pixels, uint64_t covered, uint32_t draws) {
+    unsigned at = (unsigned)((name ^ (name >> 29)) % BY_PROGRAM);
+    for (unsigned tries = 0; tries < BY_PROGRAM; tries++, at = (at + 1) % BY_PROGRAM) {
+        program_cost *c = &table[at];
+        if (c->used && c->name != name) continue;
+        c->used = 1; c->name = name;
+        c->ns += ns; c->pixels += pixels; c->covered += covered; c->draws += draws;
+        return;
+    }
+    table[0].ns += ns; table[0].pixels += pixels; table[0].covered += covered;       /* full: counted somewhere */
+}
+
 static uint64_t now_ns(void) {
     struct timespec t;
     timespec_get(&t, TIME_UTC);
@@ -364,6 +382,7 @@ typedef struct {
     uint64_t ns[T_WORKER];                  /* for the profile */
     uint64_t in_rows, alone;                /* program runs: pixels that went in rows, and one at a time */
     uint64_t covered;                       /* pixels some triangle covered, whatever became of them */
+    program_cost by_program[BY_PROGRAM];    /* and the fill's time by the fragment program it went to */
 } worker;
 
 static const uint8_t ATTRIBUTE_BYTES[11] = { 1, 1, 2, 2, 1, 1, 2, 2, 2, 4, 4 };
@@ -1282,6 +1301,34 @@ static void profile_report(void) {
         fprintf(stderr, " %ux%u %.1f (%.1f, %.1f)", g_by_target[i].width, g_by_target[i].height, (double)g_by_target[i].ns * per,
                 (double)g_by_target[i].lists / (double)g_profile, (double)g_by_target[i].draws / (double)g_profile);
     fprintf(stderr, "\n");
+
+    /* the fragment programs the fill's time went to, the dearest first */
+    static program_cost all[BY_PROGRAM];
+    memset(all, 0, sizeof(all));
+    for (unsigned w = 0; g_workers && w < vita_pool_size(); w++) {
+        worker *wk = &g_workers[w];
+        for (unsigned i = 0; i < BY_PROGRAM; i++)
+            if (wk->by_program[i].used)
+                cost_add(all, wk->by_program[i].name, wk->by_program[i].ns, wk->by_program[i].pixels, wk->by_program[i].covered,
+                         wk->by_program[i].draws);
+        memset(wk->by_program, 0, sizeof(wk->by_program));
+    }
+    uint64_t every = 0;
+    for (unsigned i = 0; i < BY_PROGRAM; i++) every += all[i].ns;
+    fprintf(stderr, "    by the fragment program, of %.1f ms a frame summed over the threads (ms, pixels shaded, of pixels covered, "
+                    "ns a pixel shaded, draws in tiles):", (double)every * per);
+    for (int shown = 0; shown < 14; shown++) {
+        program_cost *most = NULL;
+        for (unsigned i = 0; i < BY_PROGRAM; i++)
+            if (all[i].used && (!most || all[i].ns > most->ns)) most = &all[i];
+        if (!most || !most->ns) break;
+        fprintf(stderr, "\n      %016llx %6.1f %8.0f %8.0f %5.0f %6.0f", (unsigned long long)most->name, (double)most->ns * per,
+                (double)most->pixels / (double)g_profile, (double)most->covered / (double)g_profile,
+                most->pixels ? (double)most->ns / (double)most->pixels : 0.0, (double)most->draws / (double)g_profile);
+        most->used = 0;
+    }
+    fprintf(stderr, "\n");
+
     memset(g_by_target, 0, sizeof(g_by_target));
     memset(g_main_ns, 0, sizeof(g_main_ns));
     last = now;
@@ -1683,12 +1730,16 @@ static void fill_tile(void *ctx, unsigned item, unsigned index) {
                 }
             }
         }
+        uint64_t draw_began = g_profile ? now_ns() : 0, covered_before = wk->covered;
         for (; at < end && g_refs[at].draw == which; at++) {
             uint32_t k = g_refs[at].piece;
             wk->covered += raster_walk_rect(&r, &q->pieces[k], q->planes + (size_t)k * per, row0, row0 + side, col0, col0 + side, shade, wk);
             if (q->d.each) flush(wk);
         }
         flush(wk);                          /* nothing waits beyond its draw, or its tile */
+        if (g_profile)
+            cost_add(wk->by_program, q->s.fragment ? q->s.fragment->name : 0, now_ns() - draw_began, wk->pixels,
+                     wk->covered - covered_before, 1);
         wk->draw_pixels[which] += wk->pixels;
         wk->pixels = 0;
     }
