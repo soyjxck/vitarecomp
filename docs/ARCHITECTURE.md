@@ -591,8 +591,34 @@ end: stable, and the comparator sees the array as it was given.
 
 The generated C, the runtime and the HLE are a library. Something has to load
 the module, hand the HLE a window and a gamepad, and call `module_start`.
-That something is small on purpose, and `host/main.c` is the headless version
-of it.
+That something is small on purpose, and `host/host.c` is it: headless
+unless told otherwise.
+
+It is not a program by itself. `vita_host_main(argc, argv)`
+(`include/vitarecomp/host_main.h`) is its whole face, and `vita_host` is
+`host/main.c`, five lines that pass the command line on. A game's program
+is the same host behind a `main()` of its own: one that knows where the
+title's files are, reads the player's settings, sets the title up the first
+time it is run, and then makes up the arguments a person would have typed,
+the module, the mounts, `--window`, `--title`. In CMake that is
+
+```cmake
+add_subdirectory(vitarecomp)
+vitarecomp_add_game(my-game RECOMP_DIR <where armrecomp emit wrote> SOURCES src/main.c ...)
+```
+
+which is how `vita_host` itself is made (`host/CMakeLists.txt`). Whatever
+the game's `main()` does not know of its own command line it hands on, so
+the scripted input, the frame dumps and every trace below work on the
+game's executable as they do on `vita_host`. The host is linked as objects
+and not as an archive, because the runtime calls the host and the host the
+runtime, and two archives that need each other link in no single order.
+
+What a game's setup needs of the recompiler is a library too:
+`vitacontainer` (`tools/armrecomp/container.c`, `extract.c`, `inflate.c`)
+is the SELF parser and `vc_extract()`, the plain ELF out of a decrypted
+SELF, so the player's module can be taken from where an emulator left it
+without the recompiler being shipped beside the game.
 
 ### Mounts
 
@@ -652,7 +678,11 @@ vertical blank, the keyboard added to the scripted buttons and sticks
 (arrows for the pad, W A S D and I J K L for the sticks, X C Z V for
 cross, circle, square and triangle, Q and E for the shoulders, Enter for
 START, Shift for SELECT), and the left mouse button as a finger, wherever
-on the picture it is held. The core keeps its no-dependency promise.
+on the picture it is held. The picture keeps the frame's shape in a window
+of any other, with black beside it; `--window-size WxH` says how large it
+starts, `--fullscreen`, F11 or Alt and Enter put the window over the whole
+screen, `--title` names it, and its icon is the program's own when it has
+one. The core keeps its no-dependency promise.
 
 ### Bring-up: seeing what the program did
 

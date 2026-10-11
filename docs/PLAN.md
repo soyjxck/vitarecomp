@@ -374,11 +374,17 @@ A per-game repo consuming this one as a submodule, as upstream intended:
 host executable, game-specific HLE overrides, patches, packaging. The toolkit
 stays game-agnostic.
 
-The first exists, for the reference title: this repository as a submodule,
-a CMake file of twenty lines that hands it the translated code and names
-the program, and three scripts, to build from a copy of the title, to play,
-and to draw the first frames and compare them. It has needed no override
-and no patch: nothing in it is the title's but its name, the name of its
+The first exists, for the reference title: this repository as a submodule
+and a program of its own in front of it. Its first form was a CMake file
+of twenty lines and three scripts, one of which started the generic host
+with the module and the mounts on its command line; that is not a program
+anybody runs, and the host was made linkable for it (`vita_host_main`,
+`vitarecomp_add_game`, docs/ARCHITECTURE.md, stage 7). It is now an
+executable with a `main()` of its own, a settings file, and a setup that
+finds the player's copy where the emulator keeps it, checks the module by
+its hash and installs it; arguments it does not know go on to the host, so
+it is also its own test harness. It has needed no override and no patch:
+what is the title's in it is its name, its title ID, the hash of its
 module and three frame hashes.
 
 ## Housekeeping, ongoing

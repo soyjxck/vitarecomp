@@ -101,9 +101,11 @@ where the work is. See [docs/PLAN.md](docs/PLAN.md).
 include/vitarecomp/   runtime API: cpu, mem, dispatch, vfp, hle, host, loader
 src/                  runtime: CPU state, memory, traps, dispatch, and the HLE
                       (SceLibc batch 1, SceSysmem, SceDisplay, SceCtrl, SceLibKernel)
-host/                 vita_host: the generic headless host (scripted input, frames to files)
+host/                 the host: what a program of recompiled code links (scripted input, frames
+                      to files, a window), and vita_host, the generic one
 samples/fbdemo/       the first fixture: a freestanding homebrew program, source and prebuilt SELF
-tools/armrecomp/      the recompiler: container, inflate, decode, reloc, module, analyze, nids, emit
+tools/armrecomp/      the recompiler: container, extract, inflate, decode, reloc, module, analyze,
+                      nids, emit
 tools/*.sh, *.ps1     helpers: MSVC env import, dependency fetch, smoke, end-to-end, vitasdk in WSL,
                       Vita3K-driven decryption and import of a retail title
 tests/                synthetic ctest suites, no game data
@@ -136,7 +138,8 @@ tools/e2e.sh            # samples/fbdemo: SELF -> C -> vita_host -> a hash-check
 ```
 vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--press BUTTON@FROM[-TO]]...
                        [--touch X,Y@FROM[-TO]]... [--stick L|R,X,Y@FROM[-TO]]...
-                       [--mount NAME=DIR]... [--window]
+                       [--mount NAME=DIR]... [--window] [--window-size WxH] [--fullscreen]
+                       [--title TEXT]
 ```
 
 The host is built against one module's emitted C: configure with
@@ -152,6 +155,13 @@ a window behind them: the frames as they are shown, the keyboard as the
 buttons and the sticks, the left mouse button as a finger on the screen. A
 title's files are found under the directories given as mounts: `app0` its
 data, `ux0` somewhere it may write, `savedata0` where its saves are kept.
+
+`vita_host` is the generic case of something more useful. The host is
+`vita_host_main(argc, argv)`, and a game's repository builds a program of
+its own on it with `vitarecomp_add_game()`: a `main()` that finds the
+title's files, reads the player's settings, sets the title up on its first
+run, and hands the host the command line above (docs/ARCHITECTURE.md,
+stage 7). The reference title has one.
 
 The core has no external dependencies: a fresh clone builds with CMake and a C
 compiler only. zlib inflate is written in-tree.
