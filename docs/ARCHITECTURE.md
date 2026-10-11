@@ -585,7 +585,7 @@ output has no function for; the last row is how to ask why.
 ### Seeing what was drawn
 
 A renderer that is wrong is wrong in a picture, and a picture does not say
-which of two hundred draws spoiled it. Four more ways of looking, for
+which of two hundred draws spoiled it. Five more ways of looking, for
 frames:
 
 | Tool | Switch | What it shows |
@@ -593,6 +593,7 @@ frames:
 | The frame census | `VITARECOMP_TRACE=1` | at each flip whose shape differs from the last: scenes, draws, triangles, pixels, and what was not drawn and why (lines or points, a program that could not be run, a program run that stopped, a sample of a unit with nothing bound); each kind of scene once, with its target, formats and what its depth surface loads and stores |
 | One frame's draws | `VITARECOMP_GXM_FRAME=<n>` | every draw of frame n: its programs by name, its geometry, how many pixels came of it, the depth, stencil, cull, blend and viewport state |
 | Textures | `VITARECOMP_GXM_TEXTURES=<dir>` | each texture a draw samples, once, as an image, with its layout on stderr; a format not decoded yet as its bytes |
+| One frame's scenes | `VITARECOMP_GXM_SCENES=<dir>`, with the frame switch above | what each scene of that frame left in its colour surface, as an image: the geometry buffer, the lit scene, each pass of the chain that ends on the display |
 | Programs | `VITARECOMP_GXP_DUMP=<dir>`, then `armrecomp gxp <file>` | the shader programs a title registers, and each one's tables and code as text |
 
 And the frames themselves: `vita_host --window` shows them as they are
@@ -606,7 +607,9 @@ them. `vita_host --virtual-clock` makes time a count of what the program
 did (`src/clock.c`): a sixtieth of a second at each vertical blank, the
 length of a wait when every thread is waiting, a microsecond for each
 reading. Two runs then write the same frames, byte for byte, and a change
-to the renderer can be judged by a hash.
+to the renderer can be judged by a hash. That is how the renderer was put
+on several threads (`VITARECOMP_THREADS` says how many; one is the
+renderer as it was): twenty frames of a run, the same before and after.
 
 The first scrambled picture went through all four in that order. The
 census said every program ran. The textures were right. The geometry

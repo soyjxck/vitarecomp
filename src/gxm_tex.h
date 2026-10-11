@@ -56,19 +56,28 @@ typedef struct {
     const uint8_t *base;                    /* the bytes at `data` */
     uint32_t avail;                         /* how many of them may be read */
     const uint8_t *pal;                     /* 16 or 256 words at `palette`, or NULL */
-
-    /* the compressed block decoded last, per slot */
-    uint32_t cache_key[64];
-    uint32_t cache[64][32];
 } gxm_tex;
+
+/* The compressed blocks decoded lately, for whoever is reading a texture:
+ * one of these to a reader, since several threads may read one texture. */
+typedef struct {
+    uint32_t key[64];                       /* which block each slot holds */
+    uint32_t texels[64][32];
+} gxm_tex_cache;
+
+/* Forget what a cache holds: before it is used for another texture, or
+ * when the texture's bytes may have changed. */
+void gxm_tex_cache_reset(gxm_tex_cache *c);
 
 /* Read the control words. Returns 0 when they do not describe a texture
  * (a zero size); the texture is otherwise ready for `base` to be set. */
 int gxm_tex_decode(gxm_tex *t, const uint32_t words[4]);
 
 /* One texel, unfiltered, in the channel order the format's swizzle gives.
- * Coordinates outside the level, or bytes outside `avail`, read as zero. */
-void gxm_tex_texel(gxm_tex *t, unsigned face, unsigned level, int x, int y, float rgba[4]);
+ * Coordinates outside the level, or bytes outside `avail`, read as zero.
+ * `cache` may be NULL, at the cost of decoding a compressed block for every
+ * texel taken from it; here and below. */
+void gxm_tex_texel(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsigned level, int x, int y, float rgba[4]);
 
 /* The level a sample would come from, from how fast the coordinate moves
  * per pixel across and down: log2 of the footprint in texels. */
@@ -76,11 +85,11 @@ float gxm_tex_footprint(const gxm_tex *t, float dudx, float dvdx, float dudy, fl
 
 /* A sample: `coord` is (u, v), or a direction for a cube map; `lod` is the
  * footprint level before the texture's own bias. */
-void gxm_tex_sample(gxm_tex *t, const float *coord, float lod, float rgba[4]);
+void gxm_tex_sample(const gxm_tex *t, gxm_tex_cache *cache, const float *coord, float lod, float rgba[4]);
 
 /* The four texels a bilinear sample at (u, v) of level 0 would blend, first
  * channel only, in the order (x0,y1) (x1,y1) (x1,y0) (x0,y0), and the
  * fractions of the way from x0 to x1 and from y0 to y1. */
-void gxm_tex_gather(gxm_tex *t, const float *coord, float texels[4], float fraction[2]);
+void gxm_tex_gather(const gxm_tex *t, gxm_tex_cache *cache, const float *coord, float texels[4], float fraction[2]);
 
 #endif /* VITARECOMP_GXM_TEX_H */

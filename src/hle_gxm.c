@@ -39,6 +39,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define E_OUT_OF_MEMORY    0x805B0002u
 #define E_INVALID_VALUE    0x805B0003u
@@ -1149,25 +1150,76 @@ void vita_hle_sceGxmSetBackVisibilityTestOp(void)  { g_ctx.visibility_set[1] = r
 /* --- scenes ----------------------------------------------------------------------------- */
 
 /* What a frame asked for and what became of it, reported at each flip whose
- * shape differs from the flip before: a thousand identical frames are one
- * line, and a frame the renderer could not draw all of says so. */
-static struct { uint32_t scenes, draws, precomputed; gxm_draw_counters c; } g_frame, g_last;
+ * shape differs from the flip before, and at every hundredth: a thousand
+ * identical frames are ten lines, and a frame the renderer could not draw
+ * all of says so. */
+static struct { uint32_t scenes, draws, precomputed; gxm_draw_counters c; uint64_t draw_us; } g_frame, g_last;
 static uint32_t g_frames;
 
 static void frame_end(void) {
     g_frames++;
     g_frame.c = gxm_counters;
     memset(&gxm_counters, 0, sizeof(gxm_counters));
-    if (g_frame.scenes != g_last.scenes || g_frame.draws != g_last.draws || g_frame.precomputed != g_last.precomputed ||
+    if (g_frames % 100 == 0 ||
+        g_frame.scenes != g_last.scenes || g_frame.draws != g_last.draws || g_frame.precomputed != g_last.precomputed ||
         g_frame.c.not_triangles != g_last.c.not_triangles || g_frame.c.no_program != g_last.c.no_program ||
         !g_frame.c.stopped != !g_last.c.stopped || !g_frame.c.no_texture != !g_last.c.no_texture) {
-        vita_hle_trace("gxm frame %u: %u scenes, %u draws (%u precomputed), %u triangles, %u pixels; not drawn: %u lines or points, "
+        vita_hle_trace("gxm frame %u: %u scenes, %u draws (%u precomputed), %u triangles, %u pixels in %u ms; not drawn: %u lines or points, "
                        "%u without a program; %u program runs stopped (last at instruction %u), %u samples of nothing",
                        g_frames, g_frame.scenes, g_frame.draws, g_frame.precomputed, g_frame.c.triangles, g_frame.c.pixels,
+                       (unsigned)(g_frame.draw_us / 1000),
                        g_frame.c.not_triangles, g_frame.c.no_program, g_frame.c.stopped, g_frame.c.stopped_at, g_frame.c.no_texture);
         g_last = g_frame;
     }
     memset(&g_frame, 0, sizeof(g_frame));
+}
+
+/* VITARECOMP_GXM_FRAME=<n>: every draw of the nth frame on stderr: which
+ * programs, how much geometry, how many pixels came of it, and the state
+ * that most often explains a wrong picture. The programs are named as
+ * VITARECOMP_GXP_DUMP names their files. */
+static int draw_logged(void) {
+    static int asked;
+    static uint32_t frame;
+    if (!asked) { const char *e = getenv("VITARECOMP_GXM_FRAME"); asked = 1; frame = e ? (uint32_t)strtoul(e, NULL, 0) : 0; }
+    return frame && g_frames + 1 == frame;
+}
+
+/* VITARECOMP_GXM_SCENES=<directory>, with VITARECOMP_GXM_FRAME: what each scene
+ * of that frame left in its colour surface, as an image, numbered in the
+ * order the scenes ended. A frame is a dozen passes into as many surfaces,
+ * and the one on the display is only the last; this shows the others. Values
+ * are shown from 0 to 1 whatever the format holds; a surface of two whole
+ * words by the bytes of the first. */
+static void dump_scene(void) {
+    static const char *dir;
+    static int asked;
+    if (!asked) { asked = 1; dir = getenv("VITARECOMP_GXM_SCENES"); }
+    if (!dir || !*dir || !draw_logged() || !g_state.has_colour) return;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/frame-%u-scene-%02u.ppm", dir, g_frames + 1, g_frame.scenes);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "P6\n%u %u\n255\n", g_state.width, g_state.height);
+    for (uint32_t y = 0; y < g_state.height; y++)
+        for (uint32_t x = 0; x < g_state.width; x++) {
+            uint32_t at = gxm_pixel_offset(g_state.colour_layout, x, y, g_state.width, g_state.height,
+                                           g_state.colour_stride, g_state.colour.bytes);
+            float c[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            if (at + g_state.colour.bytes <= g_state.colour_avail) pixfmt_decode(&g_state.colour, g_state.colour_data + at, c);
+            for (int k = 0; k < 3; k++) {
+                float v = c[k];
+                if (g_state.colour.f[0].kind == PIX_F32 && g_state.colour.fields == 2) {
+                    uint32_t bits;
+                    memcpy(&bits, &c[0], 4);            /* a geometry buffer: its first word is a colour in bytes */
+                    v = (float)((bits >> (8 * k)) & 0xFF) / 255.0f;
+                }
+                fputc((int)((!(v > 0.0f) ? 0.0f : v > 1.0f ? 1.0f : v) * 255.0f + 0.5f), f);
+            }
+        }
+    fclose(f);
+    fprintf(stderr, "gxm scene %u.%u: %ux%u, colour format bytes %u, written to %s\n", g_frames + 1, g_frame.scenes,
+            g_state.width, g_state.height, g_state.colour.bytes, path);
 }
 
 static int depth_has_depth(uint32_t format)   { return format && format != 0x00022000u; }
@@ -1309,6 +1361,7 @@ void vita_hle_sceGxmBeginScene(void) {
 void vita_hle_sceGxmEndScene(void) {
     if (!g_scene.active) { r0 = E_NOT_WITHIN_SCENE; return; }
     if (g_scene.has_depth_surface && (g_scene.depth_surface[0] & 4)) depth_transfer(1);
+    dump_scene();
     g_scene.active = 0;
     notify(r1);
     notify(r2);
@@ -1320,29 +1373,23 @@ void vita_hle_sceGxmFinish(void) { }
 
 /* --- draws ------------------------------------------------------------------------------ */
 
-/* VITARECOMP_GXM_FRAME=<n>: every draw of the nth frame on stderr: which
- * programs, how much geometry, how many pixels came of it, and the state
- * that most often explains a wrong picture. The programs are named as
- * VITARECOMP_GXP_DUMP names their files. */
-static int draw_logged(void) {
-    static int asked;
-    static uint32_t frame;
-    if (!asked) { const char *e = getenv("VITARECOMP_GXM_FRAME"); asked = 1; frame = e ? (uint32_t)strtoul(e, NULL, 0) : 0; }
-    return frame && g_frames + 1 == frame;
-}
-
 static void draw(gxm_draw_state *s, uint32_t primitive, uint32_t index_format, uint32_t indices, uint32_t count, uint32_t instances) {
-    uint32_t before = gxm_counters.pixels, triangles = gxm_counters.triangles;
-    gxm_draw(s, primitive >> 26, index_format ? 4 : 2, indices, count, instances);
+    uint32_t triangles = gxm_counters.triangles;
+    struct timespec t0, t1;
+    timespec_get(&t0, TIME_UTC);
+    uint32_t drawn = gxm_draw(s, primitive >> 26, index_format ? 4 : 2, indices, count, instances);
+    timespec_get(&t1, TIME_UTC);
+    uint64_t took = (uint64_t)((int64_t)(t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000);
+    g_frame.draw_us += took;
     g_frame.draws++;
     if (draw_logged()) {
         const gxm_face *f = &s->face[0];
-        fprintf(stderr, "gxm draw %u.%u: v_%016llx f_%016llx prim %u, %u indices x %u, %u triangles, %u pixels; "
+        fprintf(stderr, "gxm draw %u.%u: v_%016llx f_%016llx prim %u, %u indices x %u, %u triangles, %u pixels, %u us; "
                         "depth %u%s stencil %u ref %u ops %u/%u/%u masks %02X/%02X cull %d%s%s blend %02X%02X%02X%02X out %u; "
                         "viewport %s %.1f+%.1f %.1f+%.1f %.3f+%.3f region %d %u,%u-%u,%u\n",
                 g_frame.scenes, g_frame.draws, (unsigned long long)(s->vertex ? s->vertex->name : 0),
                 (unsigned long long)(s->fragment ? s->fragment->name : 0), primitive >> 26, count, instances,
-                gxm_counters.triangles - triangles, gxm_counters.pixels - before,
+                gxm_counters.triangles - triangles, drawn, (unsigned)took,
                 f->depth_func, f->depth_write ? "w" : "", f->stencil_func, f->stencil_ref, f->stencil_fail, f->depth_fail, f->depth_pass,
                 f->compare_mask, f->write_mask, s->cull, s->two_sided ? " two-sided" : "", f->program_off ? " no-program" : "",
                 s->fragment ? s->fragment->blend[0] : 0, s->fragment ? s->fragment->blend[1] : 0,
@@ -1353,7 +1400,7 @@ static void draw(gxm_draw_state *s, uint32_t primitive, uint32_t index_format, u
     }
     /* the visibility test counts what the draw put on the screen */
     if (g_ctx.visibility && g_ctx.visibility_on[0] && g_ctx.visibility_index[0] * 4 + 4 <= g_ctx.visibility_stride) {
-        uint32_t at = g_ctx.visibility + 4 * g_ctx.visibility_index[0], drawn = gxm_counters.pixels - before;
+        uint32_t at = g_ctx.visibility + 4 * g_ctx.visibility_index[0];
         if (g_ctx.visibility_set[0]) { if (drawn) wr(at, 1); }
         else wr(at, rd(at) + drawn);
     }

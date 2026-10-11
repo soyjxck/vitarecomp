@@ -26,11 +26,15 @@ bugs that only running could find (docs/LESSONS.md).
 from its decrypted module, starts in the host, loads its front end and
 renders it: the loading screen's turning medallion, lit through the title's
 own deferred pipeline (a geometry buffer, light passes, bloom, tone
-mapping, a scale to the panel), and the health warning with its text. Every
+mapping, a scale to the panel), the health warning with its text, and behind
+the warning the temple, the waterfall and the shafts of light of its title
+screen. Every
 pixel comes out of the title's own shader programs, run by an interpreter of
 the GPU's bytecode that is written here; nothing of the title's is replaced.
-It is a reference renderer, right before fast: a frame of the loading screen
-takes about a second. The title then asks for its first logo movie and waits
+It is a reference renderer, right before fast: with the pixels and the
+vertices shared out over the host's cores, a frame of the loading screen
+takes about 80 ms on sixteen threads and one of the title screen's scene
+close to a second. The title then asks for its first logo movie and waits
 there, because the movie library opens nothing yet, and the synthesiser
 still plays in silence. `vita_host --window` shows it; docs/PLAN.md says
 what is missing.

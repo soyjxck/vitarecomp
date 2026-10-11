@@ -27,6 +27,7 @@ static void words(uint32_t w[4], uint32_t type, uint32_t format, uint32_t width,
 }
 
 static gxm_tex t;
+static gxm_tex_cache cache;
 static uint8_t store[1 << 16];
 
 static void open_texture(const uint32_t w[4]) {
@@ -34,6 +35,7 @@ static void open_texture(const uint32_t w[4]) {
     assert(t.bytes <= sizeof(store));
     t.base = store;
     t.avail = sizeof(store);
+    gxm_tex_cache_reset(&cache);
 }
 
 static void test_layouts(void) {
@@ -47,11 +49,11 @@ static void test_layouts(void) {
     /* declared with a chain of one level, it takes the room of its sides rounded up to powers of two */
     assert(t.width == 5 && t.height == 3 && t.levels == 1 && t.bytes == 8 * 4);
     store[1 * 8 + 4] = 255;
-    gxm_tex_texel(&t, 0, 0, 4, 1, c);
+    gxm_tex_texel(&t, &cache, 0, 0, 4, 1, c);
     assert(c[0] == 1.0f);
-    gxm_tex_texel(&t, 0, 0, 3, 1, c);
+    gxm_tex_texel(&t, &cache, 0, 0, 3, 1, c);
     assert(c[0] == 0.0f);
-    gxm_tex_texel(&t, 0, 0, 5, 1, c);                   /* outside: nothing */
+    gxm_tex_texel(&t, &cache, 0, 0, 5, 1, c);                   /* outside: nothing */
     assert(c[0] == 0.0f && c[3] == 0.0f);
 
     /* declared with no chain at all, only what its rows need */
@@ -65,9 +67,9 @@ static void test_layouts(void) {
     open_texture(w);
     store[1] = 255;                                     /* (0, 1) */
     store[2] = 128;                                     /* (1, 0) */
-    gxm_tex_texel(&t, 0, 0, 0, 1, c);
+    gxm_tex_texel(&t, &cache, 0, 0, 0, 1, c);
     assert(c[0] == 1.0f);
-    gxm_tex_texel(&t, 0, 0, 1, 0, c);
+    gxm_tex_texel(&t, &cache, 0, 0, 1, 0, c);
     assert(c[0] > 0.49f && c[0] < 0.51f);
 
     /* tiles of 32 by 32, row after row of them */
@@ -75,7 +77,7 @@ static void test_layouts(void) {
     words(w, GXM_TEX_TILED, 0x00000000u, 64, 32, 1, 0, 2);
     open_texture(w);
     store[1024 + 5 * 32 + 3] = 255;                     /* the second tile, its texel (3, 5) */
-    gxm_tex_texel(&t, 0, 0, 35, 5, c);
+    gxm_tex_texel(&t, &cache, 0, 0, 35, 5, c);
     assert(c[0] == 1.0f);
 
     /* a chain of levels, each straight after the last */
@@ -84,7 +86,7 @@ static void test_layouts(void) {
     open_texture(w);
     assert(t.levels == 4 && t.level_at[1] == 64 && t.level_at[2] == 80 && t.level_at[3] == 84 && t.bytes == 85);
     store[64] = 255;                                    /* level 1, texel (0, 0) */
-    gxm_tex_texel(&t, 0, 1, 0, 0, c);
+    gxm_tex_texel(&t, &cache, 0, 1, 0, 0, c);
     assert(c[0] == 1.0f);
     assert(t.level_w[3] == 1);
 
@@ -105,10 +107,12 @@ static void test_blocks_and_palettes(void) {
     open_texture(w);
     assert(t.kind == GXM_TEX_BC1 && t.bytes == 32);
     store[8 + 0] = 0x00; store[8 + 1] = 0xF8;           /* colour 0 = 0xF800 */
-    gxm_tex_texel(&t, 0, 0, 2, 6, c);
+    gxm_tex_texel(&t, &cache, 0, 0, 2, 6, c);
     assert(c[0] == 1.0f && c[1] == 0.0f && c[2] == 0.0f && c[3] == 1.0f);
-    gxm_tex_texel(&t, 0, 0, 5, 1, c);                   /* another block: black */
+    gxm_tex_texel(&t, &cache, 0, 0, 5, 1, c);                   /* another block: black */
     assert(c[0] == 0.0f);
+    gxm_tex_texel(&t, NULL, 0, 0, 2, 6, c);                     /* and the same without a cache */
+    assert(c[0] == 1.0f && c[3] == 1.0f);
 
     /* a palette of 256 colours, the index a byte */
     static uint8_t palette[1024];
@@ -118,7 +122,7 @@ static void test_blocks_and_palettes(void) {
     t.pal = palette;
     palette[4 * 7 + 1] = 255;                           /* entry 7 is green */
     store[3] = 7;
-    gxm_tex_texel(&t, 0, 0, 3, 0, c);
+    gxm_tex_texel(&t, &cache, 0, 0, 3, 0, c);
     assert(c[0] == 0.0f && c[1] == 1.0f);
     printf("  blocks and palettes            ok\n");
 }
@@ -134,10 +138,10 @@ static void test_samples(void) {
     words(w, GXM_TEX_LINEAR, 0x00000000u, 2, 1, 1, 0, 2);
     open_texture(w);
     at[0] = 0.49f; at[1] = 0.5f;
-    gxm_tex_sample(&t, at, 0.0f, c);
+    gxm_tex_sample(&t, &cache, at, 0.0f, c);
     assert(c[0] == 0.0f);
     at[0] = 0.51f;
-    gxm_tex_sample(&t, at, 0.0f, c);
+    gxm_tex_sample(&t, &cache, at, 0.0f, c);
     assert(c[0] == 1.0f);
 
     /* linear: halfway between the two centres is halfway between the texels,
@@ -145,29 +149,29 @@ static void test_samples(void) {
     words(w, GXM_TEX_LINEAR, 0x00000000u, 2, 1, 1, 1, 2);
     open_texture(w);
     at[0] = 0.5f;
-    gxm_tex_sample(&t, at, 0.0f, c);
+    gxm_tex_sample(&t, &cache, at, 0.0f, c);
     assert(fabsf(c[0] - 0.5f) < 1e-6f);
     at[0] = 0.75f;
-    gxm_tex_sample(&t, at, 0.0f, c);
+    gxm_tex_sample(&t, &cache, at, 0.0f, c);
     assert(c[0] == 1.0f);
     /* clamped: beyond the edge is the edge */
     at[0] = 3.0f;
-    gxm_tex_sample(&t, at, 0.0f, c);
+    gxm_tex_sample(&t, &cache, at, 0.0f, c);
     assert(c[0] == 1.0f);
     /* repeated: beyond the edge is the other side */
     words(w, GXM_TEX_LINEAR, 0x00000000u, 2, 1, 1, 0, 0);
     open_texture(w);
     at[0] = 1.25f;
-    gxm_tex_sample(&t, at, 0.0f, c);
+    gxm_tex_sample(&t, &cache, at, 0.0f, c);
     assert(c[0] == 0.0f);
     at[0] = -0.25f;
-    gxm_tex_sample(&t, at, 0.0f, c);
+    gxm_tex_sample(&t, &cache, at, 0.0f, c);
     assert(c[0] == 1.0f);
     /* mirrored: the second period runs backwards */
     words(w, GXM_TEX_LINEAR, 0x00000000u, 2, 1, 1, 0, 1);
     open_texture(w);
     at[0] = 1.25f;
-    gxm_tex_sample(&t, at, 0.0f, c);
+    gxm_tex_sample(&t, &cache, at, 0.0f, c);
     assert(c[0] == 1.0f);
 
     /* a footprint of two texels a pixel is one level down */
@@ -178,9 +182,9 @@ static void test_samples(void) {
     memset(store, 0, sizeof(store));
     memset(store + 16, 255, 4);                         /* level 1 is white */
     at[0] = at[1] = 0.5f;
-    gxm_tex_sample(&t, at, 0.0f, c);
+    gxm_tex_sample(&t, &cache, at, 0.0f, c);
     assert(c[0] == 0.0f);
-    gxm_tex_sample(&t, at, 1.0f, c);
+    gxm_tex_sample(&t, &cache, at, 1.0f, c);
     assert(c[0] == 1.0f);
 
     /* the four texels around a point, and how far the point is between them */
@@ -190,7 +194,7 @@ static void test_samples(void) {
     open_texture(w);
     store[0] = 10; store[1] = 20; store[8] = 30; store[9] = 40;
     at[0] = 1.0f / 8.0f; at[1] = 0.5f;                  /* on the corner the four texels share */
-    gxm_tex_gather(&t, at, four, fraction);
+    gxm_tex_gather(&t, &cache, at, four, fraction);
     assert(fabsf(four[0] * 255.0f - 30.0f) < 0.01f && fabsf(four[1] * 255.0f - 40.0f) < 0.01f);
     assert(fabsf(four[2] * 255.0f - 20.0f) < 0.01f && fabsf(four[3] * 255.0f - 10.0f) < 0.01f);
     assert(fabsf(fraction[0] - 0.5f) < 1e-6f && fabsf(fraction[1] - 0.5f) < 1e-6f);
@@ -208,7 +212,7 @@ static void test_cube(void) {
     for (int face = 0; face < 6; face++) store[face * 4] = (uint8_t)(40 * (face + 1));
     static const float dirs[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
     for (int face = 0; face < 6; face++) {
-        gxm_tex_sample(&t, dirs[face], 0.0f, c);
+        gxm_tex_sample(&t, &cache, dirs[face], 0.0f, c);
         assert(fabsf(c[0] * 255.0f - (float)(40 * (face + 1))) < 0.01f);
     }
     printf("  cube maps                      ok\n");

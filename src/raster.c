@@ -75,17 +75,21 @@ static int64_t floor_div(int64_t a, int64_t b) {       /* b > 0 */
     return (a % b != 0 && a < 0) ? q - 1 : q;
 }
 
-static void fill(raster *r, const screen_vertex *a, const screen_vertex *b, const screen_vertex *c) {
+/* Set one clipped, projected triangle up: its edges, its box of pixels, and
+ * how depth, 1/w and each varying over w change across it. Returns 0 when
+ * it covers nothing that is drawn. */
+static int setup(raster *r, const screen_vertex *a, const screen_vertex *b, const screen_vertex *c,
+                 raster_piece *t, float *planes) {
     int64_t ax = (int64_t)llroundf(a->x * SUB), ay = (int64_t)llroundf(a->y * SUB);
     int64_t bx = (int64_t)llroundf(b->x * SUB), by = (int64_t)llroundf(b->y * SUB);
     int64_t cx = (int64_t)llroundf(c->x * SUB), cy = (int64_t)llroundf(c->y * SUB);
 
     int64_t area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-    if (area == 0) return;
+    if (area == 0) return 0;
     int clockwise = area > 0;
-    if ((r->cull == RASTER_CULL_CW && clockwise) || (r->cull == RASTER_CULL_CCW && !clockwise)) return;
+    if ((r->cull == RASTER_CULL_CW && clockwise) || (r->cull == RASTER_CULL_CCW && !clockwise)) return 0;
     if (!clockwise) {
-        const screen_vertex *t = b; b = c; c = t;
+        const screen_vertex *v = b; b = c; c = v;
         int64_t tx = bx, ty = by; bx = cx; by = cy; cx = tx; cy = ty;
         area = -area;
     }
@@ -101,15 +105,54 @@ static void fill(raster *r, const screen_vertex *a, const screen_vertex *b, cons
     if (py0 < r->clip_y0) py0 = r->clip_y0;
     if (px1 >= r->clip_x1) px1 = r->clip_x1 - 1;
     if (py1 >= r->clip_y1) py1 = r->clip_y1 - 1;
-    if (px0 > px1 || py0 > py1) return;
-    r->triangles_drawn++;
+    if (px0 > px1 || py0 > py1) return 0;
 
-    /* Edge functions at the first pixel's centre, positive inside. A pixel
-     * on an edge the triangle does not own is pushed just outside. */
+    t->x0 = (int)px0; t->y0 = (int)py0; t->x1 = (int)px1; t->y1 = (int)py1;
+    t->ax = ax; t->ay = ay; t->bx = bx; t->by = by; t->cx = cx; t->cy = cy;
+    t->clockwise = (uint8_t)clockwise;
+    /* a pixel on an edge the triangle does not own is pushed just outside */
+    t->bias_ab = owns_edge(ax, ay, bx, by) ? 0 : 1;
+    t->bias_bc = owns_edge(bx, by, cx, cy) ? 0 : 1;
+    t->bias_ca = owns_edge(cx, cy, ax, ay) ? 0 : 1;
+
+    /* Everything interpolated is a value at a, plus its differences to b and
+     * c weighted by their barycentrics; the varyings as value over w, which
+     * is what is linear on the screen. */
+    int nvar = r->varyings;
+    float inv_area = 1.0f / (float)area;
+    t->inv_area = inv_area;
+    t->qa = a->q; t->qb = b->q - a->q; t->qc = c->q - a->q;
+    t->za = a->z; t->zb = b->z - a->z; t->zc = c->z - a->z;
+    float *ua = planes, *ub = planes + nvar, *uc = planes + 2 * nvar;
+    for (int i = 0; i < nvar; i++) {
+        ua[i] = a->var[i] * a->q;
+        ub[i] = b->var[i] * b->q - ua[i];
+        uc[i] = c->var[i] * c->q - ua[i];
+    }
+    /* how the barycentrics of b and c change per pixel */
+    float lb_dx = (float)(-(ay - cy) * SUB) * inv_area, lb_dy = (float)((ax - cx) * SUB) * inv_area;
+    float lc_dx = (float)(-(by - ay) * SUB) * inv_area, lc_dy = (float)((bx - ax) * SUB) * inv_area;
+    t->q_dx = t->qb * lb_dx + t->qc * lc_dx;
+    t->q_dy = t->qb * lb_dy + t->qc * lc_dy;
+    if (r->want_derivatives) {
+        float *u_dx = planes + 3 * nvar, *u_dy = planes + 4 * nvar;
+        for (int i = 0; i < nvar; i++) {
+            u_dx[i] = ub[i] * lb_dx + uc[i] * lc_dx;
+            u_dy[i] = ub[i] * lb_dy + uc[i] * lc_dy;
+        }
+    }
+    return 1;
+}
+
+uint32_t raster_walk(const raster *r, const raster_piece *t, const float *planes, int row0, int row1,
+                     raster_shade shade, void *user) {
+    int64_t px0 = t->x0, px1 = t->x1, py0 = t->y0 > row0 ? t->y0 : row0, py1 = t->y1 < row1 - 1 ? t->y1 : row1 - 1;
+    if (py0 > py1) return 0;
+    int64_t ax = t->ax, ay = t->ay, bx = t->bx, by = t->by, cx = t->cx, cy = t->cy;
+    int64_t bias_ab = t->bias_ab, bias_bc = t->bias_bc, bias_ca = t->bias_ca;
+
+    /* Edge functions at the first pixel's centre, positive inside. */
     int64_t X = px0 * SUB + SUB / 2, Y = py0 * SUB + SUB / 2;
-    int64_t bias_ab = owns_edge(ax, ay, bx, by) ? 0 : 1;
-    int64_t bias_bc = owns_edge(bx, by, cx, cy) ? 0 : 1;
-    int64_t bias_ca = owns_edge(cx, cy, ax, ay) ? 0 : 1;
     int64_t e_ab = (bx - ax) * (Y - ay) - (by - ay) * (X - ax) - bias_ab;
     int64_t e_bc = (cx - bx) * (Y - by) - (cy - by) * (X - bx) - bias_bc;
     int64_t e_ca = (ax - cx) * (Y - cy) - (ay - cy) * (X - cx) - bias_ca;
@@ -117,29 +160,12 @@ static void fill(raster *r, const screen_vertex *a, const screen_vertex *b, cons
     int64_t bc_dx = -(cy - by) * SUB, bc_dy = (cx - bx) * SUB;
     int64_t ca_dx = -(ay - cy) * SUB, ca_dy = (ax - cx) * SUB;
 
-    /* Everything interpolated is a value at a, plus its differences to b and
-     * c weighted by their barycentrics; the varyings as value over w, which
-     * is what is linear on the screen. */
     int   nvar = r->varyings;
-    float inv_area = 1.0f / (float)area;
-    float qa = a->q, qb = b->q - a->q, qc = c->q - a->q;
-    float za = a->z, zb = b->z - a->z, zc = c->z - a->z;
-    float ua[RASTER_MAX_VARYINGS], ub[RASTER_MAX_VARYINGS], uc[RASTER_MAX_VARYINGS];
-    for (int i = 0; i < nvar; i++) {
-        ua[i] = a->var[i] * a->q;
-        ub[i] = b->var[i] * b->q - ua[i];
-        uc[i] = c->var[i] * c->q - ua[i];
-    }
-    /* how the barycentrics of b and c change per pixel */
-    float lb_dx = (float)ca_dx * inv_area, lb_dy = (float)ca_dy * inv_area;
-    float lc_dx = (float)ab_dx * inv_area, lc_dy = (float)ab_dy * inv_area;
-    float q_dx = qb * lb_dx + qc * lc_dx, q_dy = qb * lb_dy + qc * lc_dy;
-    float u_dx[RASTER_MAX_VARYINGS], u_dy[RASTER_MAX_VARYINGS];
-    if (r->want_derivatives)
-        for (int i = 0; i < nvar; i++) {
-            u_dx[i] = ub[i] * lb_dx + uc[i] * lc_dx;
-            u_dy[i] = ub[i] * lb_dy + uc[i] * lc_dy;
-        }
+    float inv_area = t->inv_area;
+    float qa = t->qa, qb = t->qb, qc = t->qc, za = t->za, zb = t->zb, zc = t->zc, q_dx = t->q_dx, q_dy = t->q_dy;
+    const float *ua = planes, *ub = planes + nvar, *uc = planes + 2 * nvar;
+    const float *u_dx = planes + 3 * nvar, *u_dy = planes + 4 * nvar;
+    uint32_t shaded = 0;
 
     float var[RASTER_MAX_VARYINGS], ddx[RASTER_MAX_VARYINGS], ddy[RASTER_MAX_VARYINGS];
     for (int64_t y = py0; y <= py1; y++) {
@@ -161,44 +187,46 @@ static void fill(raster *r, const screen_vertex *a, const screen_vertex *b, cons
                     ddx[i] = (u_dx[i] - var[i] * q_dx) * w;
                     ddy[i] = (u_dy[i] - var[i] * q_dy) * w;
                 }
-            r->pixels_shaded++;
-            if (r->shade && !r->shade(r->user, (int)x, (int)y, z, clockwise, var, ddx, ddy)) continue;
+            shaded++;
+            if (shade && !shade(user, (int)x, (int)y, z, t->clockwise, var, ddx, ddy)) continue;
             if (depth_row && r->depth_write) depth_row[x] = z;
         }
         e_ab += ab_dy; e_bc += bc_dy; e_ca += ca_dy;
     }
+    return shaded;
 }
 
-void raster_triangle(raster *r, const raster_vertex *a, const raster_vertex *b, const raster_vertex *c) {
+int raster_setup(raster *r, const raster_vertex *a, const raster_vertex *b, const raster_vertex *c,
+                 raster_piece *pieces, float *planes) {
     raster_vertex poly[2][POLY_MAX];
-    int n = 3, cur = 0, varyings = r->varyings;
+    int n = 3, cur = 0, varyings = r->varyings, made = 0;
     if (varyings > RASTER_MAX_VARYINGS) varyings = r->varyings = RASTER_MAX_VARYINGS;
     r->triangles_in++;
     poly[0][0] = *a; poly[0][1] = *b; poly[0][2] = *c;
 
     /* Always against w, so the divide is safe; against the depth planes
      * when asked; against the guard band only if a vertex is beyond it. */
-    int planes[7], np = 0;
-    planes[np++] = P_W;
-    if (r->clip_z & RASTER_CLIP_NEAR) planes[np++] = P_Z_NEAR;
-    if (r->clip_z & RASTER_CLIP_FAR) planes[np++] = P_Z_FAR;
+    int planes_in[7], np = 0;
+    planes_in[np++] = P_W;
+    if (r->clip_z & RASTER_CLIP_NEAR) planes_in[np++] = P_Z_NEAR;
+    if (r->clip_z & RASTER_CLIP_FAR) planes_in[np++] = P_Z_FAR;
     for (int i = 0; i < 3; i++) {
         const float *p = poly[0][i].pos;
         float lim = GUARD * (p[3] > 0 ? p[3] : -p[3]);
         if (p[0] < -lim || p[0] > lim || p[1] < -lim || p[1] > lim || p[3] <= W_MIN) {
-            planes[np++] = P_LEFT; planes[np++] = P_RIGHT; planes[np++] = P_TOP; planes[np++] = P_BOTTOM;
+            planes_in[np++] = P_LEFT; planes_in[np++] = P_RIGHT; planes_in[np++] = P_TOP; planes_in[np++] = P_BOTTOM;
             break;
         }
     }
     for (int k = 0; k < np && n >= 3; k++) {
         int inside = 0;
-        for (int i = 0; i < n; i++) inside += distance(r, &poly[cur][i], planes[k]) >= 0;
+        for (int i = 0; i < n; i++) inside += distance(r, &poly[cur][i], planes_in[k]) >= 0;
         if (inside == n) continue;
-        if (inside == 0) return;
-        n = clip(r, poly[cur], n, poly[cur ^ 1], planes[k], varyings);
+        if (inside == 0) return 0;
+        n = clip(r, poly[cur], n, poly[cur ^ 1], planes_in[k], varyings);
         cur ^= 1;
     }
-    if (n < 3) return;
+    if (n < 3) return 0;
 
     screen_vertex sv[POLY_MAX];
     for (int i = 0; i < n; i++) {
@@ -210,5 +238,16 @@ void raster_triangle(raster *r, const raster_vertex *a, const raster_vertex *b, 
         sv[i].q = q;
         sv[i].var = v->var;
     }
-    for (int i = 1; i + 1 < n; i++) fill(r, &sv[0], &sv[i], &sv[i + 1]);
+    for (int i = 1; i + 1 < n; i++)
+        if (setup(r, &sv[0], &sv[i], &sv[i + 1], &pieces[made], planes + (size_t)made * raster_plane_floats(r))) made++;
+    r->triangles_drawn += (uint32_t)made;
+    return made;
+}
+
+void raster_triangle(raster *r, const raster_vertex *a, const raster_vertex *b, const raster_vertex *c) {
+    float planes[RASTER_MAX_PIECES * 5 * RASTER_MAX_VARYINGS];
+    raster_piece pieces[RASTER_MAX_PIECES];
+    int n = raster_setup(r, a, b, c, pieces, planes);
+    for (int i = 0; i < n; i++)
+        r->pixels_shaded += raster_walk(r, &pieces[i], planes + (size_t)i * raster_plane_floats(r), 0, r->height, r->shade, r->user);
 }

@@ -10,11 +10,12 @@ static uint32_t pow2_ceil(uint32_t v) { uint32_t p = 1; while (p < v) p <<= 1; r
 static uint32_t align_up(uint32_t v, uint32_t a) { return (v + a - 1) / a * a; }
 static uint32_t at_least_1(uint32_t v) { return v ? v : 1; }
 
+void gxm_tex_cache_reset(gxm_tex_cache *c) { memset(c->key, 0xFF, sizeof(c->key)); }
+
 /* --- the control words ------------------------------------------------------------ */
 
 int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
-    memset(t, 0, sizeof(*t) - sizeof(t->cache));
-    memset(t->cache_key, 0xFF, sizeof(t->cache_key));
+    memset(t, 0, sizeof(*t));
 
     t->type = w[1] >> 29;
     t->format = (w[1] & 0x1F000000u) | (w[0] & 0x80000000u) | (((w[3] >> 28) & 7) << 12);
@@ -128,7 +129,7 @@ int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
 
 /* --- one texel -------------------------------------------------------------------- */
 
-static void decode_block(gxm_tex *t, const uint8_t *block, uint32_t out[16]) {
+static void decode_block(const gxm_tex *t, const uint8_t *block, uint32_t out[16]) {
     switch (t->kind) {
     case GXM_TEX_BC1: tex_decode_bc1(block, out); break;
     case GXM_TEX_BC2: tex_decode_bc2(block, out); break;
@@ -138,7 +139,8 @@ static void decode_block(gxm_tex *t, const uint8_t *block, uint32_t out[16]) {
     }
 }
 
-void gxm_tex_texel(gxm_tex *t, unsigned face, unsigned level, int x, int y, float rgba[4]) {
+void gxm_tex_texel(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsigned level, int x, int y, float rgba[4]) {
+    uint32_t scratch[32], *block = scratch;
     rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0.0f;
     if (!t->base || level >= t->levels || x < 0 || y < 0 ||
         (uint32_t)x >= t->level_w[level] || (uint32_t)y >= t->level_h[level]) return;
@@ -152,11 +154,12 @@ void gxm_tex_texel(gxm_tex *t, unsigned face, unsigned level, int x, int y, floa
         uint64_t word = at + 8ull * tex_morton_index(ux, uy, nx, ny);
         if (at + 8ull * nx * ny > t->avail) return;
         uint32_t slot = (uint32_t)((word / 8) * 2654435761u) >> 26;
-        if (t->cache_key[slot] != (uint32_t)word) {
-            tex_decode_pvrtc(t->base + at, nx, ny, ux, uy, t->pvrtc_version, t->pvrtc_bits, t->cache[slot]);
-            t->cache_key[slot] = (uint32_t)word;
+        if (cache) block = cache->texels[slot];
+        if (!cache || cache->key[slot] != (uint32_t)word) {
+            tex_decode_pvrtc(t->base + at, nx, ny, ux, uy, t->pvrtc_version, t->pvrtc_bits, block);
+            if (cache) cache->key[slot] = (uint32_t)word;
         }
-        texel = t->cache[slot][((uint32_t)y & 3) * t->unit_w + ((uint32_t)x & (t->unit_w - 1u))];
+        texel = block[((uint32_t)y & 3) * t->unit_w + ((uint32_t)x & (t->unit_w - 1u))];
         pixfmt_decode(&t->pf, (const uint8_t *)&texel, rgba);
         if (t->gamma) for (int i = 0; i < 3; i++) rgba[i] = pix_srgb_to_linear(rgba[i]);
         return;
@@ -194,11 +197,12 @@ void gxm_tex_texel(gxm_tex *t, unsigned face, unsigned level, int x, int y, floa
         at += (uint64_t)index * t->unit_bytes;
         if (at + t->unit_bytes > t->avail) return;
         uint32_t slot = (uint32_t)((at / t->unit_bytes) * 2654435761u) >> 26;
-        if (t->cache_key[slot] != (uint32_t)at) {
-            decode_block(t, t->base + at, t->cache[slot]);
-            t->cache_key[slot] = (uint32_t)at;
+        if (cache) block = cache->texels[slot];
+        if (!cache || cache->key[slot] != (uint32_t)at) {
+            decode_block(t, t->base + at, block);
+            if (cache) cache->key[slot] = (uint32_t)at;
         }
-        texel = t->cache[slot][(y & 3) * 4 + (x & 3)];
+        texel = block[(y & 3) * 4 + (x & 3)];
         bytes = (const uint8_t *)&texel;
     }
     pixfmt_decode(&t->pf, bytes, rgba);
@@ -231,11 +235,12 @@ static int wrap(int i, int n, int mode) {
     }
 }
 
-static void sample_level(gxm_tex *t, unsigned face, unsigned level, float u, float v, int linear, float rgba[4]) {
+static void sample_level(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsigned level, float u, float v,
+                         int linear, float rgba[4]) {
     int w = (int)t->level_w[level], h = (int)t->level_h[level];
     int um = t->cube ? 2 : t->u_mode, vm = t->cube ? 2 : t->v_mode;
     if (!linear) {
-        gxm_tex_texel(t, face, level, wrap((int)floorf(u * (float)w), w, um), wrap((int)floorf(v * (float)h), h, vm), rgba);
+        gxm_tex_texel(t, cache, face, level, wrap((int)floorf(u * (float)w), w, um), wrap((int)floorf(v * (float)h), h, vm), rgba);
         return;
     }
     float x = u * (float)w - 0.5f, y = v * (float)h - 0.5f;
@@ -243,10 +248,10 @@ static void sample_level(gxm_tex *t, unsigned face, unsigned level, float u, flo
     int x0 = wrap((int)fx0, w, um), x1 = wrap((int)fx0 + 1, w, um);
     int y0 = wrap((int)fy0, h, vm), y1 = wrap((int)fy0 + 1, h, vm);
     float a[4], b[4], c[4], d[4];
-    gxm_tex_texel(t, face, level, x0, y0, a);
-    gxm_tex_texel(t, face, level, x1, y0, b);
-    gxm_tex_texel(t, face, level, x0, y1, c);
-    gxm_tex_texel(t, face, level, x1, y1, d);
+    gxm_tex_texel(t, cache, face, level, x0, y0, a);
+    gxm_tex_texel(t, cache, face, level, x1, y0, b);
+    gxm_tex_texel(t, cache, face, level, x0, y1, c);
+    gxm_tex_texel(t, cache, face, level, x1, y1, d);
     for (int i = 0; i < 4; i++) {
         float top = a[i] + (b[i] - a[i]) * fx, bottom = c[i] + (d[i] - c[i]) * fx;
         rgba[i] = top + (bottom - top) * fy;
@@ -278,7 +283,7 @@ float gxm_tex_footprint(const gxm_tex *t, float dudx, float dvdx, float dudy, fl
     return most > 0.0f ? 0.5f * log2f(most) : -64.0f;
 }
 
-void gxm_tex_sample(gxm_tex *t, const float *coord, float lod, float rgba[4]) {
+void gxm_tex_sample(const gxm_tex *t, gxm_tex_cache *cache, const float *coord, float lod, float rgba[4]) {
     unsigned face = 0;
     float u = coord[0], v = coord[1];
     if (t->cube) cube_face(coord, &face, &u, &v);
@@ -297,26 +302,26 @@ void gxm_tex_sample(gxm_tex *t, const float *coord, float lod, float rgba[4]) {
         unsigned lower = (unsigned)level;
         float between = level - (float)lower, a[4], b[4];
         if (between > 0.0f) {
-            sample_level(t, face, lower, u, v, linear, a);
-            sample_level(t, face, lower + 1, u, v, linear, b);
+            sample_level(t, cache, face, lower, u, v, linear, a);
+            sample_level(t, cache, face, lower + 1, u, v, linear, b);
             for (int i = 0; i < 4; i++) rgba[i] = a[i] + (b[i] - a[i]) * between;
             return;
         }
     }
-    sample_level(t, face, (unsigned)(level + 0.5f), u, v, linear, rgba);
+    sample_level(t, cache, face, (unsigned)(level + 0.5f), u, v, linear, rgba);
 }
 
-void gxm_tex_gather(gxm_tex *t, const float *coord, float texels[4], float fraction[2]) {
+void gxm_tex_gather(const gxm_tex *t, gxm_tex_cache *cache, const float *coord, float texels[4], float fraction[2]) {
     int w = (int)t->level_w[0], h = (int)t->level_h[0];
     float u = coord[0], v = coord[1], rgba[4];
     if (u != u || v != v || u > 32768.0f || u < -32768.0f || v > 32768.0f || v < -32768.0f) u = v = 0.0f;
     float x = u * (float)w - 0.5f, y = v * (float)h - 0.5f, fx0 = floorf(x), fy0 = floorf(y);
     int x0 = wrap((int)fx0, w, t->u_mode), x1 = wrap((int)fx0 + 1, w, t->u_mode);
     int y0 = wrap((int)fy0, h, t->v_mode), y1 = wrap((int)fy0 + 1, h, t->v_mode);
-    gxm_tex_texel(t, 0, 0, x0, y1, rgba); texels[0] = rgba[0];
-    gxm_tex_texel(t, 0, 0, x1, y1, rgba); texels[1] = rgba[0];
-    gxm_tex_texel(t, 0, 0, x1, y0, rgba); texels[2] = rgba[0];
-    gxm_tex_texel(t, 0, 0, x0, y0, rgba); texels[3] = rgba[0];
+    gxm_tex_texel(t, cache, 0, 0, x0, y1, rgba); texels[0] = rgba[0];
+    gxm_tex_texel(t, cache, 0, 0, x1, y1, rgba); texels[1] = rgba[0];
+    gxm_tex_texel(t, cache, 0, 0, x1, y0, rgba); texels[2] = rgba[0];
+    gxm_tex_texel(t, cache, 0, 0, x0, y0, rgba); texels[3] = rgba[0];
     fraction[0] = x - fx0;
     fraction[1] = y - fy0;
 }

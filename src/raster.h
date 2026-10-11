@@ -16,6 +16,7 @@
 #ifndef VITARECOMP_RASTER_H
 #define VITARECOMP_RASTER_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define RASTER_MAX_VARYINGS 64
@@ -70,5 +71,32 @@ typedef struct {
 
 /* Draw one triangle. The vertices are not modified. */
 void raster_triangle(raster *r, const raster_vertex *a, const raster_vertex *b, const raster_vertex *c);
+
+/* The same in two steps, for a caller that walks a triangle more than once:
+ * in bands of rows, on several threads. A triangle is set up once into as
+ * many as RASTER_MAX_PIECES pieces (clipping can leave a polygon), each
+ * with raster_plane_floats(r) floats of its own in `planes`; a piece is
+ * then walked in any range of rows, and the walk changes nothing of the
+ * raster's, so walks of different rows may run together. */
+#define RASTER_MAX_PIECES 14
+
+typedef struct {
+    int      x0, y0, x1, y1;                /* the pixels it may cover, inclusive */
+    int64_t  ax, ay, bx, by, cx, cy;        /* its corners, in sixteenths of a pixel, clockwise */
+    uint8_t  clockwise;                     /* as it was given, before being turned */
+    uint8_t  bias_ab, bias_bc, bias_ca;
+    float    inv_area, za, zb, zc, qa, qb, qc, q_dx, q_dy;
+} raster_piece;
+
+static inline size_t raster_plane_floats(const raster *r) { return 5u * (size_t)r->varyings; }
+
+/* Returns the number of pieces written, 0 when nothing of it is drawn. */
+int raster_setup(raster *r, const raster_vertex *a, const raster_vertex *b, const raster_vertex *c,
+                 raster_piece *pieces, float *planes);
+
+/* Walk the pixels of a piece in rows row0 <= y < row1, calling `shade` for
+ * each as raster_triangle does. Returns how many were handed to it. */
+uint32_t raster_walk(const raster *r, const raster_piece *piece, const float *planes, int row0, int row1,
+                     raster_shade shade, void *user);
 
 #endif /* VITARECOMP_RASTER_H */
