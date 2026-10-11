@@ -10,6 +10,7 @@
 #include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
 #include "sched.h"
+#include "gxm_surfaces.h"
 
 #define SCE_DISPLAY_ERROR_INVALID_VALUE       0x80290001u
 #define SCE_DISPLAY_ERROR_INVALID_ADDR        0x80290002u
@@ -76,6 +77,9 @@ void vita_hle_sceDisplayWaitSetFrameBufMulti(void) { vita_hle_sceDisplayWaitVbla
 int vita_display_current(vita_framebuf *out) {
     if (!g_set) return 0;
     *out = g_fb;
+    /* whoever asks is about to read the frame: if a graphics card drew it, it is put where it is looked for */
+    uint32_t bytes = g_fb.pitch * g_fb.height * 4;
+    gxm_gpu_memory_wanted(vita_mem_ptr(g_fb.base, bytes), bytes);
     return 1;
 }
 

@@ -1,9 +1,9 @@
 /* gpu_d3d11.c — gpu.h on Direct3D 11.
  *
- * Nothing here is clever. A list's target is a texture filled from the
- * title's memory and read back into it; a draw is its buffers copied into
- * buffers that grow, its state looked up among the state objects already
- * made, and one call. The shader compiler is the system's (d3dcompiler),
+ * Nothing here is clever. A surface is a texture with the views it can be
+ * drawn to and read through; a draw is its buffers copied into buffers
+ * that grow, its state looked up among the state objects already made, and
+ * one call. The shader compiler is the system's (d3dcompiler),
  * found at run time like the rest of Direct3D: nothing is added to what a
  * program built with this ships.
  */
@@ -23,9 +23,27 @@
 #define CONSTANT_BYTES 1232u            /* gxp_hlsl.h's cbuffer: 66 + 3 + 8 rows of sixteen bytes */
 #define KEPT 64                         /* state objects of a kind */
 #define QUERIES 4096
+#define READERS 24
 
 struct gpu_shader { ID3D11VertexShader *vs; ID3D11PixelShader *ps; ID3D11InputLayout *layout; };
-struct gpu_texture { ID3D11Texture2D *tex; ID3D11ShaderResourceView *view; };
+struct gpu_texture {
+    ID3D11Texture2D *tex;
+    ID3D11ShaderResourceView *view;
+    ID3D11RenderTargetView *target;         /* of one gpu_convert fills */
+    uint32_t width, height;
+};
+
+struct gpu_surface {
+    unsigned format;
+    uint32_t width, height;
+    ID3D11Texture2D *tex;
+    ID3D11RenderTargetView *target;         /* a colour's */
+    ID3D11UnorderedAccessView *ordered;     /* and, where the card can, for a program to read and write itself */
+    ID3D11DepthStencilView *depth;          /* a depth's */
+    ID3D11ShaderResourceView *view, *view2; /* to read it as a texture: a colour, or a depth and its stencil */
+    ID3D11Texture2D *copy;                  /* a colour as it stood before a draw, for a program that reads it: made when first wanted */
+    ID3D11ShaderResourceView *copy_view;
+};
 
 typedef struct { uint8_t key[24]; void *object; } kept;
 
@@ -35,16 +53,19 @@ static struct {
     ID3D11DeviceContext *ctx;
     char name[200];
 
-    /* the target of the list in hand, and what its textures were made for */
-    gpu_target t;
+    /* the surfaces of the list in hand */
+    gpu_surface *colour, *depth;
     int in_list, failed;
-    struct { uint32_t width, height; unsigned colour, depth; } made;
-    ID3D11Texture2D *colour, *copy, *colour_out, *depth, *depth_out;
-    ID3D11RenderTargetView *colour_view;
-    ID3D11UnorderedAccessView *colour_ordered;      /* the target for a program to read and write itself; NULL without */
     int ordered;                                    /* the card has rasteriser-ordered views of more than one word */
-    ID3D11ShaderResourceView *copy_view;
-    ID3D11DepthStencilView *depth_view;
+    /* textures the processor can read, for taking a surface back: one of each form and size met */
+    struct { DXGI_FORMAT format; uint32_t width, height; ID3D11Texture2D *tex; } readers[READERS];
+    unsigned reader_count;
+    /* for gpu_convert: three corners that cover a target, and no tests */
+    ID3D11VertexShader *whole;
+    ID3D11DepthStencilState *untested;
+    /* for gpu_surface_depth_corner: a program that hands a depth on, and every depth written */
+    ID3D11PixelShader *depth_on;
+    ID3D11DepthStencilState *all_written;
 
     ID3D11Buffer *vertices, *indices, *constants[2], *memory[2];
     ID3D11ShaderResourceView *memory_view[2];
@@ -79,6 +100,33 @@ static DXGI_FORMAT format_of(unsigned f) {
 
 static DXGI_FORMAT depth_view_format(unsigned f) {
     return f == GPU_D16 ? DXGI_FORMAT_D16_UNORM : f == GPU_D24S8 ? DXGI_FORMAT_D24_UNORM_S8_UINT : DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+}
+
+/* A surface's texture has no one form where it is read in two: bytes of
+ * colour are drawn on the display's curve or off it and read as bytes
+ * either way; depth is drawn as depth and read as numbers. So the texture
+ * is made of a family and each view names its member. */
+static DXGI_FORMAT surface_family(unsigned f) {
+    switch (f) {
+    case GPU_RGBA8: case GPU_RGBA8_SRGB: return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    case GPU_BGRA8: case GPU_BGRA8_SRGB: return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    default:                             return format_of(f);
+    }
+}
+
+static DXGI_FORMAT surface_read_format(unsigned f) {
+    switch (f) {
+    case GPU_RGBA8: case GPU_RGBA8_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case GPU_BGRA8: case GPU_BGRA8_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case GPU_D16:                        return DXGI_FORMAT_R16_UNORM;
+    case GPU_D24S8:                      return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    case GPU_D32FS8:                     return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    default:                             return format_of(f);
+    }
+}
+
+static DXGI_FORMAT surface_stencil_format(unsigned f) {
+    return f == GPU_D24S8 ? DXGI_FORMAT_X24_TYPELESS_G8_UINT : f == GPU_D32FS8 ? DXGI_FORMAT_X32_TYPELESS_G8X24_UINT : DXGI_FORMAT_UNKNOWN;
 }
 
 static unsigned texel_bytes(unsigned f) {
@@ -252,8 +300,34 @@ gpu_texture *gpu_texture_make(unsigned format, unsigned width, unsigned height, 
     return t;
 }
 
+gpu_texture *gpu_texture_blank(unsigned width, unsigned height) {
+    D3D11_TEXTURE2D_DESC d;
+    if (!G.ok || !width || !height) return NULL;
+    memset(&d, 0, sizeof(d));
+    d.Width = width;
+    d.Height = height;
+    d.MipLevels = 1;
+    d.ArraySize = 1;
+    d.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_DEFAULT;
+    d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    gpu_texture *t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
+    t->width = width;
+    t->height = height;
+    if (FAILED(ID3D11Device_CreateTexture2D(G.dev, &d, NULL, &t->tex)) ||
+        FAILED(ID3D11Device_CreateShaderResourceView(G.dev, (ID3D11Resource *)t->tex, NULL, &t->view)) ||
+        FAILED(ID3D11Device_CreateRenderTargetView(G.dev, (ID3D11Resource *)t->tex, NULL, &t->target))) {
+        gpu_texture_free(t);
+        return NULL;
+    }
+    return t;
+}
+
 void gpu_texture_free(gpu_texture *t) {
     if (!t) return;
+    RELEASE(t->target);
     RELEASE(t->view);
     RELEASE(t->tex);
     free(t);
@@ -429,81 +503,257 @@ static ID3D11SamplerState *sampler_state(const gpu_sampler *g) {
     return s;
 }
 
-/* --- a list ------------------------------------------------------------------------------------- */
+/* --- surfaces ----------------------------------------------------------------------------------- */
 
-static void drop_target(void) {
-    RELEASE(G.colour_view); RELEASE(G.colour_ordered); RELEASE(G.copy_view); RELEASE(G.depth_view);
-    RELEASE(G.colour); RELEASE(G.copy); RELEASE(G.colour_out); RELEASE(G.depth); RELEASE(G.depth_out);
-    memset(&G.made, 0, sizeof(G.made));
-}
+static int is_depth(unsigned format) { return format == GPU_D16 || format == GPU_D24S8 || format == GPU_D32FS8; }
 
-int gpu_begin(const gpu_target *t) {
-    if (!G.ok || G.in_list || !t->width || !t->height) return -1;
-    if (t->colour_format && format_of(t->colour_format) == DXGI_FORMAT_UNKNOWN) return -1;
-    if (format_of(t->depth_format) == DXGI_FORMAT_UNKNOWN) return -1;
-
+/* The texture of a surface and what it is drawn through; with `rows`, made
+ * holding them. A depth texture is made anew to be filled: the card takes
+ * depth and stencil together only as a texture's first contents. */
+static int surface_texture(gpu_surface *s, const void *rows, uint32_t pitch) {
     D3D11_TEXTURE2D_DESC d;
+    D3D11_SUBRESOURCE_DATA init;
+    D3D11_SHADER_RESOURCE_VIEW_DESC read;
     memset(&d, 0, sizeof(d));
-    d.Width = t->width;
-    d.Height = t->height;
+    d.Width = s->width;
+    d.Height = s->height;
     d.MipLevels = 1;
     d.ArraySize = 1;
     d.SampleDesc.Count = 1;
-
-    if (G.made.width != t->width || G.made.height != t->height || G.made.colour != t->colour_format || G.made.depth != t->depth_format) {
-        drop_target();
-        if (t->colour_format) {
-            d.Format = format_of(t->colour_format);
-            int ordered = gpu_ordered(t->colour_format);
-            d.Usage = D3D11_USAGE_DEFAULT;
-            d.BindFlags = D3D11_BIND_RENDER_TARGET | (ordered ? D3D11_BIND_UNORDERED_ACCESS : 0);
-            d.CPUAccessFlags = 0;
-            if (FAILED(ID3D11Device_CreateTexture2D(G.dev, &d, NULL, &G.colour)) ||
-                FAILED(ID3D11Device_CreateRenderTargetView(G.dev, (ID3D11Resource *)G.colour, NULL, &G.colour_view))) { drop_target(); return -1; }
-            if (ordered && FAILED(ID3D11Device_CreateUnorderedAccessView(G.dev, (ID3D11Resource *)G.colour, NULL, &G.colour_ordered)))
-                G.colour_ordered = NULL;
-            d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            if (FAILED(ID3D11Device_CreateTexture2D(G.dev, &d, NULL, &G.copy)) ||
-                FAILED(ID3D11Device_CreateShaderResourceView(G.dev, (ID3D11Resource *)G.copy, NULL, &G.copy_view))) { drop_target(); return -1; }
-            d.Usage = D3D11_USAGE_STAGING;
-            d.BindFlags = 0;
-            d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            if (FAILED(ID3D11Device_CreateTexture2D(G.dev, &d, NULL, &G.colour_out))) { drop_target(); return -1; }
-        }
-        d.Format = format_of(t->depth_format);
-        d.Usage = D3D11_USAGE_STAGING;
-        d.BindFlags = 0;
-        d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (FAILED(ID3D11Device_CreateTexture2D(G.dev, &d, NULL, &G.depth_out))) { drop_target(); return -1; }
-        G.made.width = t->width; G.made.height = t->height;
-        G.made.colour = t->colour_format; G.made.depth = t->depth_format;
-    }
-
-    /* the depth and the stencil as they stand: a texture made with them in it */
-    RELEASE(G.depth_view);
-    RELEASE(G.depth);
-    D3D11_SUBRESOURCE_DATA init;
-    D3D11_DEPTH_STENCIL_VIEW_DESC v;
-    init.pSysMem = t->depth;
-    init.SysMemPitch = t->depth_pitch;
-    init.SysMemSlicePitch = 0;
-    d.Format = format_of(t->depth_format);
+    d.Format = surface_family(s->format);
     d.Usage = D3D11_USAGE_DEFAULT;
-    d.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    d.CPUAccessFlags = 0;
-    memset(&v, 0, sizeof(v));
-    v.Format = depth_view_format(t->depth_format);
-    v.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-    if (FAILED(ID3D11Device_CreateTexture2D(G.dev, &d, t->depth ? &init : NULL, &G.depth)) ||
-        FAILED(ID3D11Device_CreateDepthStencilView(G.dev, (ID3D11Resource *)G.depth, &v, &G.depth_view))) { drop_target(); return -1; }
+    init.pSysMem = rows;
+    init.SysMemPitch = pitch;
+    init.SysMemSlicePitch = 0;
+    memset(&read, 0, sizeof(read));
+    read.Format = surface_read_format(s->format);
+    read.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    read.Texture2D.MipLevels = 1;
+    RELEASE(s->target); RELEASE(s->ordered); RELEASE(s->depth); RELEASE(s->view); RELEASE(s->view2); RELEASE(s->tex);
+    if (is_depth(s->format)) {
+        D3D11_DEPTH_STENCIL_VIEW_DESC v;
+        memset(&v, 0, sizeof(v));
+        v.Format = depth_view_format(s->format);
+        v.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        d.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(ID3D11Device_CreateTexture2D(G.dev, &d, rows ? &init : NULL, &s->tex)) ||
+            FAILED(ID3D11Device_CreateDepthStencilView(G.dev, (ID3D11Resource *)s->tex, &v, &s->depth)) ||
+            FAILED(ID3D11Device_CreateShaderResourceView(G.dev, (ID3D11Resource *)s->tex, &read, &s->view))) return 0;
+        read.Format = surface_stencil_format(s->format);
+        return read.Format == DXGI_FORMAT_UNKNOWN ||
+               SUCCEEDED(ID3D11Device_CreateShaderResourceView(G.dev, (ID3D11Resource *)s->tex, &read, &s->view2));
+    }
+    D3D11_RENDER_TARGET_VIEW_DESC draw;
+    int ordered = gpu_ordered(s->format);
+    memset(&draw, 0, sizeof(draw));
+    draw.Format = format_of(s->format);
+    draw.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | (ordered ? D3D11_BIND_UNORDERED_ACCESS : 0);
+    if (FAILED(ID3D11Device_CreateTexture2D(G.dev, &d, rows ? &init : NULL, &s->tex)) ||
+        FAILED(ID3D11Device_CreateRenderTargetView(G.dev, (ID3D11Resource *)s->tex, &draw, &s->target)) ||
+        FAILED(ID3D11Device_CreateShaderResourceView(G.dev, (ID3D11Resource *)s->tex, &read, &s->view))) return 0;
+    if (ordered) {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC both;
+        memset(&both, 0, sizeof(both));
+        both.Format = format_of(s->format);
+        both.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+        if (FAILED(ID3D11Device_CreateUnorderedAccessView(G.dev, (ID3D11Resource *)s->tex, &both, &s->ordered))) s->ordered = NULL;
+    }
+    return 1;
+}
 
-    if (G.colour && t->colour)
-        ID3D11DeviceContext_UpdateSubresource(G.ctx, (ID3D11Resource *)G.colour, 0, NULL, t->colour, t->colour_pitch, 0);
+gpu_surface *gpu_surface_make(unsigned format, uint32_t width, uint32_t height) {
+    if (!G.ok || !width || !height || format_of(format) == DXGI_FORMAT_UNKNOWN) return NULL;
+    gpu_surface *s = calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    s->format = format;
+    s->width = width;
+    s->height = height;
+    if (!surface_texture(s, NULL, 0)) { gpu_surface_free(s); return NULL; }
+    return s;
+}
 
-    D3D11_VIEWPORT port = { 0.0f, 0.0f, (float)t->width, (float)t->height, 0.0f, 1.0f };
-    ID3D11DeviceContext_OMSetRenderTargets(G.ctx, G.colour_view ? 1 : 0, G.colour_view ? &G.colour_view : NULL, G.depth_view);
+void gpu_surface_free(gpu_surface *s) {
+    if (!s) return;
+    if (G.colour == s) G.colour = NULL;
+    if (G.depth == s) G.depth = NULL;
+    RELEASE(s->target); RELEASE(s->ordered); RELEASE(s->depth); RELEASE(s->view); RELEASE(s->view2);
+    RELEASE(s->copy_view); RELEASE(s->copy); RELEASE(s->tex);
+    free(s);
+}
+
+int gpu_surface_put(gpu_surface *s, const void *rows, uint32_t pitch) {
+    if (!s || !rows || G.in_list) return -1;
+    if (is_depth(s->format)) return surface_texture(s, rows, pitch) ? 0 : -1;
+    ID3D11DeviceContext_UpdateSubresource(G.ctx, (ID3D11Resource *)s->tex, 0, NULL, rows, pitch, 0);
+    return 0;
+}
+
+/* A texture the processor can map, of a surface's form and size. */
+static ID3D11Texture2D *reader_for(const gpu_surface *s) {
+    DXGI_FORMAT format = is_depth(s->format) ? format_of(s->format) : surface_read_format(s->format);
+    for (unsigned i = 0; i < G.reader_count; i++)
+        if (G.readers[i].format == format && G.readers[i].width == s->width && G.readers[i].height == s->height) return G.readers[i].tex;
+    D3D11_TEXTURE2D_DESC d;
+    memset(&d, 0, sizeof(d));
+    d.Width = s->width;
+    d.Height = s->height;
+    d.MipLevels = 1;
+    d.ArraySize = 1;
+    d.SampleDesc.Count = 1;
+    d.Format = format;
+    d.Usage = D3D11_USAGE_STAGING;
+    d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (G.reader_count == READERS) {                /* full: the oldest goes */
+        RELEASE(G.readers[0].tex);
+        memmove(G.readers, G.readers + 1, (READERS - 1) * sizeof(G.readers[0]));
+        G.reader_count--;
+    }
+    ID3D11Texture2D *tex = NULL;
+    if (FAILED(ID3D11Device_CreateTexture2D(G.dev, &d, NULL, &tex))) return NULL;
+    G.readers[G.reader_count].format = format;
+    G.readers[G.reader_count].width = s->width;
+    G.readers[G.reader_count].height = s->height;
+    G.readers[G.reader_count++].tex = tex;
+    return tex;
+}
+
+int gpu_surface_get(gpu_surface *s, void *rows, uint32_t pitch) {
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (!s || !rows || G.in_list) return -1;
+    ID3D11Texture2D *reader = reader_for(s);
+    uint32_t row_bytes = s->width * texel_bytes(s->format);
+    if (!reader) return -1;
+    ID3D11DeviceContext_CopyResource(G.ctx, (ID3D11Resource *)reader, (ID3D11Resource *)s->tex);
+    if (FAILED(ID3D11DeviceContext_Map(G.ctx, (ID3D11Resource *)reader, 0, D3D11_MAP_READ, 0, &m))) return -1;
+    for (uint32_t y = 0; y < s->height; y++)
+        memcpy((uint8_t *)rows + (size_t)y * pitch, (const uint8_t *)m.pData + (size_t)y * m.RowPitch, row_bytes);
+    ID3D11DeviceContext_Unmap(G.ctx, (ID3D11Resource *)reader, 0);
+    return 0;
+}
+
+void gpu_surface_clear(gpu_surface *s, float depth, uint8_t stencil) {
+    if (s && s->depth) ID3D11DeviceContext_ClearDepthStencilView(G.ctx, s->depth, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, depth, stencil);
+}
+
+int gpu_surface_copy(gpu_surface *into, gpu_surface *from) {
+    if (!into || !from || G.in_list || into->format != from->format || into->width != from->width || into->height != from->height) return -1;
+    ID3D11DeviceContext_CopyResource(G.ctx, (ID3D11Resource *)into->tex, (ID3D11Resource *)from->tex);
+    return 0;
+}
+
+int gpu_surface_copy_corner(gpu_surface *into, gpu_surface *from, uint32_t width, uint32_t height) {
+    if (!into || !from || G.in_list || into->format != from->format || is_depth(into->format) || width > into->width || height > into->height ||
+        width > from->width || height > from->height) return -1;
+    D3D11_BOX box = { 0, 0, 0, width, height, 1 };
+    ID3D11DeviceContext_CopySubresourceRegion(G.ctx, (ID3D11Resource *)into->tex, 0, 0, 0, 0, (ID3D11Resource *)from->tex, 0, &box);
+    return 0;
+}
+
+/* --- a texture from a surface ------------------------------------------------------------------- */
+
+/* Three corners that cover whatever is drawn to. */
+static int whole_made(void) {
+    static const char WHOLE[] =
+        "float4 main(uint n : SV_VertexID) : SV_Position { return float4(float((n << 1) & 2u) * 2.0 - 1.0, 1.0 - float(n & 2u) * 2.0, 0.0, 1.0); }\n";
+    if (G.whole) return 1;
+    ID3DBlob *code = NULL;
+    if (FAILED(D3DCompile(WHOLE, sizeof(WHOLE) - 1, NULL, NULL, NULL, "main", "vs_5_0", 0, 0, &code, NULL))) return 0;
+    HRESULT hr = ID3D11Device_CreateVertexShader(G.dev, ID3D10Blob_GetBufferPointer(code), ID3D10Blob_GetBufferSize(code), NULL, &G.whole);
+    RELEASE(code);
+    return SUCCEEDED(hr);
+}
+
+int gpu_surface_depth_corner(gpu_surface *into, gpu_surface *from, uint8_t stencil) {
+    static const char ON[] = "Texture2D<float> SRC : register(t0);\nfloat main(float4 pos : SV_Position) : SV_Depth { return SRC.Load(int3(pos.xy, 0)); }\n";
+    static const float NO_FACTOR[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    if (!G.ok || G.in_list || !into || !from || !into->depth || !from->view || into->format != from->format ||
+        into->width > from->width || into->height > from->height || !whole_made()) return -1;
+    if (!G.depth_on) {
+        ID3DBlob *code = NULL;
+        if (FAILED(D3DCompile(ON, sizeof(ON) - 1, NULL, NULL, NULL, "main", "ps_5_0", 0, 0, &code, NULL))) return -1;
+        HRESULT hr = ID3D11Device_CreatePixelShader(G.dev, ID3D10Blob_GetBufferPointer(code), ID3D10Blob_GetBufferSize(code), NULL, &G.depth_on);
+        RELEASE(code);
+        if (FAILED(hr)) return -1;
+    }
+    if (!G.all_written) {
+        D3D11_DEPTH_STENCIL_DESC d;
+        memset(&d, 0, sizeof(d));
+        d.DepthEnable = TRUE;
+        d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        d.DepthFunc = D3D11_COMPARISON_ALWAYS;
+        if (FAILED(ID3D11Device_CreateDepthStencilState(G.dev, &d, &G.all_written))) return -1;
+    }
+    ID3D11RasterizerState *raster = raster_state(0);
+    ID3D11ShaderResourceView *none = NULL;
+    D3D11_VIEWPORT port = { 0.0f, 0.0f, (float)into->width, (float)into->height, 0.0f, 1.0f };
+    D3D11_RECT all = { 0, 0, (LONG)into->width, (LONG)into->height };
+    if (!raster) return -1;
+    ID3D11DeviceContext_ClearDepthStencilView(G.ctx, into->depth, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, stencil);
+    ID3D11DeviceContext_OMSetRenderTargets(G.ctx, 0, NULL, into->depth);
     ID3D11DeviceContext_RSSetViewports(G.ctx, 1, &port);
-    G.t = *t;
+    ID3D11DeviceContext_RSSetScissorRects(G.ctx, 1, &all);
+    ID3D11DeviceContext_RSSetState(G.ctx, raster);
+    ID3D11DeviceContext_OMSetDepthStencilState(G.ctx, G.all_written, 0);
+    ID3D11DeviceContext_OMSetBlendState(G.ctx, NULL, NO_FACTOR, 0xFFFFFFFFu);
+    ID3D11DeviceContext_IASetInputLayout(G.ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(G.ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(G.ctx, G.whole, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(G.ctx, G.depth_on, NULL, 0);
+    ID3D11DeviceContext_PSSetShaderResources(G.ctx, 0, 1, &from->view);
+    ID3D11DeviceContext_Draw(G.ctx, 3, 0);
+    ID3D11DeviceContext_PSSetShaderResources(G.ctx, 0, 1, &none);
+    ID3D11DeviceContext_OMSetRenderTargets(G.ctx, 0, NULL, NULL);
+    return 0;
+}
+
+int gpu_convert(gpu_texture *into, gpu_surface *from, gpu_shader *program, const void *constants, uint32_t constants_bytes) {
+    if (!G.ok || G.in_list || !into || !into->target || !from || !from->view || !program || !program->ps || !whole_made()) return -1;
+    if (!G.untested) {
+        D3D11_DEPTH_STENCIL_DESC d;
+        memset(&d, 0, sizeof(d));
+        d.DepthFunc = D3D11_COMPARISON_ALWAYS;
+        if (FAILED(ID3D11Device_CreateDepthStencilState(G.dev, &d, &G.untested))) return -1;
+    }
+    ID3D11RasterizerState *raster = raster_state(0);
+    uint8_t block[CONSTANT_BYTES];
+    if (!raster) return -1;
+    memset(block, 0, sizeof(block));
+    if (constants) memcpy(block, constants, constants_bytes < 64 ? constants_bytes : 64);
+    if (!fill(G.constants[1], block, CONSTANT_BYTES)) return -1;
+
+    static const float NO_FACTOR[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    ID3D11ShaderResourceView *views[2] = { from->view, from->view2 }, *none[2] = { NULL, NULL };
+    D3D11_VIEWPORT port = { 0.0f, 0.0f, (float)into->width, (float)into->height, 0.0f, 1.0f };
+    D3D11_RECT all = { 0, 0, (LONG)into->width, (LONG)into->height };
+    ID3D11DeviceContext_OMSetRenderTargets(G.ctx, 1, &into->target, NULL);
+    ID3D11DeviceContext_RSSetViewports(G.ctx, 1, &port);
+    ID3D11DeviceContext_RSSetScissorRects(G.ctx, 1, &all);
+    ID3D11DeviceContext_RSSetState(G.ctx, raster);
+    ID3D11DeviceContext_OMSetDepthStencilState(G.ctx, G.untested, 0);
+    ID3D11DeviceContext_OMSetBlendState(G.ctx, NULL, NO_FACTOR, 0xFFFFFFFFu);
+    ID3D11DeviceContext_IASetInputLayout(G.ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(G.ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(G.ctx, G.whole, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(G.ctx, program->ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(G.ctx, 0, 1, &G.constants[1]);
+    ID3D11DeviceContext_PSSetShaderResources(G.ctx, 0, 2, views);
+    ID3D11DeviceContext_Draw(G.ctx, 3, 0);
+    /* neither stays bound: the texture is about to be sampled and the surface drawn to */
+    ID3D11DeviceContext_PSSetShaderResources(G.ctx, 0, 2, none);
+    ID3D11DeviceContext_OMSetRenderTargets(G.ctx, 0, NULL, NULL);
+    return 0;
+}
+
+/* --- a list ------------------------------------------------------------------------------------- */
+
+int gpu_begin(gpu_surface *colour, gpu_surface *depth) {
+    if (!G.ok || G.in_list || !depth || !depth->depth) return -1;
+    if (colour && (!colour->target || colour->width != depth->width || colour->height != depth->height)) return -1;
+    D3D11_VIEWPORT port = { 0.0f, 0.0f, (float)depth->width, (float)depth->height, 0.0f, 1.0f };
+    ID3D11DeviceContext_RSSetViewports(G.ctx, 1, &port);
+    G.colour = colour;
+    G.depth = depth;
     G.in_list = 1;
     G.failed = 0;
     G.query_count = 0;
@@ -559,17 +809,34 @@ int gpu_draw(const gpu_draw_call *c) {
      * write in the order its triangles come; or, where that cannot be, a copy made before
      * the draw, and the target as any other program has it */
     ID3D11ShaderResourceView *now = NULL;
-    int ordered = c->reads_pixel == 2 && G.colour_ordered && c->fragment;
-    if (c->reads_pixel && !ordered && G.colour && c->fragment) {
-        ID3D11DeviceContext_CopyResource(G.ctx, (ID3D11Resource *)G.copy, (ID3D11Resource *)G.colour);
-        now = G.copy_view;
-    }
+    gpu_surface *colour = G.colour;
+    int ordered = c->reads_pixel == 2 && colour && colour->ordered && c->fragment;
     if (c->reads_pixel == 2 && !ordered) { G.failed = 1; return -1; }
+    if (c->reads_pixel && !ordered && colour && c->fragment) {
+        if (!colour->copy) {
+            D3D11_TEXTURE2D_DESC d;
+            D3D11_SHADER_RESOURCE_VIEW_DESC as_drawn;
+            ID3D11Texture2D_GetDesc(colour->tex, &d);
+            d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            memset(&as_drawn, 0, sizeof(as_drawn));
+            as_drawn.Format = format_of(colour->format);
+            as_drawn.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            as_drawn.Texture2D.MipLevels = 1;
+            if (FAILED(ID3D11Device_CreateTexture2D(G.dev, &d, NULL, &colour->copy)) ||
+                FAILED(ID3D11Device_CreateShaderResourceView(G.dev, (ID3D11Resource *)colour->copy, &as_drawn, &colour->copy_view))) {
+                RELEASE(colour->copy);
+                G.failed = 1;
+                return -1;
+            }
+        }
+        ID3D11DeviceContext_CopyResource(G.ctx, (ID3D11Resource *)colour->copy, (ID3D11Resource *)colour->tex);
+        now = colour->copy_view;
+    }
     ID3D11DeviceContext_PSSetShaderResources(G.ctx, 17, 1, &now);
     if (ordered)
-        ID3D11DeviceContext_OMSetRenderTargetsAndUnorderedAccessViews(G.ctx, 0, NULL, G.depth_view, 0, 1, &G.colour_ordered, NULL);
+        ID3D11DeviceContext_OMSetRenderTargetsAndUnorderedAccessViews(G.ctx, 0, NULL, G.depth->depth, 0, 1, &colour->ordered, NULL);
     else
-        ID3D11DeviceContext_OMSetRenderTargets(G.ctx, G.colour_view ? 1 : 0, G.colour_view ? &G.colour_view : NULL, G.depth_view);
+        ID3D11DeviceContext_OMSetRenderTargets(G.ctx, colour ? 1 : 0, colour ? &colour->target : NULL, G.depth->depth);
 
     UINT stride = c->vertex_stride, offset = 0;
     D3D11_RECT scissor = { c->scissor[0], c->scissor[1], c->scissor[2], c->scissor[3] };
@@ -598,25 +865,12 @@ int gpu_draw(const gpu_draw_call *c) {
     return counted;
 }
 
-/* A texture back into rows of the caller's. */
-static int fetch(ID3D11Texture2D *staging, ID3D11Texture2D *from, void *out, uint32_t pitch, uint32_t row_bytes, uint32_t rows) {
-    D3D11_MAPPED_SUBRESOURCE m;
-    ID3D11DeviceContext_CopyResource(G.ctx, (ID3D11Resource *)staging, (ID3D11Resource *)from);
-    if (FAILED(ID3D11DeviceContext_Map(G.ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &m))) return 0;
-    for (uint32_t y = 0; y < rows; y++)
-        memcpy((uint8_t *)out + (size_t)y * pitch, (const uint8_t *)m.pData + (size_t)y * m.RowPitch, row_bytes);
-    ID3D11DeviceContext_Unmap(G.ctx, (ID3D11Resource *)staging, 0);
-    return 1;
-}
-
-int gpu_end(void *colour, uint32_t colour_pitch, void *depth, uint32_t depth_pitch, uint64_t *counts, unsigned max_counts) {
+int gpu_end(uint64_t *counts, unsigned max_counts) {
     int ok = !G.failed;
     if (!G.in_list) return -1;
     G.in_list = 0;
-    if (ok && colour && G.colour)
-        ok = fetch(G.colour_out, G.colour, colour, colour_pitch, G.t.width * texel_bytes(G.t.colour_format), G.t.height);
-    if (ok && depth)
-        ok = fetch(G.depth_out, G.depth, depth, depth_pitch, G.t.width * texel_bytes(G.t.depth_format), G.t.height);
+    /* nothing of the list stays bound: its surfaces may be read as textures by the next */
+    ID3D11DeviceContext_OMSetRenderTargets(G.ctx, 0, NULL, NULL);
     for (unsigned i = 0; i < G.query_count; i++) {
         UINT64 passed = 0;
         while (ID3D11DeviceContext_GetData(G.ctx, (ID3D11Asynchronous *)G.queries[i], &passed, sizeof(passed), 0) == S_FALSE) Sleep(0);

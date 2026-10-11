@@ -7,12 +7,12 @@
  * what the registers hold); what is below knows shaders as text, textures
  * as rows of texels, and a draw as buffers and state.
  *
- * A list is drawn between gpu_begin and gpu_end. gpu_begin is given the
- * target as the title's memory has it, colour and depth, and gpu_end gives
- * both back the same way: the card is a faster way to arrive at the same
- * bytes, and nothing above has to know which way was taken. That costs a
- * copy each way a list; keeping a surface on the card from one list to the
- * next is something to add, not something this interface forbids.
+ * A surface is something the card draws to and keeps: colour, or depth and
+ * stencil. It is filled from rows of memory and read back into them when
+ * that is asked for and not otherwise, so what is drawn in one list is
+ * there for the next without a journey through the title's memory. A list
+ * is drawn between gpu_begin and gpu_end, to a colour surface, or none,
+ * and a depth surface.
  *
  * One implementation: gpu_d3d11.c (Direct3D 11, Windows). gpu_none.c is
  * what is linked elsewhere: there is no card, and gpu_open says so.
@@ -110,15 +110,49 @@ typedef struct {
     uint8_t     count;                      /* the pixels that pass the tests are wanted */
 } gpu_draw_call;
 
-typedef struct {
-    uint32_t    width, height;
-    unsigned    colour_format;              /* GPU_NONE: no colour */
-    const void *colour;                     /* what the surface holds: rows from the top */
-    uint32_t    colour_pitch;               /* bytes from a row to the next */
-    unsigned    depth_format;
-    const void *depth;
-    uint32_t    depth_pitch;
-} gpu_target;
+typedef struct gpu_surface gpu_surface;
+
+/* A surface of one of the forms above, a colour's or a depth's, holding
+ * nothing in particular yet. NULL when the card will not have one. */
+gpu_surface *gpu_surface_make(unsigned format, uint32_t width, uint32_t height);
+void gpu_surface_free(gpu_surface *s);
+
+/* What it holds, from rows of memory and into them: rows from the top,
+ * `pitch` bytes from one to the next, a pixel as the form lays it out.
+ * 0 when it was done. Reading waits for the card to have drawn. */
+int gpu_surface_put(gpu_surface *s, const void *rows, uint32_t pitch);
+int gpu_surface_get(gpu_surface *s, void *rows, uint32_t pitch);
+
+/* A depth surface made one depth and one stencil throughout. */
+void gpu_surface_clear(gpu_surface *s, float depth, uint8_t stencil);
+
+/* One surface's contents into another of the same form and size; or the
+ * top left `width` by `height` of one into the top left of another of the
+ * same form. 0 when done. */
+int gpu_surface_copy(gpu_surface *into, gpu_surface *from);
+int gpu_surface_copy_corner(gpu_surface *into, gpu_surface *from, uint32_t width, uint32_t height);
+
+/* The same of depth, into a smaller depth surface from the top left of a
+ * larger one of the same form: the depths as they are, and one stencil
+ * throughout, a card having no way to hand stencil from one surface to
+ * part of another. 0 when done. */
+int gpu_surface_depth_corner(gpu_surface *into, gpu_surface *from, uint8_t stencil);
+
+/* A texture of four floats a texel that holds nothing yet, for gpu_convert
+ * to fill. */
+gpu_texture *gpu_texture_blank(unsigned width, unsigned height);
+
+/* Fill such a texture from a surface, on the card: `program` is a fragment
+ * program, `float4 main(float4 pos : SV_Position) : SV_Target`, run once
+ * for each texel of `into`. It finds the surface at t0 as the card keeps
+ * it: a colour's four numbers, bytes as fractions of 255 with red first
+ * whatever order the form has them in, and never on the display's curve;
+ * words as whole numbers; a depth as one number from nothing to one, with
+ * its stencil at t1, a whole number in the second place. `constants`, at
+ * most 64 bytes, are its b0. This is how a surface one scene drew is read
+ * by the next in another form than it was drawn in without leaving the
+ * card. 0 when it was done. */
+int gpu_convert(gpu_texture *into, gpu_surface *from, gpu_shader *program, const void *constants, uint32_t constants_bytes);
 
 /* Whether a fragment program can be handed a target of this form to read
  * and to write for itself, a pixel at a time in the order the triangles
@@ -128,16 +162,16 @@ typedef struct {
  * it stood before its draw. */
 int gpu_ordered(unsigned format);
 
-/* Start a list on a target. 0, or -1 when the card will not have it:
- * nothing has been changed and the list is the processor's to draw. */
-int gpu_begin(const gpu_target *t);
+/* Start a list: what follows is drawn to these two, of one size. 0, or -1
+ * when the card will not have it and nothing has been changed. */
+int gpu_begin(gpu_surface *colour, gpu_surface *depth);
 
 /* One draw. Returns its place among the draws of the list that asked for a
  * count, or -1. */
 int gpu_draw(const gpu_draw_call *d);
 
-/* Finish the list: the target back into memory laid out as gpu_begin's
- * was, and the counts asked for, in order. 0 when all of it arrived. */
-int gpu_end(void *colour, uint32_t colour_pitch, void *depth, uint32_t depth_pitch, uint64_t *counts, unsigned max_counts);
+/* Finish the list: the counts asked for, in order, which waits for the
+ * card when there are any. 0 when every draw was taken. */
+int gpu_end(uint64_t *counts, unsigned max_counts);
 
 #endif /* VITARECOMP_GPU_H */

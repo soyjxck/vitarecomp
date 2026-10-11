@@ -33,6 +33,7 @@
 #include "vitarecomp/hle.h"
 #include "vitarecomp/recomp_rt.h"
 #include "gxm_draw.h"
+#include "gxm_surfaces.h"
 #include "pool.h"
 #include "gxm_tex.h"
 #include "hle_sysmem.h"
@@ -1308,6 +1309,7 @@ static void dump_scene(void) {
     if (!asked) { asked = 1; dir = getenv("VITARECOMP_GXM_SCENES"); }
     if (!dir || !*dir || !draw_logged() || !g_state.has_colour) return;
     char path[1024];
+    gxm_gpu_memory_wanted(g_state.colour_data, g_state.colour_avail);
     snprintf(path, sizeof(path), "%s/frame-%u-scene-%02u.ppm", dir, g_frames + 1, g_frame.scenes);
     FILE *f = fopen(path, "wb");
     if (!f) return;
@@ -1345,18 +1347,23 @@ typedef struct {
     int store;
     uint32_t format, stride, layout, width, height, bytes, depth_avail, stencil_avail;
     uint8_t *depth, *stencil;
+    /* the planes: the scene's own, or whoever's is storing a surface; no mask plane means nothing is masked */
+    float   *plane_depth;
+    uint8_t *plane_stencil, *plane_mask;
+    uint32_t plane_width;
 } depth_job;
 
 static void depth_rows(void *ctx, unsigned item, unsigned worker) {
     const depth_job *j = ctx;
     uint32_t format = j->format, bytes = j->bytes, first = item * DEPTH_ROWS, last = first + DEPTH_ROWS;
-    uint8_t *depth = j->depth, *stencil = j->stencil;
+    uint8_t *depth = j->depth, *stencil = j->stencil, *g_stencil = j->plane_stencil, *g_mask = j->plane_mask;
+    float *g_depth = j->plane_depth;
     int store = j->store;
     (void)worker;
     if (last > j->height) last = j->height;
     for (uint32_t y = first; y < last; y++)
         for (uint32_t x = 0; x < j->width; x++) {
-            size_t i = (size_t)y * g_state.width + x;
+            size_t i = (size_t)y * j->plane_width + x;
             uint32_t at = gxm_pixel_offset(j->layout, x, y, j->stride, j->height, j->stride, 1);
             if (depth && at * bytes + bytes <= j->depth_avail) {
                 uint8_t *p = depth + at * bytes;
@@ -1371,7 +1378,7 @@ static void depth_rows(void *ctx, unsigned item, unsigned worker) {
                     }
                     else {
                         memcpy(&w, &f, 4);
-                        if (format == 0x000CC000u || format == 0x000EE000u) w = (w & 0x7FFFFFFFu) | ((uint32_t)g_mask[i] << 31);
+                        if (format == 0x000CC000u || format == 0x000EE000u) w = (w & 0x7FFFFFFFu) | ((uint32_t)(g_mask ? g_mask[i] : 1) << 31);
                     }
                     memcpy(p, &w, bytes);
                 } else {
@@ -1380,7 +1387,7 @@ static void depth_rows(void *ctx, unsigned item, unsigned worker) {
                     else if (format == 0x01266000u) { g_depth[i] = (float)((double)(w & 0xFFFFFFu) / 16777215.0); g_stencil[i] = (uint8_t)(w >> 24); }
                     else {
                         uint32_t v = w;
-                        if (format == 0x000CC000u || format == 0x000EE000u) { g_mask[i] = (uint8_t)(w >> 31); v &= 0x7FFFFFFFu; }
+                        if (format == 0x000CC000u || format == 0x000EE000u) { if (g_mask) g_mask[i] = (uint8_t)(w >> 31); v &= 0x7FFFFFFFu; }
                         memcpy(&f, &v, 4);
                         g_depth[i] = f;
                     }
@@ -1396,22 +1403,37 @@ static void depth_rows(void *ctx, unsigned item, unsigned worker) {
  * from it: a pixel at a time, each row's pixels nobody else's, so the rows
  * are shared out. A title that keeps its depth from scene to scene does
  * this several times a frame, to a third of a million pixels. */
-static void depth_transfer(int store) {
-    uint32_t control = g_scene.depth_surface[0], depth_at = g_scene.depth_surface[1], stencil_at = g_scene.depth_surface[2];
+static void depth_planes(const uint32_t surface[5], int store, uint32_t width, uint32_t height, float *plane_depth, uint8_t *plane_stencil,
+                         uint8_t *plane_mask) {
+    uint32_t control = surface[0], depth_at = surface[1], stencil_at = surface[2];
     depth_job j;
     j.store = store;
     j.format = control & DS_FORMAT_BITS;
     j.stride = (((control >> 3) & 0xFF) + 1) * 32;
     j.layout = (control & DS_TILED) == DS_TILED ? GXM_SURFACE_TILED : GXM_SURFACE_LINEAR;
-    j.width = g_state.width > j.stride ? j.stride : g_state.width;
-    j.height = g_state.height;
+    j.width = width > j.stride ? j.stride : width;
+    j.height = height;
     j.bytes = j.format == 0x02444000u ? 2 : 4;
     j.depth_avail = depth_at ? vita_mem_avail(depth_at) : 0;
     j.stencil_avail = stencil_at ? vita_mem_avail(stencil_at) : 0;
     j.depth = j.depth_avail && depth_has_depth(j.format) ? vita_mem_ptr(depth_at, 1) : NULL;
     j.stencil = j.stencil_avail && depth_has_stencil_bytes(j.format) ? vita_mem_ptr(stencil_at, 1) : NULL;
+    j.plane_depth = plane_depth;
+    j.plane_stencil = plane_stencil;
+    j.plane_mask = plane_mask;
+    j.plane_width = width;
     if (!j.depth && !j.stencil) return;
     vita_pool_run((j.height + DEPTH_ROWS - 1) / DEPTH_ROWS, depth_rows, &j);
+}
+
+static void depth_transfer(int store) {
+    depth_planes(g_scene.depth_surface, store, g_state.width, g_state.height, g_depth, g_stencil, g_mask);
+}
+
+/* For the card's path (gxm_gpu.h): a depth surface it has kept, written
+ * where the title keeps it. */
+void gxm_depth_surface_store(const uint32_t control[5], uint32_t width, uint32_t height, const float *depth, const uint8_t *stencil) {
+    depth_planes(control, 1, width, height, (float *)depth, (uint8_t *)stencil, NULL);
 }
 
 /* int sceGxmBeginScene(context, flags, const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion,
@@ -1471,7 +1493,11 @@ void vita_hle_sceGxmBeginScene(void) {
     for (size_t i = 0; i < pixels; i++) g_depth[i] = background;
     memset(g_stencil, (int)(background2 & 0xFF), pixels);
     memset(g_mask, (int)((background2 >> 8) & 1), pixels);
-    if (g_scene.has_depth_surface && (g_scene.depth_surface[0] & 2)) depth_transfer(0);
+    /* the card's path may hold that surface, and then nothing is read: the planes are not what its lists look at */
+    int load = g_scene.has_depth_surface && (g_scene.depth_surface[0] & 2), store = g_scene.has_depth_surface && (g_scene.depth_surface[0] & 4);
+    if (!gxm_gpu_scene_begin(g_scene.has_depth_surface ? g_scene.depth_surface : NULL, width, height, g_state.depth_bits, load, store,
+                             background, (uint8_t)background2) && load)
+        depth_transfer(0);
 
     uint32_t x_max = width ? width - 1 : 0, y_max = height ? height - 1 : 0;
     if (region && vita_mem_ptr(region, 8)) { x_max = vita_read32(region); y_max = vita_read32(region + 4); }
@@ -1499,7 +1525,8 @@ void vita_hle_sceGxmBeginScene(void) {
 void vita_hle_sceGxmEndScene(void) {
     flush_draws();
     if (!g_scene.active) { r0 = E_NOT_WITHIN_SCENE; return; }
-    if (g_scene.has_depth_surface && (g_scene.depth_surface[0] & 4)) depth_transfer(1);
+    int store = g_scene.has_depth_surface && (g_scene.depth_surface[0] & 4);
+    if (!gxm_gpu_scene_end(store, g_depth, g_stencil) && store) depth_transfer(1);
     dump_scene();
     g_scene.active = 0;
     notify(r1);

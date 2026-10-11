@@ -7,6 +7,10 @@
  * as they stand after the secondary program, its textures, and the
  * console's state in the card's terms. Anything it is not sure of sends the
  * whole list to the processor, with the reason said once.
+ *
+ * And it keeps account of the title's surfaces: which of them the card
+ * holds newer than the title's memory does, what a texture that reads one
+ * of those is made from, and when the bytes have to go back.
  */
 
 #include "gxm_gpu.h"
@@ -19,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* --- what was asked ------------------------------------------------------------------------- */
 
@@ -40,23 +45,77 @@ int gxm_gpu_mode(void) {
 
 /* Why a list was left to the processor: each reason once. Returns 0. */
 static uint32_t g_refused;                  /* lists left to the processor */
+static uint32_t g_list = 1;                 /* counts lists */
 
-static int refuse(const char *fmt, ...) {
-    static char seen[48][200];
+/* What the path costs, for the stage profile (VITARECOMP_GXM_PROFILE):
+ * nanoseconds since the last report, by what was being done. */
+enum { P_HASH = 0, P_TEXTURE, P_IN, P_VERTICES, P_DRAW, P_BACK, P_OUT, P_STAGES };
+static uint64_t g_ns[P_STAGES], g_hashed, g_made, g_lists, g_draws, g_backs, g_puts, g_views;
+static int g_timed = -1;
+
+static uint64_t now_ns(void) {
+    struct timespec t;
+    if (g_timed < 0) { const char *e = getenv("VITARECOMP_GXM_PROFILE"); g_timed = e && strtoul(e, NULL, 0) != 0; }
+    if (!g_timed) return 0;
+    timespec_get(&t, TIME_UTC);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+void gxm_gpu_profile(uint32_t frames) {
+    static const char *const NAME[P_STAGES] = { "textures' bytes looked over", "textures made from memory", "targets and textures made ready",
+                                                "vertices made ready", "draws handed over", "the card waited for and surfaces read back",
+                                                "surfaces put back in memory" };
+    double per = frames ? 1e-6 / (double)frames : 0.0;
+    if (!g_lists) return;
+    fprintf(stderr, "    on the card, ms a frame:");
+    for (int k = 0; k < P_STAGES; k++) fprintf(stderr, "%s %s %.1f", k ? "," : "", NAME[k], (double)g_ns[k] * per);
+    fprintf(stderr, "; %.1f lists and %.0f draws a frame, %.1f MB of textures looked over, %.1f textures made from memory and %.1f from "
+                    "surfaces on the card, %.1f surfaces filled from memory and %.1f sent back to it\n",
+            (double)g_lists / (double)frames, (double)g_draws / (double)frames, (double)g_hashed / (double)frames / 1048576.0,
+            (double)g_made / (double)frames, (double)g_views / (double)frames, (double)g_puts / (double)frames, (double)g_backs / (double)frames);
+    memset(g_ns, 0, sizeof(g_ns));
+    g_hashed = g_made = g_lists = g_draws = g_backs = g_puts = g_views = 0;
+}
+
+/* VITARECOMP_GXM_GPU_LOG=1 says, besides each texture made from memory,
+ * each surface filled from the title's memory and each sent back to it. */
+static int logging(void) {
+    static int asked, wanted;
+    if (!asked) { const char *e = getenv("VITARECOMP_GXM_GPU_LOG"); asked = 1; wanted = e && *e && *e != '0'; }
+    return wanted;
+}
+
+static int said(const char *what, const char *fmt, va_list ap) {
+    static char seen[96][200];
     static unsigned count;
-    g_refused++;
     char why[200];
-    va_list ap;
-    va_start(ap, fmt);
     vsnprintf(why, sizeof(why), fmt, ap);
-    va_end(ap);
     for (unsigned i = 0; i < count; i++)
         if (!strcmp(seen[i], why)) return 0;
-    if (count < 48) {
+    if (count < 96) {
         memcpy(seen[count++], why, sizeof(why));
-        fprintf(stderr, "gxm gpu: a list is left to the processor: %s\n", why);
+        fprintf(stderr, "gxm gpu: %s: %s\n", what, why);
     }
     return 0;
+}
+
+static int refuse(const char *fmt, ...) {
+    va_list ap;
+    g_refused++;
+    va_start(ap, fmt);
+    said("a list is left to the processor", fmt, ap);
+    va_end(ap);
+    return 0;
+}
+
+/* Why a surface the card held was sent back to memory to be read as a
+ * texture from there: each reason once. Returns NULL. */
+static gpu_texture *by_memory(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    said("a surface goes by way of memory to be read as a texture", fmt, ap);
+    va_end(ap);
+    return NULL;
 }
 
 /* --- shaders, one for each program and what was bound with it ------------------------------- */
@@ -102,19 +161,7 @@ static gpu_shader *shader_for(const gxm_program *program, const gxp_hlsl_bind *b
     return NULL;
 }
 
-/* --- textures, kept on the card until their bytes change ------------------------------------- */
-
-typedef struct {
-    uint32_t words[4], data, palette;
-    uint64_t stamp;
-    uint32_t checked, used;                 /* the list it was last compared in, and drawn with */
-    gpu_texture *texture;
-} texture_slot;
-
-#define TEXTURES 2048
-static texture_slot g_textures[TEXTURES];
-static unsigned g_texture_count;
-static uint32_t g_list = 1;                 /* counts lists */
+/* --- what a texture's bytes are known by ------------------------------------------------------ */
 
 /* A hash of a texture's bytes, all of them, and of its palette's. Nothing
  * less will do: a title writes into its textures where it pleases, a glyph
@@ -162,9 +209,7 @@ static gpu_texture *upload(const gxm_tex *t) {
         }
     out = gpu_texture_make(GPU_RGBA32F, t->level_w[0], t->level_h[0], levels, t->cube, images);
     {
-        static int asked, wanted;
-        if (!asked) { const char *e = getenv("VITARECOMP_GXM_GPU_LOG"); asked = 1; wanted = e && *e && *e != '0'; }
-        if (wanted)
+        if (logging())
             fprintf(stderr, "gxm gpu: texture at 0x%08X: %u by %u, %u of %u levels (second level %u by %u)%s, format 0x%08X kind %u, "
                             "filters %u %u %u, lod bias %g min %u, modes %u %u: %s\n", t->data, t->level_w[0], t->level_h[0], levels, t->levels,
                     t->levels > 1 ? t->level_w[1] : 0, t->levels > 1 ? t->level_h[1] : 0, t->cube ? ", a cube" : "", t->format, t->kind,
@@ -173,36 +218,6 @@ static gpu_texture *upload(const gxm_tex *t) {
 done:
     for (unsigned i = 0; i < made; i++) free((void *)images[i]);
     return out;
-}
-
-static gpu_texture *texture_for(const gxm_tex *t, const uint32_t words[4]) {
-    texture_slot *slot = NULL;
-    for (unsigned i = 0; i < g_texture_count; i++) {
-        texture_slot *s = &g_textures[i];
-        if (s->data == t->data && s->palette == t->palette && !memcmp(s->words, words, sizeof(s->words))) { slot = s; break; }
-    }
-    /* nothing is written while a list is being made ready: once a list is enough */
-    if (slot && slot->checked == g_list) { slot->used = g_list; return slot->texture; }
-    uint64_t stamp = content_stamp(t);
-    if (slot && slot->stamp == stamp) { slot->checked = slot->used = g_list; return slot->texture; }
-    if (!slot) {
-        if (g_texture_count == TEXTURES) {          /* room: the one longest unused goes */
-            unsigned oldest = 0;
-            for (unsigned i = 1; i < TEXTURES; i++) if (g_textures[i].used < g_textures[oldest].used) oldest = i;
-            gpu_texture_free(g_textures[oldest].texture);
-            g_textures[oldest] = g_textures[--g_texture_count];
-        }
-        slot = &g_textures[g_texture_count++];
-        memset(slot, 0, sizeof(*slot));
-        memcpy(slot->words, words, sizeof(slot->words));
-        slot->data = t->data;
-        slot->palette = t->palette;
-    }
-    gpu_texture_free(slot->texture);
-    slot->texture = upload(t);
-    slot->stamp = stamp;
-    slot->checked = slot->used = g_list;
-    return slot->texture;
 }
 
 /* Whether a texture is read as the one texel a point falls in: flat, of
@@ -604,6 +619,12 @@ static void pack_depth(const gxm_draw_state *s, unsigned format, uint8_t *out) {
             uint32_t w = (scaled >= 16777215.0 ? 0xFFFFFFu : scaled > 0.0 ? (uint32_t)scaled : 0u) | ((uint32_t)s->stencil[i] << 24);
             memcpy(out + i * 4, &w, 4);
         }
+    } else if (format == GPU_D16) {
+        for (size_t i = 0; i < pixels; i++) {
+            float f = s->depth[i];
+            uint16_t w = (uint16_t)(f >= 1.0f ? 0xFFFFu : f > 0.0f ? (uint32_t)(f * 65535.0f + 0.5f) : 0u);
+            memcpy(out + i * 2, &w, 2);
+        }
     } else {
         for (size_t i = 0; i < pixels; i++) {
             uint32_t w = s->stencil[i];
@@ -622,6 +643,13 @@ static void unpack_depth(const uint8_t *in, unsigned format, uint32_t width, uin
             depth[i] = (float)((double)(w & 0xFFFFFFu) / 16777215.0);
             stencil[i] = (uint8_t)(w >> 24);
         }
+    } else if (format == GPU_D16) {
+        /* no stencil beside it: the stencil plane is left as it is */
+        for (size_t i = 0; i < pixels; i++) {
+            uint16_t w;
+            memcpy(&w, in + i * 2, 2);
+            depth[i] = (float)((double)w / 65535.0);
+        }
     } else {
         for (size_t i = 0; i < pixels; i++) {
             memcpy(&depth[i], in + i * 8, 4);
@@ -629,6 +657,834 @@ static void unpack_depth(const uint8_t *in, unsigned format, uint32_t width, uin
         }
     }
 }
+
+/* Surfaces on the card to draw a list in, one of each form and size met. */
+typedef struct { unsigned format; uint32_t width, height; gpu_surface *surface; } spare;
+
+static gpu_surface *spare_for(unsigned format, uint32_t width, uint32_t height) {
+    static spare spares[32];
+    static unsigned count;
+    for (unsigned i = 0; i < count; i++)
+        if (spares[i].format == format && spares[i].width == width && spares[i].height == height) return spares[i].surface;
+    gpu_surface *made = gpu_surface_make(format, width, height);
+    if (!made) return NULL;
+    if (count == 32) {                              /* full: the oldest goes */
+        gpu_surface_free(spares[0].surface);
+        memmove(spares, spares + 1, 31 * sizeof(spares[0]));
+        count--;
+    }
+    spares[count].format = format;
+    spares[count].width = width;
+    spares[count].height = height;
+    spares[count++].surface = made;
+    return made;
+}
+
+/* --- the title's surfaces, kept on the card ---------------------------------------------------
+ * A list drawn by the card leaves its target on the card, and the title's
+ * memory is not told: the next list that draws to the surface, or samples
+ * it, finds it where it is. The bytes go back into memory when something
+ * off the card wants them, a list the processor draws, the display, and
+ * not before. So for each surface it is known which of the two holds what
+ * the surface is: the card (`newer`), or memory, and if memory, whether
+ * the card still agrees with it (by a hash of the bytes, which the title
+ * may write whenever it likes).
+ *
+ * VITARECOMP_GXM_GPU_KEEP=0 sends every surface back at the end of every
+ * list, as if none were kept: the same arithmetic by the same card, by the
+ * long road, for telling a fault in the keeping from a fault in the
+ * drawing. */
+
+static int keeping(void) {
+    static int keep = -1;
+    if (keep < 0) { const char *e = getenv("VITARECOMP_GXM_GPU_KEEP"); keep = !(e && *e == '0'); }
+    return keep;
+}
+
+typedef struct {
+    gxm_draw_state s;                       /* the surface as a scene described it: where, how large, of what */
+    colour_way way;
+    const uint8_t *lo, *hi;                 /* the memory it lies in */
+    gpu_surface *card;
+    int      newer;                         /* the card holds what the title's memory does not yet */
+    int      agreed;                        /* otherwise: the two held the same when `stamp` was taken of memory */
+    uint64_t stamp;
+    uint32_t version;                       /* counts the lists drawn to it: a texture made from it is made from one of them */
+    uint32_t used;
+} colour_record;
+
+/* A depth surface of the title's likewise. A scene works on its depth in
+ * the renderer's planes or on the card, and the surface is the scene's
+ * depth only once the scene has ended and said it keeps it. */
+typedef struct {
+    uint32_t control[5];                    /* the surface, as the scene that last used it described it */
+    uint32_t width, height, row_bytes;
+    const uint8_t *lo, *hi;                 /* its depth, in memory */
+    unsigned format;                        /* the card's */
+    gpu_surface *card;
+    int      newer;
+    uint32_t version, used;
+} depth_record;
+
+#define SMALL_BYTES 8192u                   /* a surface of no more is never left behind in memory */
+#define COLOURS 48
+#define DEPTHS 16
+static colour_record g_colours[COLOURS];
+static depth_record g_depths[DEPTHS];
+static unsigned g_colour_count, g_depth_count;
+
+static uint32_t next_power(uint32_t v) { uint32_t p = 1; while (p < v) p <<= 1; return p; }
+
+static void colour_extent(const gxm_draw_state *s, const uint8_t **lo, const uint8_t **hi) {
+    uint64_t bytes;
+    if (s->colour_layout == GXM_SURFACE_LINEAR) bytes = (uint64_t)s->colour_stride * s->height * s->colour.bytes;
+    else if (s->colour_layout == GXM_SURFACE_TILED) bytes = (uint64_t)((s->width + 31) & ~31u) * ((s->height + 31) & ~31u) * s->colour.bytes;
+    else bytes = (uint64_t)next_power(s->width) * next_power(s->height) * s->colour.bytes;
+    if (bytes > s->colour_avail) bytes = s->colour_avail;
+    *lo = s->colour_data;
+    *hi = s->colour_data + bytes;
+}
+
+/* The card's surface into the title's memory, if the card's is the newer. */
+static int colour_back(colour_record *r) {
+    if (!r->newer) return 1;
+    size_t pixels = (size_t)r->s.width * r->s.height;
+    uint64_t began = now_ns();
+    if (!bytes_for(&g_colour_rows, &g_colour_rows_cap, pixels * r->way.bytes + 16) ||
+        gpu_surface_get(r->card, g_colour_rows, r->s.width * r->way.bytes)) return 0;
+    uint64_t at = now_ns();
+    g_ns[P_BACK] += at - began;
+    colour_out(&r->s, &r->way, g_colour_rows);
+    if (logging())
+        fprintf(stderr, "gxm gpu: list %u: a colour surface of %ux%u, %u bytes a pixel, goes back to memory\n", g_list, r->s.width, r->s.height,
+                r->s.colour.bytes);
+    r->newer = 0;
+    r->agreed = 1;
+    r->stamp = fold(0, r->lo, (size_t)(r->hi - r->lo));
+    g_ns[P_OUT] += now_ns() - at;
+    g_backs++;
+    return 1;
+}
+
+static void depth_back(depth_record *d);
+
+/* Every surface the card holds newer than the memory between `lo` and `hi`
+ * goes back into it; all of them when `lo` is NULL. */
+static void surfaces_back(const uint8_t *lo, const uint8_t *hi, const colour_record *but) {
+    for (unsigned i = 0; i < g_colour_count; i++) {
+        colour_record *r = &g_colours[i];
+        if (r != but && r->newer && (!lo || (r->lo < hi && r->hi > lo))) colour_back(r);
+    }
+    for (unsigned i = 0; i < g_depth_count; i++) {
+        depth_record *d = &g_depths[i];
+        if (d->newer && (!lo || (d->lo < hi && d->hi > lo))) depth_back(d);
+    }
+}
+
+void gxm_gpu_memory_wanted(const void *bytes, size_t count) {
+    if (g_mode != GXM_GPU_DRAW || !bytes) return;
+    surfaces_back(bytes, (const uint8_t *)bytes + count, NULL);
+}
+
+static void forget_views_of(const void *record);
+
+static colour_record *colour_for(const gxm_draw_state *s, const colour_way *way) {
+    colour_record *r = NULL;
+    for (unsigned i = 0; i < g_colour_count && !r; i++) {
+        colour_record *c = &g_colours[i];
+        if (c->s.colour_data == s->colour_data && c->s.width == s->width && c->s.height == s->height &&
+            c->s.colour_stride == s->colour_stride && c->s.colour_layout == s->colour_layout && c->s.colour_gamma == s->colour_gamma &&
+            !memcmp(&c->s.colour, &s->colour, sizeof(s->colour))) r = c;
+    }
+    if (!r) {
+        if (g_colour_count == COLOURS) {            /* room: the one longest unused goes, into memory first if it must */
+            colour_record *oldest = &g_colours[0];
+            for (unsigned i = 1; i < COLOURS; i++) if (g_colours[i].used < oldest->used) oldest = &g_colours[i];
+            colour_back(oldest);
+            forget_views_of(oldest);
+            gpu_surface_free(oldest->card);
+            *oldest = g_colours[--g_colour_count];
+            forget_views_of(&g_colours[g_colour_count]);        /* it has moved: what was made from it is made again */
+        }
+        r = &g_colours[g_colour_count];
+        memset(r, 0, sizeof(*r));
+        r->card = gpu_surface_make(way->format, s->width, s->height);
+        if (!r->card) return NULL;
+        g_colour_count++;
+        r->s = *s;
+        r->way = *way;
+    }
+    r->s.colour_avail = s->colour_avail;
+    colour_extent(&r->s, &r->lo, &r->hi);
+    r->used = g_list;
+    return r;
+}
+
+/* A title draws a half-size picture into the corner of a full-size
+ * surface's memory, as a surface of its own with the larger one's rows, and
+ * then samples the larger one. The two are one piece of memory, and the
+ * card holds them as two surfaces. When it holds the larger one newer than
+ * memory, the smaller is drawn through it: fetched from its corner before
+ * the list and put back there after, on the card, so that the larger one
+ * stays what the memory would be. Returns the larger, or NULL. */
+static colour_record *whole_of(const colour_record *r) {
+    for (unsigned i = 0; i < g_colour_count; i++) {
+        colour_record *w = &g_colours[i];
+        if (w != r && w->newer && w->s.colour_data == r->s.colour_data && w->s.colour_stride == r->s.colour_stride &&
+            w->s.colour_layout == GXM_SURFACE_LINEAR && r->s.colour_layout == GXM_SURFACE_LINEAR && w->s.colour_gamma == r->s.colour_gamma &&
+            w->way.format == r->way.format && !memcmp(&w->s.colour, &r->s.colour, sizeof(r->s.colour)) &&
+            w->s.width >= r->s.width && w->s.height >= r->s.height) return w;
+    }
+    return NULL;
+}
+
+/* --- a scene's depth ---------------------------------------------------------------------------
+ * The renderer keeps a scene's depth and stencil in planes of its own,
+ * made at the scene's start from one value or from the title's depth
+ * surface, and written to that surface at its end if the surface says so.
+ * The card's lists never look at the planes. So for the scene in hand it
+ * is known where its depth is, the planes or the card, and each kind of
+ * list fetches it from the other when it finds it there; and a scene that
+ * ends on the card with a surface to keep leaves it on the card, as that
+ * surface's, with nothing written to memory. */
+
+enum { IN_PLANES = 0, ON_CARD };
+
+static struct {
+    int      active;
+    depth_record *of;                       /* the surface the scene's depth becomes at its end; NULL when it keeps none */
+    gpu_surface *card;                      /* where its depth is drawn on the card: the surface's own, or a spare */
+    int      where;
+    int      cleared;                       /* the planes are one value throughout: the card is cleared, not filled */
+    float    clear_depth;
+    uint8_t  clear_stencil;
+    uint32_t width, height;
+    unsigned format;
+} g_scene;
+
+static unsigned depth_format_of(uint32_t bits) { return bits == 24 ? GPU_D24S8 : bits == 16 ? GPU_D16 : bits == 0 ? GPU_D32FS8 : GPU_NONE; }
+static size_t depth_bytes_of(unsigned format) { return format == GPU_D24S8 ? 4 : format == GPU_D16 ? 2 : 8; }
+
+static depth_record *depth_for(const uint32_t control[5], uint32_t width, uint32_t height, unsigned format) {
+    uint32_t stride = (((control[0] >> 3) & 0xFF) + 1) * 32, bytes = format == GPU_D16 ? 2 : 4;
+    uint32_t avail = control[1] ? vita_mem_avail(control[1]) : 0;
+    const uint8_t *lo = avail ? vita_mem_ptr(control[1], 1) : NULL;
+    depth_record *d = NULL;
+    if (!lo) return NULL;
+    for (unsigned i = 0; i < g_depth_count && !d; i++)
+        if (g_depths[i].lo == lo && g_depths[i].width == width && g_depths[i].height == height && g_depths[i].format == format &&
+            g_depths[i].row_bytes == stride * bytes) d = &g_depths[i];
+    if (!d) {
+        if (g_depth_count == DEPTHS) {
+            depth_record *oldest = &g_depths[0];
+            for (unsigned i = 1; i < DEPTHS; i++) if (g_depths[i].used < oldest->used) oldest = &g_depths[i];
+            if (oldest == g_scene.of) return NULL;
+            depth_back(oldest);
+            forget_views_of(oldest);
+            gpu_surface_free(oldest->card);
+            if (g_scene.of == &g_depths[g_depth_count - 1]) g_scene.of = oldest;
+            *oldest = g_depths[--g_depth_count];
+            forget_views_of(&g_depths[g_depth_count]);
+        }
+        d = &g_depths[g_depth_count];
+        memset(d, 0, sizeof(*d));
+        d->card = gpu_surface_make(format, width, height);
+        if (!d->card) return NULL;
+        g_depth_count++;
+        d->width = width;
+        d->height = height;
+        d->format = format;
+        d->row_bytes = stride * bytes;
+        d->lo = lo;
+    }
+    uint64_t extent = (uint64_t)d->row_bytes * height;
+    memcpy(d->control, control, sizeof(d->control));
+    d->hi = d->lo + (extent < avail ? extent : avail);
+    d->used = g_list;
+    return d;
+}
+
+/* A depth surface the card holds, into the title's memory: through planes
+ * of the moment and the graphics library's own way of storing them. */
+static void depth_back(depth_record *d) {
+    static float *depth;
+    static uint8_t *stencil;
+    static size_t cap;
+    size_t pixels = (size_t)d->width * d->height, bytes = depth_bytes_of(d->format);
+    if (!d->newer) return;
+    d->newer = 0;
+    if (pixels > cap) {
+        float *a = realloc(depth, pixels * sizeof(float));
+        if (a) depth = a;
+        uint8_t *b = realloc(stencil, pixels);
+        if (b) stencil = b;
+        if (!a || !b) return;
+        cap = pixels;
+    }
+    if (!bytes_for(&g_depth_rows, &g_depth_rows_cap, pixels * bytes) ||
+        gpu_surface_get(d->card, g_depth_rows, (uint32_t)(d->width * bytes))) return;
+    memset(stencil, 0, pixels);
+    unpack_depth(g_depth_rows, d->format, d->width, d->height, depth, stencil);
+    gxm_depth_surface_store(d->control, d->width, d->height, depth, stencil);
+    if (logging()) fprintf(stderr, "gxm gpu: list %u: a depth surface of %ux%u goes back to memory\n", g_list, d->width, d->height);
+    g_backs++;
+}
+
+int gxm_gpu_scene_begin(const uint32_t control[5], uint32_t width, uint32_t height, uint32_t depth_bits, int load, int store,
+                        float depth, uint8_t stencil) {
+    memset(&g_scene, 0, sizeof(g_scene));
+    if (g_mode != GXM_GPU_DRAW) return 0;
+    g_scene.active = 1;
+    g_scene.width = width;
+    g_scene.height = height;
+    g_scene.format = depth_format_of(depth_bits);
+    g_scene.where = IN_PLANES;
+    g_scene.cleared = !load;
+    g_scene.clear_depth = depth;
+    g_scene.clear_stencil = stencil;
+    if (g_scene.format == GPU_NONE || !keeping()) return 0;
+    depth_record *d = control ? depth_for(control, width, height, g_scene.format) : NULL;
+    if (!d) return 0;
+    if (store) {
+        /* the scene's depth is the surface's when it ends: drawn where the surface is kept */
+        g_scene.of = d;
+        g_scene.card = d->card;
+        if (load && d->newer) { g_scene.where = ON_CARD; return 1; }
+    } else if (load && d->newer) {
+        /* the surface is where the scene starts and is not to be changed by it: the scene has a copy */
+        gpu_surface *copy = spare_for(g_scene.format, width, height);
+        if (copy && !gpu_surface_copy(copy, d->card)) {
+            g_scene.card = copy;
+            g_scene.where = ON_CARD;
+            return 1;
+        }
+    } else if (load) {
+        /* A title reads the corner of a larger depth surface as a smaller one of the same rows. If the card holds the
+         * larger, the scene's copy is made from its corner there; the stencil does not come with it, and the scene is
+         * given what its planes were made of. */
+        for (unsigned i = 0; i < g_depth_count; i++) {
+            depth_record *w = &g_depths[i];
+            gpu_surface *copy;
+            if (w == d || !w->newer || w->lo != d->lo || w->row_bytes != d->row_bytes || w->format != d->format ||
+                w->width < width || w->height < height) continue;
+            copy = spare_for(g_scene.format, width, height);
+            if (!copy || gpu_surface_depth_corner(copy, w->card, stencil)) break;
+            g_scene.card = copy;
+            g_scene.where = ON_CARD;
+            return 1;
+        }
+    }
+    /* The caller reads the scene's depth out of memory, then. Whatever the card holds newer of that memory, this
+     * surface or another laid over it, goes there first. */
+    if (load) surfaces_back(d->lo, d->hi, NULL);
+    return 0;
+}
+
+int gxm_gpu_scene_end(int store, float *depth, uint8_t *stencil) {
+    int kept = 0;
+    if (g_mode != GXM_GPU_DRAW || !g_scene.active) return 0;
+    if (g_scene.of) {
+        depth_record *d = g_scene.of;
+        if (store && g_scene.where == ON_CARD) {
+            /* another surface over the same memory that the card held goes to memory before this one is laid over it */
+            for (unsigned i = 0; i < g_depth_count; i++)
+                if (&g_depths[i] != d && g_depths[i].newer && g_depths[i].lo < d->hi && g_depths[i].hi > d->lo) depth_back(&g_depths[i]);
+            d->newer = 1;
+            d->version++;
+            kept = 1;
+        } else {
+            /* the caller writes the planes into memory, or the scene drew nothing to keep: the card's is not the surface */
+            d->newer = 0;
+            forget_views_of(d);
+        }
+    }
+    if (store && !kept && g_scene.where == ON_CARD && g_scene.card) {
+        /* a depth to keep, on the card, and no surface of the card's to keep it in: the planes have it, for the caller */
+        size_t pixels = (size_t)g_scene.width * g_scene.height, bytes = depth_bytes_of(g_scene.format);
+        if (bytes_for(&g_depth_rows, &g_depth_rows_cap, pixels * bytes) &&
+            !gpu_surface_get(g_scene.card, g_depth_rows, (uint32_t)(g_scene.width * bytes)))
+            unpack_depth(g_depth_rows, g_scene.format, g_scene.width, g_scene.height, depth, stencil);
+    }
+    g_scene.active = 0;
+    return kept;
+}
+
+/* The scene's depth into the renderer's planes, for a list the processor
+ * is about to draw; and from then on the planes are where it is. */
+static void planes_wanted(const gxm_draw_state *s) {
+    if (!g_scene.active || g_scene.where != ON_CARD || !g_scene.card) { g_scene.where = IN_PLANES; g_scene.cleared = 0; return; }
+    size_t pixels = (size_t)s->width * s->height, bytes = depth_bytes_of(g_scene.format);
+    if (bytes_for(&g_depth_rows, &g_depth_rows_cap, pixels * bytes) && !gpu_surface_get(g_scene.card, g_depth_rows, (uint32_t)(s->width * bytes)))
+        unpack_depth(g_depth_rows, g_scene.format, s->width, s->height, s->depth, s->stencil);
+    g_scene.where = IN_PLANES;
+    g_scene.cleared = 0;
+}
+
+void gxm_gpu_for_processor(const gxm_draw_state *s) {
+    if (g_mode != GXM_GPU_DRAW) return;
+    surfaces_back(NULL, NULL, NULL);
+    planes_wanted(s);
+}
+
+/* --- a surface read as a texture, on the card ----------------------------------------------------
+ * A title samples what it drew, and seldom in the form it drew it in: a
+ * geometry buffer of two words a pixel is read as a texture twice as wide
+ * of four bytes a texel, and again from four bytes further on; depth is
+ * read as a number. From memory that is no matter, bytes being bytes. On
+ * the card the surface is whatever the card keeps, so a program is written
+ * for each such reading: for a texel of the texture, which bytes of the
+ * surface's memory it would be, which pixel of the card's surface holds
+ * them, the words those were, and the texel's fields out of the words as
+ * pixfmt.c reads them. gpu_convert runs it over a texture of floats, and
+ * that is what the draw samples. */
+
+typedef struct { uint64_t hash; gpu_shader *program; } view_program;
+static view_program g_view_programs[64];
+static unsigned g_view_program_count;
+
+typedef struct { char *s; size_t n, cap; int bad; } words;
+
+static void say(words *w, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) { w->bad = 1; return; }
+    if (w->n + (size_t)n + 1 > w->cap) {
+        size_t cap = w->cap ? w->cap * 2 : 4096;
+        while (cap < w->n + (size_t)n + 1) cap *= 2;
+        char *grown = realloc(w->s, cap);
+        if (!grown) { w->bad = 1; return; }
+        w->s = grown;
+        w->cap = cap;
+    }
+    va_start(ap, fmt);
+    vsnprintf(w->s + w->n, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    w->n += (size_t)n;
+}
+
+/* One field of a texel, from the texel's low and high words, as pixfmt.c's
+ * field_value has it. 0 for a kind there is no text for. */
+static int say_field(words *w, const pixfmt *f, int i) {
+    unsigned shift = f->f[i].shift, bits = f->f[i].bits, kind = f->f[i].kind;
+    uint32_t mask = bits >= 32 ? 0xFFFFFFFFu : (1u << bits) - 1u;
+    if (!bits || bits > 32) return 0;
+    if (shift + bits <= 32) say(w, "    uint x%d = (lo >> %uu) & 0x%08Xu;\n", i, shift, mask);
+    else if (shift >= 32)   say(w, "    uint x%d = (hi >> %uu) & 0x%08Xu;\n", i, shift - 32, mask);
+    else                    say(w, "    uint x%d = ((lo >> %uu) | (hi << %uu)) & 0x%08Xu;\n", i, shift, 32 - shift, mask);
+    switch (kind) {
+    case PIX_UNORM: say(w, "    float v%d = float(x%d) / %.1f;\n", i, i, (double)mask); break;
+    case PIX_SNORM:
+        if (bits < 2) return 0;
+        say(w, "    float v%d = max(float(int(x%d << %uu) >> %u) / %.1f, -1.0);\n", i, i, 32 - bits, 32 - bits, (double)((1u << (bits - 1)) - 1u));
+        break;
+    case PIX_RAW: case PIX_F32: say(w, "    float v%d = asfloat(x%d);\n", i, i); break;
+    case PIX_F32M: say(w, "    float v%d = asfloat(x%d & 0x7FFFFFFFu);\n", i, i); break;
+    case PIX_F16:  say(w, "    float v%d = f16tof32(x%d);\n", i, i); break;
+    case PIX_UF11: say(w, "    float v%d = small(x%d, 6u);\n", i, i); break;
+    case PIX_UF10: say(w, "    float v%d = small(x%d, 5u);\n", i, i); break;
+    case PIX_SE9:  say(w, "    float v%d = float(x%d) * asfloat((103u + ((%s >> 27) & 31u)) << 23);\n", i, i, f->bytes > 4 ? "hi" : "lo"); break;
+    default: return 0;
+    }
+    return 1;
+}
+
+/* What a field of a surface keeps of a number put into it: for a surface
+ * the card holds as plain floats, read in the surface's own form. */
+static int say_kept(words *w, const pixfmt *f, int channel) {
+    int field = f->from[channel];
+    char c = "xyzw"[channel];
+    if (field == PIX_ZERO) { say(w, "    c.%c = 0.0;\n", c); return 1; }
+    if (field == PIX_ONE)  { say(w, "    c.%c = 1.0;\n", c); return 1; }
+    unsigned bits = f->f[field].bits;
+    switch (f->f[field].kind) {
+    case PIX_UNORM:
+        if (bits > 16) return 1;
+        say(w, "    c.%c = floor(saturate(c.%c) * %.1f + 0.5) / %.1f;\n", c, c, (double)((1u << bits) - 1u), (double)((1u << bits) - 1u));
+        return 1;
+    case PIX_UF11: say(w, "    c.%c = small_kept(c.%c, 6u);\n", c, c); return 1;
+    case PIX_UF10: say(w, "    c.%c = small_kept(c.%c, 5u);\n", c, c); return 1;
+    case PIX_F16:  say(w, "    c.%c = f16tof32(f32tof16(c.%c));\n", c, c); return 1;
+    case PIX_F32:  return 1;
+    default:       return 0;
+    }
+}
+
+static const char VIEW_PRELUDE[] =
+    "// Written by the toolkit: a surface on the card, read as the texture a title makes of its memory.\n"
+    "cbuffer view : register(b0) { int4 A; int4 B; };   // A: the texture's first byte in the surface, bytes a row of it, bytes a texel,\n"
+    "                                                    // bytes a row of the surface; B: bytes a pixel of it, its width, its height\n"
+    "float small(uint x, uint mb) {\n"
+    "    uint e = x >> mb, m = x & ((1u << mb) - 1u);\n"
+    "    if (e == 0u) return float(m) * asfloat((113u - mb) << 23);\n"
+    "    if (e == 31u) return asfloat(m != 0u ? 0x7FC00000u : 0x7F800000u);\n"
+    "    return asfloat(((e + 112u) << 23) | (m << (23u - mb)));\n"
+    "}\n"
+    "float small_kept(float v, uint mb) {\n"
+    "    float top = asfloat((142u << 23) | (((1u << mb) - 1u) << (23u - mb)));\n"
+    "    if (v != v) return v;\n"
+    "    if (v <= 0.0) return 0.0;\n"
+    "    if (v > top) return top;\n"
+    "    uint bits = asuint(v);\n"
+    "    int e = int(bits >> 23) - 112;\n"
+    "    if (e <= 0) return min(floor(v * asfloat((141u + mb) << 23) + 0.5), float(1u << mb)) * asfloat((113u - mb) << 23);\n"
+    "    uint m = ((bits & 0x7FFFFFu) + (1u << (22u - mb))) >> (23u - mb);\n"
+    "    if (m >= (1u << mb)) { m = 0u; e++; }\n"
+    "    if (e >= 31) return top;\n"
+    "    return asfloat((uint(e + 112) << 23) | (m << (23u - mb)));\n"
+    "}\n"
+    "float off_curve(float v) { if (!(v > 0.0)) return 0.0; if (v >= 1.0) return 1.0; return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4); }\n"
+    "float on_curve(float v) { if (!(v > 0.0)) return 0.0; if (v >= 1.0) return 1.0; return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055; }\n";
+
+/* The program that reads a surface of the card's form `format` as texels
+ * of `tf`, one of three ways. BY_BYTES: the texture's rows of bytes are
+ * found among the surface's, wherever they begin and however long a row of
+ * either is. BY_PIXEL: the texture is laid out as the surface is, texel
+ * for pixel, and a texel is its pixel's words. AS_KEPT: the same, of a
+ * surface the card holds as plain floats and the texture reads in the
+ * surface's own form, `kept`: the texel is the pixel as the surface would
+ * have kept it. NULL when there is no such program. */
+enum { BY_BYTES = 0, BY_PIXEL, AS_KEPT };
+
+static char *view_text(unsigned format, const pixfmt *tf, unsigned texture_gamma, int how, const pixfmt *kept, unsigned surface_gamma) {
+    words w = { 0 };
+    say(&w, "%s", VIEW_PRELUDE);
+    if (how == AS_KEPT) {
+        say(&w, "Texture2D<float4> SRC : register(t0);\n"
+                "float4 main(float4 pos : SV_Position) : SV_Target {\n"
+                "    int row = A.x / A.w, col = (A.x - row * A.w) / B.x;\n"
+                "    int2 at = int2(pos.xy) + int2(col, row);\n"
+                "    if (at.x >= B.y || at.y >= B.z) return float4(0.0, 0.0, 0.0, 0.0);\n"
+                "    float4 c = SRC.Load(int3(at, 0));\n");
+        /* the card holds light; the surface's bytes would hold it on the display's curve if the surface is on it */
+        if (surface_gamma) say(&w, "    c.xyz = float3(on_curve(c.x), on_curve(c.y), on_curve(c.z));\n");
+        for (int k = 0; k < 4; k++) if (!say_kept(&w, kept, k)) { free(w.s); return NULL; }
+        /* the fields are the surface's; the texture gives them to red, green, blue and alpha its own way */
+        say(&w, "    float4 s = c;\n");
+        for (int k = 0; k < 4; k++) {
+            int field = tf->from[k], held = -1;
+            if (field == PIX_ZERO) { say(&w, "    c.%c = 0.0;\n", "xyzw"[k]); continue; }
+            if (field == PIX_ONE)  { say(&w, "    c.%c = 1.0;\n", "xyzw"[k]); continue; }
+            for (int j = 0; j < 4; j++) if (kept->from[j] == field) held = j;
+            if (held < 0) { free(w.s); return NULL; }           /* a field the surface gives to no channel: the card does not have it */
+            say(&w, "    c.%c = s.%c;\n", "xyzw"[k], "xyzw"[held]);
+        }
+    } else {
+        switch (format) {
+        case GPU_RG32UI:
+            say(&w, "Texture2D<uint4> SRC : register(t0);\n"
+                    "uint unit_at(int col, int row, int k) { uint4 p = SRC.Load(int3(col, row, 0)); return k == 0 ? p.x : p.y; }\n");
+            break;
+        case GPU_RGBA8: case GPU_RGBA8_SRGB:
+            say(&w, "Texture2D<float4> SRC : register(t0);\n"
+                    "uint unit_at(int col, int row, int k) { uint4 b = uint4(SRC.Load(int3(col, row, 0)) * 255.0 + 0.5); return b.x | (b.y << 8) | (b.z << 16) | (b.w << 24); }\n");
+            break;
+        case GPU_BGRA8: case GPU_BGRA8_SRGB:
+            say(&w, "Texture2D<float4> SRC : register(t0);\n"
+                    "uint unit_at(int col, int row, int k) { uint4 b = uint4(SRC.Load(int3(col, row, 0)) * 255.0 + 0.5); return b.z | (b.y << 8) | (b.x << 16) | (b.w << 24); }\n");
+            break;
+        case GPU_RGBA16F:
+            say(&w, "Texture2D<float4> SRC : register(t0);\n"
+                    "uint unit_at(int col, int row, int k) {\n"
+                    "    float4 p = SRC.Load(int3(col, row, 0));\n"
+                    "    return k == 0 ? (f32tof16(p.x) | (f32tof16(p.y) << 16)) : (f32tof16(p.z) | (f32tof16(p.w) << 16));\n"
+                    "}\n");
+            break;
+        case GPU_D24S8:
+            say(&w, "Texture2D<float> SRC : register(t0);\nTexture2D<uint2> SRC2 : register(t1);\n"
+                    "uint unit_at(int col, int row, int k) { return uint(SRC.Load(int3(col, row, 0)) * 16777215.0 + 0.5) | (SRC2.Load(int3(col, row, 0)).y << 24); }\n");
+            break;
+        case GPU_D32FS8:
+            say(&w, "Texture2D<float> SRC : register(t0);\n"
+                    "uint unit_at(int col, int row, int k) { return asuint(SRC.Load(int3(col, row, 0))); }\n");
+            break;
+        case GPU_D16:
+            /* two bytes a pixel: a word is two pixels side by side */
+            say(&w, "Texture2D<float> SRC : register(t0);\n"
+                    "uint half_at(int col, int row) { return col < B.y ? uint(SRC.Load(int3(col, row, 0)) * 65535.0 + 0.5) : 0u; }\n"
+                    "uint unit_at(int col, int row, int k) { return half_at(col, row) | (half_at(col + 1, row) << 16); }\n");
+            break;
+        default:
+            free(w.s);
+            return NULL;
+        }
+        if (how == BY_PIXEL)
+            say(&w, "float4 main(float4 pos : SV_Position) : SV_Target {\n"
+                    "    int2 at = int2(pos.xy);\n"
+                    "    if (at.x >= B.y || at.y >= B.z) return float4(0.0, 0.0, 0.0, 0.0);\n"
+                    "    uint lo = unit_at(at.x, at.y, 0), hi = unit_at(at.x, at.y, 1);\n");
+        else
+            say(&w, "uint word_at(int byte) {\n"
+                    "    if (byte < 0) return 0u;\n"
+                    "    int row = byte / A.w, rest = byte - row * A.w, col = rest / B.x, k = (rest - col * B.x) >> 2;\n"
+                    "    if (col >= B.y || row >= B.z) return 0u;\n"
+                    "    return unit_at(col, row, k);\n"
+                    "}\n"
+                    "float4 main(float4 pos : SV_Position) : SV_Target {\n"
+                    "    int2 at = int2(pos.xy);\n"
+                    "    int byte = A.x + at.y * A.y + at.x * A.z, first = byte & ~3;\n"
+                    "    uint turn = uint(byte & 3) * 8u, w0 = word_at(first), w1 = word_at(first + 4);\n"
+                    "    uint lo = turn != 0u ? (w0 >> turn) | (w1 << (32u - turn)) : w0, hi = turn != 0u ? w1 >> turn : w1;\n");
+        for (int i = 0; i < tf->fields; i++) if (!say_field(&w, tf, i)) { free(w.s); return NULL; }
+        say(&w, "    float4 c;\n");
+        for (int k = 0; k < 4; k++) {
+            if (tf->from[k] == PIX_ZERO) say(&w, "    c.%c = 0.0;\n", "xyzw"[k]);
+            else if (tf->from[k] == PIX_ONE) say(&w, "    c.%c = 1.0;\n", "xyzw"[k]);
+            else say(&w, "    c.%c = v%d;\n", "xyzw"[k], tf->from[k]);
+        }
+    }
+    /* a texture kept on the display's curve is handed over as light: gxm_tex.c's gxm_tex_texel */
+    if (texture_gamma) say(&w, "    c.xy = float2(off_curve(c.x), off_curve(c.y));\n%s", texture_gamma != 3 ? "    c.z = off_curve(c.z);\n" : "");
+    say(&w, "    return c;\n}\n");
+    if (w.bad) { free(w.s); return NULL; }
+    return w.s;
+}
+
+static gpu_shader *view_program_for(char *text) {
+    uint64_t hash;
+    if (!text) return NULL;
+    hash = fold(0, (const uint8_t *)text, strlen(text));
+    for (unsigned i = 0; i < g_view_program_count; i++)
+        if (g_view_programs[i].hash == hash) { free(text); return g_view_programs[i].program; }
+    char log[1024];
+    gpu_shader *made = gpu_shader_make(1, text, 0, log, sizeof(log));
+    if (!made) refuse("a program to read a surface as a texture did not compile: %.120s", log);
+    const char *dump = getenv("VITARECOMP_GXM_GPU_SHADERS");
+    if (dump && *dump) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/view_%016llx.hlsl", dump, (unsigned long long)hash);
+        FILE *f = fopen(path, "wb");
+        if (f) { fputs(text, f); fclose(f); }
+    }
+    free(text);
+    if (g_view_program_count < 64) {
+        g_view_programs[g_view_program_count].hash = hash;
+        g_view_programs[g_view_program_count++].program = made;
+    }
+    return made;
+}
+
+/* --- textures, kept on the card until their bytes change ------------------------------------- */
+
+typedef struct {
+    uint32_t words[4], data, palette;
+    uint64_t stamp;
+    uint32_t checked, used;                 /* the list it was last compared in, and drawn with */
+    gpu_texture *texture;
+    const void *from;                       /* made on the card from this surface's record, not from memory; NULL otherwise */
+    uint32_t from_version;                  /* as the surface stood after so many lists */
+    uint32_t width, height;                 /* of such a one */
+} texture_slot;
+
+#define TEXTURES 2048
+static texture_slot g_textures[TEXTURES];
+static unsigned g_texture_count;
+
+/* A texture that is replaced while a list is being made ready may already
+ * have been handed to one of the list's draws: it is put aside, and freed
+ * when the next list begins. */
+static gpu_texture **g_retired;
+static size_t g_retired_count, g_retired_cap;
+
+static void retire(gpu_texture *t) {
+    if (!t) return;
+    if (g_retired_count == g_retired_cap) {
+        size_t cap = g_retired_cap ? g_retired_cap * 2 : 64;
+        gpu_texture **grown = realloc(g_retired, cap * sizeof(*grown));
+        if (!grown) return;                         /* kept for good, which is better than freed too soon */
+        g_retired = grown;
+        g_retired_cap = cap;
+    }
+    g_retired[g_retired_count++] = t;
+}
+
+static void retired_go(void) {
+    for (size_t i = 0; i < g_retired_count; i++) gpu_texture_free(g_retired[i]);
+    g_retired_count = 0;
+}
+
+static void forget_views_of(const void *record) {
+    for (unsigned i = 0; i < g_texture_count; i++)
+        if (g_textures[i].from == record) { g_textures[i].from = NULL; g_textures[i].stamp = 0; g_textures[i].checked = 0; }
+}
+
+/* A texture that is a plain run of texels in rows, one level: its bytes
+ * a row, or 0 for any other. */
+static uint32_t rows_of(const gxm_tex *t) {
+    if (t->kind != GXM_TEX_PLAIN || t->cube || t->levels != 1 || t->pal) return 0;
+    if (t->type == GXM_TEX_LINEAR) return t->store_w[0] * t->unit_bytes;
+    if (t->type == GXM_TEX_LINEAR_STRIDED) return t->stride;
+    return 0;
+}
+
+/* The bytes a texture's texels lie in: of rows, no more than the rows. */
+static size_t texture_extent(const gxm_tex *t) {
+    uint32_t rows = rows_of(t);
+    uint64_t bytes = rows ? (uint64_t)rows * t->level_h[0] : t->bytes;
+    return (size_t)(bytes < t->avail ? bytes : t->avail);
+}
+
+/* The texture `t`, whose bytes lie in a surface the card holds, made from
+ * that surface on the card. NULL when it cannot be: the surface is then
+ * the caller's to send back, and the texture comes from memory. */
+static gpu_texture *view_for(texture_slot *slot, const gxm_tex *t, const colour_record *c, const depth_record *d) {
+    const void *record = c ? (const void *)c : (const void *)d;
+    uint32_t version = c ? c->version : d->version, row_bytes = rows_of(t);
+    gpu_surface *surface = c ? c->card : d->card;
+    const uint8_t *lo = c ? c->lo : d->lo;
+    int32_t constants[8] = { 0 };
+    char *text = NULL;
+    if (slot->from == record && slot->from_version == version && slot->texture) return slot->texture;
+    if (t->kind != GXM_TEX_PLAIN || t->cube || t->levels != 1 || t->pal)
+        return by_memory("the texture is not plain texels of one level (kind %u, %u levels%s)", t->kind, t->levels, t->cube ? ", a cube" : "");
+    if (t->base < lo)
+        return by_memory("the texture begins %ld bytes before the surface (texture 0x%08X, %ux%u format 0x%08X type %u kind %u, %u levels, %u bytes)",
+                         (long)(lo - t->base), t->data, t->level_w[0], t->level_h[0], t->format, t->type, t->kind, t->levels, t->bytes);
+    if (t->pf.bytes != 1 && t->pf.bytes != 2 && t->pf.bytes != 3 && t->pf.bytes != 4 && t->pf.bytes != 8)
+        return by_memory("a texel of %u bytes", t->pf.bytes);
+    constants[0] = (int32_t)(t->base - lo);
+    constants[1] = (int32_t)row_bytes;
+    constants[2] = t->pf.bytes;
+    if (c) {
+        uint32_t layout = c->s.colour_layout;
+        /* laid out as the surface is, texel for pixel: in rows of one length, or in the same tiles */
+        int alike = !constants[0] && t->pf.bytes == c->s.colour.bytes && t->level_w[0] == c->s.width && t->level_h[0] == c->s.height &&
+                    ((layout == GXM_SURFACE_LINEAR && row_bytes && row_bytes == c->s.colour_stride * c->s.colour.bytes) ||
+                     (layout == GXM_SURFACE_TILED && t->type == GXM_TEX_TILED));
+        constants[3] = (int32_t)(c->s.colour_stride * c->s.colour.bytes);
+        constants[4] = c->s.colour.bytes;
+        constants[5] = (int32_t)c->s.width;
+        constants[6] = (int32_t)c->s.height;
+        if (c->way.mode == AS_FLOATS) {
+            /* the card has the surface as light and not as bytes: only a texture of the surface's own fields, texel for
+             * pixel, can be had from it, the whole of it or rows of it from some pixel on */
+            const pixfmt *a = &t->pf, *b = &c->s.colour;
+            int fields = a->bytes == b->bytes && a->fields == b->fields && !memcmp(a->f, b->f, sizeof(a->f));
+            int within = layout == GXM_SURFACE_LINEAR && row_bytes && row_bytes == c->s.colour_stride * b->bytes && !(constants[0] % b->bytes);
+            if (within) {
+                /* and every texel of it one of the surface's pixels */
+                uint32_t row = (uint32_t)constants[0] / row_bytes, col = ((uint32_t)constants[0] - row * row_bytes) / b->bytes;
+                within = col + t->level_w[0] <= c->s.width && row + t->level_h[0] <= c->s.height;
+            }
+            if (!fields || !(alike || within))
+                return by_memory("a surface the card keeps as floats (%ux%u, %u bytes a pixel, %u a row, layout %u) read another way "
+                                 "(texture %ux%u format 0x%08X type %u, %u bytes a texel, %u a row, from byte %d)", c->s.width, c->s.height,
+                                 c->s.colour.bytes, constants[3], layout, t->level_w[0], t->level_h[0], t->format, t->type, t->pf.bytes,
+                                 row_bytes, constants[0]);
+            text = view_text(c->way.format, &t->pf, t->gamma, AS_KEPT, &c->s.colour, c->s.colour_gamma);
+        } else if (alike) {
+            text = view_text(c->way.format, &t->pf, t->gamma, BY_PIXEL, NULL, 0);
+        } else {
+            /* a texel across two words is put together from both: only when it is no wider than a word; and the texture's
+             * rows lie among the surface's, give or take the end of its last */
+            if (layout != GXM_SURFACE_LINEAR || !row_bytes || ((constants[0] & 3) && t->pf.bytes > 4) ||
+                t->base + (size_t)row_bytes * t->level_h[0] > c->hi + row_bytes)
+                return by_memory("a surface of layout %u (%ux%u, %u bytes a pixel) and a texture of type %u (%ux%u format 0x%08X, from byte %d) "
+                                 "that are not both rows", layout, c->s.width, c->s.height, c->s.colour.bytes, t->type, t->level_w[0],
+                                 t->level_h[0], t->format, constants[0]);
+            text = view_text(c->way.format, &t->pf, t->gamma, BY_BYTES, NULL, 0);
+        }
+    } else {
+        int tiled = (d->control[0] & 0x00011000u) == 0x00011000u, unit = d->format == GPU_D16 ? 2 : 4;
+        constants[3] = (int32_t)d->row_bytes;
+        constants[4] = unit;
+        constants[5] = (int32_t)d->width;
+        constants[6] = (int32_t)d->height;
+        if (tiled && t->type == GXM_TEX_TILED && !constants[0] && t->pf.bytes == unit && t->level_w[0] == d->width && t->level_h[0] == d->height) {
+            /* in the same tiles, texel for pixel */
+            text = view_text(d->format, &t->pf, t->gamma, BY_PIXEL, NULL, 0);
+        } else {
+            if (tiled || !row_bytes)
+                return by_memory("a depth surface or its texture not in rows (surface 0x%08X, texture type %u, %ux%u of %u bytes from byte %d)",
+                                 d->control[0], t->type, t->level_w[0], t->level_h[0], t->pf.bytes, constants[0]);
+            if (t->base + (size_t)row_bytes * t->level_h[0] > d->hi + row_bytes)
+                return by_memory("a texture of %u rows that reaches past the depth surface it begins in", t->level_h[0]);
+            text = view_text(d->format, &t->pf, t->gamma, BY_BYTES, NULL, 0);
+        }
+    }
+    if (!text) return by_memory("no program for a texture of format 0x%08X read from a surface the card keeps in form %u", t->format,
+                                c ? c->way.format : d->format);
+    gpu_shader *program = view_program_for(text);
+    if (!program) return NULL;
+    if (!slot->from || !slot->texture || slot->width != t->level_w[0] || slot->height != t->level_h[0]) {
+        retire(slot->texture);
+        slot->texture = gpu_texture_blank(t->level_w[0], t->level_h[0]);
+        slot->width = t->level_w[0];
+        slot->height = t->level_h[0];
+    }
+    slot->from = NULL;
+    if (!slot->texture || gpu_convert(slot->texture, surface, program, constants, sizeof(constants))) return NULL;
+    slot->from = record;
+    slot->from_version = version;
+    g_views++;
+    return slot->texture;
+}
+
+static gpu_texture *texture_for(const gxm_tex *t, const uint32_t words[4]) {
+    texture_slot *slot = NULL;
+    for (unsigned i = 0; i < g_texture_count; i++) {
+        texture_slot *s = &g_textures[i];
+        if (s->data == t->data && s->palette == t->palette && !memcmp(s->words, words, sizeof(s->words))) { slot = s; break; }
+    }
+    if (!slot) {
+        if (g_texture_count == TEXTURES) {          /* room: the one longest unused goes */
+            unsigned oldest = 0;
+            for (unsigned i = 1; i < TEXTURES; i++) if (g_textures[i].used < g_textures[oldest].used) oldest = i;
+            retire(g_textures[oldest].texture);
+            g_textures[oldest] = g_textures[--g_texture_count];
+        }
+        slot = &g_textures[g_texture_count++];
+        memset(slot, 0, sizeof(*slot));
+        memcpy(slot->words, words, sizeof(slot->words));
+        slot->data = t->data;
+        slot->palette = t->palette;
+    }
+    slot->used = g_list;
+
+    /* its bytes may lie in a surface the card holds newer than memory does */
+    const uint8_t *lo = t->base, *hi = t->base + texture_extent(t), *within = NULL;
+    /* A texture that begins inside a surface is a reading of that surface, and what its layout rounds up to past the
+     * surface's end is nothing: it is not a reading of whatever lies next in memory. */
+    for (unsigned i = 0; i < g_colour_count; i++)
+        if (g_colours[i].lo <= lo && lo < g_colours[i].hi && (!within || g_colours[i].hi > within)) within = g_colours[i].hi;
+    for (unsigned i = 0; i < g_depth_count; i++)
+        if (g_depths[i].lo <= lo && lo < g_depths[i].hi && (!within || g_depths[i].hi > within)) within = g_depths[i].hi;
+    if (within && within < hi) hi = within;
+    for (unsigned i = 0; i < g_colour_count; i++) {
+        colour_record *r = &g_colours[i];
+        if (!r->newer || r->lo >= hi || r->hi <= lo) continue;
+        gpu_texture *made = view_for(slot, t, r, NULL);
+        if (made) return made;
+        colour_back(r);
+    }
+    for (unsigned i = 0; i < g_depth_count; i++) {
+        depth_record *d = &g_depths[i];
+        if (!d->newer || d->lo >= hi || d->hi <= lo) continue;
+        gpu_texture *made = view_for(slot, t, NULL, d);
+        if (made) return made;
+        depth_back(d);
+    }
+
+    /* from memory. Nothing is written while a list is being made ready: once a list is enough */
+    if (!slot->from && slot->texture && slot->checked == g_list) return slot->texture;
+    uint64_t began = now_ns();
+    uint64_t stamp = content_stamp(t);
+    g_ns[P_HASH] += now_ns() - began;
+    g_hashed += t->bytes < t->avail ? t->bytes : t->avail;
+    if (!slot->from && slot->texture && slot->stamp == stamp) { slot->checked = g_list; return slot->texture; }
+    retire(slot->texture);
+    slot->from = NULL;
+    began = now_ns();
+    slot->texture = upload(t);
+    g_ns[P_TEXTURE] += now_ns() - began;
+    g_made++;
+    slot->stamp = stamp;
+    slot->checked = g_list;
+    return slot->texture;
+}
+
+/* --- a list ---------------------------------------------------------------------------------- */
 
 /* What the card says each draw of the last list put on the screen: the
  * place of its count among those the list asked for, or -1. */
@@ -639,12 +1495,13 @@ static uint32_t counts_cap;
 int gxm_gpu_list(queued **list, uint32_t count, int aside) {
     const gxm_draw_state *s0 = &list[0]->s;
     uint32_t width = s0->width, height = s0->height;
-    unsigned depth = s0->depth_bits == 24 ? GPU_D24S8 : s0->depth_bits == 0 ? GPU_D32FS8 : GPU_NONE;
+    unsigned depth = depth_format_of(s0->depth_bits);
     colour_way way;
     static programs *shaders;
     static uint32_t shaders_cap;
     g_aside.held = 0;
     g_list++;
+    retired_go();
 
     /* --- is it a list the card's path draws as the processor's would? --- */
     if (!s0->depth || !s0->stencil) return refuse("a scene with no depth or stencil planes");
@@ -675,11 +1532,61 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
                 a->compare_mask != b->compare_mask || a->write_mask != b->write_mask || a->program_off != b->program_off)
                 return refuse("a draw whose two faces are tested differently");
         }
+        /* the card keeps sixteen bits of depth with no stencil beside them */
+        if (depth == GPU_D16 && (s->face[0].stencil_func != 7 || s->face[s->two_sided ? 1 : 0].stencil_func != 7))
+            return refuse("a stencil test beside sixteen bits of depth");
         if (s->region_mode == GXM_REGION_INSIDE) return refuse("a draw clipped to the outside of a region");
         if (!shaders_for(q, way.raw, way.format, &shaders[i])) return 0;
         const gxm_program *fp = s->fragment;
         shaders[i].blended = 0;
-        /* its textures, on the card before anything is begun */
+        if (shaders[i].fragment && fp && !(fp->gxp.flags & GXP_FLAG_NATIVECOLOR) && ((fp->blend[1] & 15) || (fp->blend[1] >> 4))) {
+            if (way.raw) return refuse("blending into a surface kept as words");
+            if ((fp->blend[2] & 15) > 10 || (fp->blend[2] >> 4) > 10 || (fp->blend[3] & 15) > 10 || (fp->blend[3] >> 4) > 10)
+                return refuse("a blend factor the card has no equal for");
+            shaders[i].blended = 1;
+        }
+    }
+
+    /* --- the target: where the card keeps it, or as the title's memory has it --- */
+    size_t depth_bytes = depth_bytes_of(depth), pixels = (size_t)width * height;
+    uint32_t colour_pitch = width * way.bytes, depth_pitch = (uint32_t)(width * depth_bytes);
+    int kept = !aside && keeping();
+    if (!bytes_for(&g_colour_rows, &g_colour_rows_cap, pixels * way.bytes + 16) || !bytes_for(&g_depth_rows, &g_depth_rows_cap, pixels * depth_bytes)) return 0;
+    uint64_t lap = now_ns(), at;
+    colour_record *record = NULL, *whole = NULL;
+    gpu_surface *colour = NULL, *deep = NULL;
+    if (way.mode && !aside) {
+        record = colour_for(s0, &way);
+        if (!record) return refuse("the card would not take a target of %u by %u", width, height);
+        colour = record->card;
+        whole = keeping() && !record->newer ? whole_of(record) : NULL;
+        if (whole && gpu_surface_copy_corner(colour, whole->card, width, height)) whole = NULL;
+        /* the same memory in another form, held newer by the card, goes into memory before this form is read from it */
+        if (!whole) surfaces_back(record->lo, record->hi, record);
+        if (!whole && !record->newer) {
+            /* memory holds the surface: the card's is filled from it unless the two still agree */
+            uint64_t stamp = fold(0, record->lo, (size_t)(record->hi - record->lo));
+            if (!(record->agreed && stamp == record->stamp)) {
+                colour_in(s0, &way, g_colour_rows);
+                if (gpu_surface_put(colour, g_colour_rows, colour_pitch)) return refuse("the card would not take a target of %u by %u", width, height);
+                g_puts++;
+                if (logging())
+                    fprintf(stderr, "gxm gpu: list %u: a colour surface of %ux%u, %u bytes a pixel, is filled from memory (%s)\n", g_list, width,
+                            height, s0->colour.bytes, record->agreed ? "its bytes had changed" : "the card had nothing of it");
+            }
+            record->agreed = 1;
+            record->stamp = stamp;
+        }
+    } else if (way.mode) {
+        colour = spare_for(way.format, width, height);
+        if (!colour) return refuse("the card would not take a target of %u by %u", width, height);
+        colour_in(s0, &way, g_colour_rows);
+        if (gpu_surface_put(colour, g_colour_rows, colour_pitch)) return refuse("the card would not take a target of %u by %u", width, height);
+    }
+    /* its textures, on the card before anything is begun: made from surfaces the card holds, or from memory */
+    for (uint32_t i = 0; i < count; i++) {
+        const queued *q = list[i];
+        const gxm_draw_state *s = &q->s;
         for (int stage_at = 0; stage_at < 2; stage_at++) {
             const stage *g = stage_at ? &q->d.f : &q->d.v;
             if (stage_at && !shaders[i].fragment) continue;
@@ -692,34 +1599,35 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
                                   t->levels, t->cube ? ", a cube" : "", t->format, t->kind);
             }
         }
-        if (shaders[i].fragment && fp && !(fp->gxp.flags & GXP_FLAG_NATIVECOLOR) && ((fp->blend[1] & 15) || (fp->blend[1] >> 4))) {
-            if (way.raw) return refuse("blending into a surface kept as words");
-            if ((fp->blend[2] & 15) > 10 || (fp->blend[2] >> 4) > 10 || (fp->blend[3] & 15) > 10 || (fp->blend[3] >> 4) > 10)
-                return refuse("a blend factor the card has no equal for");
-            shaders[i].blended = 1;
-        }
     }
 
-    /* --- the target, as the title's memory has it --- */
-    gpu_target target;
-    size_t depth_bytes = depth == GPU_D24S8 ? 4 : 8, pixels = (size_t)width * height;
-    memset(&target, 0, sizeof(target));
-    target.width = width;
-    target.height = height;
-    if (!bytes_for(&g_colour_rows, &g_colour_rows_cap, pixels * way.bytes + 16) || !bytes_for(&g_depth_rows, &g_depth_rows_cap, pixels * depth_bytes)) return 0;
-    if (way.mode) {
-        colour_in(s0, &way, g_colour_rows);
-        target.colour_format = way.format;
-        target.colour = g_colour_rows;
-        target.colour_pitch = width * way.bytes;
+    if (kept && g_scene.active && g_scene.format == depth && g_scene.width == width && g_scene.height == height) {
+        if (!g_scene.card) g_scene.card = spare_for(depth, width, height);
+        deep = g_scene.card;
+        if (!deep) return refuse("the card would not take a target of %u by %u", width, height);
+        if (g_scene.where == IN_PLANES) {
+            if (g_scene.cleared) gpu_surface_clear(deep, g_scene.clear_depth, g_scene.clear_stencil);
+            else {
+                pack_depth(s0, depth, g_depth_rows);
+                if (gpu_surface_put(deep, g_depth_rows, depth_pitch)) return refuse("the card would not take a target of %u by %u", width, height);
+                g_puts++;
+                if (logging()) fprintf(stderr, "gxm gpu: list %u: a scene's depth of %ux%u is filled from its planes\n", g_list, width, height);
+            }
+        }
+    } else {
+        if (!aside && g_scene.active && g_scene.where == ON_CARD) planes_wanted(s0);
+        deep = spare_for(depth, width, height);
+        if (!deep) return refuse("the card would not take a target of %u by %u", width, height);
+        g_kept_from = aside ? kept_holding(s0, depth) : NULL;
+        if (g_kept_from) memcpy(g_depth_rows, g_kept_from->card, pixels * depth_bytes);
+        else pack_depth(s0, depth, g_depth_rows);
+        if (gpu_surface_put(deep, g_depth_rows, depth_pitch)) return refuse("the card would not take a target of %u by %u", width, height);
+        kept = 0;
     }
-    g_kept_from = aside ? kept_holding(s0, depth) : NULL;
-    if (g_kept_from) memcpy(g_depth_rows, g_kept_from->card, pixels * depth_bytes);
-    else pack_depth(s0, depth, g_depth_rows);
-    target.depth_format = depth;
-    target.depth = g_depth_rows;
-    target.depth_pitch = (uint32_t)(width * depth_bytes);
-    if (gpu_begin(&target)) return refuse("the card would not take a target of %u by %u", width, height);
+    if (gpu_begin(colour, deep)) return refuse("the card would not take a target of %u by %u", width, height);
+    at = now_ns(); g_ns[P_IN] += at - lap; lap = at;
+    g_lists++;
+    g_draws += count;
 
     /* --- the draws --- */
     if (count > counts_cap) {
@@ -727,7 +1635,7 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
         if (c) counts = c;
         int *k = realloc(counted, (size_t)count * sizeof(*k));
         if (k) counted = k;
-        if (!c || !k) { gpu_end(NULL, 0, NULL, 0, NULL, 0); return 0; }
+        if (!c || !k) { gpu_end(NULL, 0); return 0; }
         counts_cap = count;
     }
     for (uint32_t i = 0; i < count; i++) {
@@ -740,7 +1648,9 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
         int strip = 0;
         counted[i] = -1;
         if (pa_words > 64) pa_words = 64;
+        lap = now_ns();
         if (!geometry(q, pa_words, &vertices, &indices, &strip)) continue;
+        at = now_ns(); g_ns[P_VERTICES] += at - lap; lap = at;
 
         memset(&call, 0, sizeof(call));
         memset(c, 0, sizeof(c));
@@ -813,14 +1723,15 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
         if (call.reads_pixel == 2) { uint32_t keep = call.write_mask; memcpy(&c[1].viewport[10], &keep, 4); }
         call.count = aside || q->tally != 0;
         counted[i] = gpu_draw(&call);
+        g_ns[P_DRAW] += now_ns() - lap;
     }
 
-    /* --- and back --- */
-    uint32_t colour_pitch = width * way.bytes, depth_pitch = (uint32_t)(width * depth_bytes);
+    /* --- and what becomes of it --- */
     if (aside) {
         if (!bytes_for(&g_aside.colour, &g_aside.colour_cap, pixels * way.bytes + 16) ||
-            !bytes_for(&g_aside.depth, &g_aside.depth_cap, pixels * depth_bytes)) { gpu_end(NULL, 0, NULL, 0, NULL, 0); return 0; }
-        if (gpu_end(way.mode ? g_aside.colour : NULL, colour_pitch, g_aside.depth, depth_pitch, counts, count)) return 0;
+            !bytes_for(&g_aside.depth, &g_aside.depth_cap, pixels * depth_bytes)) { gpu_end(NULL, 0); return 0; }
+        if (gpu_end(counts, count) || (way.mode && gpu_surface_get(colour, g_aside.colour, colour_pitch)) ||
+            gpu_surface_get(deep, g_aside.depth, depth_pitch)) return 0;
         g_aside.held = 1;
         g_aside.draws = count;
         g_aside.width = width; g_aside.height = height;
@@ -829,13 +1740,36 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
         g_aside.depth_format = depth;
         return 0;
     }
-    if (gpu_end(way.mode ? g_colour_rows : NULL, colour_pitch, g_depth_rows, depth_pitch, counts, count))
-        return refuse("the card did not finish a list of %u draws", count);
-    /* everything arrived: only now is anything of the title's changed */
-    if (way.mode) colour_out(s0, &way, g_colour_rows);
-    unpack_depth(g_depth_rows, depth, width, height, s0->depth, s0->stencil);
+    lap = now_ns();
+    if (gpu_end(counts, count)) return refuse("the card did not finish a list of %u draws", count);
+    g_ns[P_BACK] += now_ns() - lap;
     for (uint32_t i = 0; i < count; i++)
         if (counted[i] >= 0) list[i]->pixels = (uint32_t)counts[counted[i]];
+    /* the card's is the surface now, and the title's memory is behind */
+    if (record && whole && !gpu_surface_copy_corner(whole->card, colour, width, height)) {
+        /* drawn through the larger surface it is a corner of: that one has it, and this one holds nothing of its own */
+        whole->version++;
+        record->agreed = 0;
+    } else if (record) {
+        record->newer = 1;
+        record->agreed = 0;
+        record->version++;
+        /* A title's own code reads what it has drawn, too, and nothing says when: the brightness a frame came out at,
+         * off a surface of a few pixels, to set the next frame's exposure by. What the card holds of a surface that
+         * small is put in memory at once; it costs little, and there is no telling otherwise. */
+        if (!keeping() || (size_t)(record->hi - record->lo) <= SMALL_BYTES) colour_back(record);
+    }
+    if (kept) {
+        g_scene.where = ON_CARD;
+        g_scene.cleared = 0;
+    } else {
+        lap = now_ns();
+        if (gpu_surface_get(deep, g_depth_rows, depth_pitch)) return refuse("the card did not give back a list's depth");
+        at = now_ns(); g_ns[P_BACK] += at - lap;
+        unpack_depth(g_depth_rows, depth, width, height, s0->depth, s0->stencil);
+        g_ns[P_OUT] += now_ns() - at;
+        if (g_scene.active) { g_scene.where = IN_PLANES; g_scene.cleared = 0; }
+    }
     return 1;
 }
 
@@ -963,6 +1897,7 @@ void gxm_gpu_compare(queued **list, uint32_t count) {
         if (!d || !t) return;
         cap = pixels;
     }
+    memcpy(stencil, s->stencil, pixels);                /* where the card keeps none, there is none to differ */
     unpack_depth(g_aside.depth, g_aside.depth_format, s->width, s->height, depth, stencil);
     keep_depth(s, lists);
     for (size_t i = 0; i < pixels; i++) {

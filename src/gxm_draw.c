@@ -1289,6 +1289,7 @@ static void profile_report(void) {
         most->used = 0;
     }
     fprintf(stderr, "\n");
+    gxm_gpu_profile(g_profile);
 
     memset(g_by_target, 0, sizeof(g_by_target));
     memset(g_main_ns, 0, sizeof(g_main_ns));
@@ -1763,6 +1764,8 @@ uint32_t gxm_draw_flush(void) {
     int card = gxm_gpu_mode(), drawn = 0;
     if (card == GXM_GPU_DRAW) drawn = gxm_gpu_list(g_queue, queued_now, 0);
     else if (card == GXM_GPU_CHECK) gxm_gpu_list(g_queue, queued_now, 1);
+    /* a list the card left to the processor: what the card holds of the title's surfaces goes back first */
+    if (card == GXM_GPU_DRAW && !drawn) gxm_gpu_for_processor(&g_queue[0]->s);
     if (!drawn && !draw_list(queued_now)) { g_queued = 0; return 0; }
     if (card == GXM_GPU_CHECK) gxm_gpu_compare(g_queue, queued_now);
 
