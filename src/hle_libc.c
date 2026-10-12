@@ -269,6 +269,69 @@ void vita_hle_strcat(void) {
     if (d && s) memcpy(d, s, ls + 1);
 }
 
+/* --- the bounds-checked forms (C11 Annex K) ------------------------------------
+ *
+ * Each takes the destination's size and answers zero or an errno value; what
+ * does not fit leaves an empty string behind and not a truncated one. */
+#define LIBC_EINVAL 22u
+#define LIBC_ERANGE 34u
+
+/* size_t strnlen_s(const char *s, size_t max) */
+void vita_hle_strnlen_s(void) {
+    uint32_t max = r1, n = 0;
+    if (!r0) { r0 = 0; return; }
+    uint32_t avail = vita_mem_avail(r0);
+    const char *s = avail ? (const char *)vita_mem_ptr(r0, 1) : NULL;
+    while (s && n < max && n < avail && s[n]) n++;
+    r0 = n;
+}
+
+/* errno_t strncpy_s(char *dst, rsize_t dstsz, const char *src, rsize_t count) */
+void vita_hle_strncpy_s(void) {
+    uint32_t dst = r0, cap = r1, src = r2, count = r3;
+    if (!dst || !cap) { r0 = LIBC_EINVAL; return; }
+    char *d = (char *)gp(dst, cap, "strncpy_s dst");
+    if (!d) { r0 = LIBC_EINVAL; return; }
+    if (!src) { d[0] = '\0'; r0 = LIBC_EINVAL; return; }
+    uint32_t l = gstrlen(src, "strncpy_s src");
+    if (l > count) l = count;
+    if (l >= cap) { d[0] = '\0'; r0 = LIBC_ERANGE; return; }
+    const void *s = gp(src, l, "strncpy_s src");
+    if (s) memmove(d, s, l);
+    d[l] = '\0';
+    r0 = 0;
+}
+
+/* errno_t strncat_s(char *dst, rsize_t dstsz, const char *src, rsize_t count) */
+void vita_hle_strncat_s(void) {
+    uint32_t dst = r0, cap = r1, src = r2, count = r3;
+    if (!dst || !cap) { r0 = LIBC_EINVAL; return; }
+    char *d = (char *)gp(dst, cap, "strncat_s dst");
+    if (!d) { r0 = LIBC_EINVAL; return; }
+    uint32_t have = 0;
+    while (have < cap && d[have]) have++;
+    if (have == cap || !src) { d[0] = '\0'; r0 = LIBC_EINVAL; return; }
+    uint32_t l = gstrlen(src, "strncat_s src");
+    if (l > count) l = count;
+    if (have + l >= cap) { d[0] = '\0'; r0 = LIBC_ERANGE; return; }
+    const void *s = gp(src, l, "strncat_s src");
+    if (s) memmove(d + have, s, l);
+    d[have + l] = '\0';
+    r0 = 0;
+}
+
+/* errno_t memcpy_s(void *dst, rsize_t dstsz, const void *src, rsize_t count) */
+void vita_hle_memcpy_s(void) {
+    uint32_t dst = r0, cap = r1, src = r2, count = r3;
+    if (!count) { r0 = 0; return; }
+    void *d = dst ? gp(dst, cap, "memcpy_s dst") : NULL;
+    if (!d) { r0 = LIBC_EINVAL; return; }
+    const void *s = src && count <= cap ? gp(src, count, "memcpy_s src") : NULL;
+    if (!s) { memset(d, 0, cap); r0 = count > cap ? LIBC_ERANGE : LIBC_EINVAL; return; }
+    memmove(d, s, count);
+    r0 = 0;
+}
+
 /* size_t strcspn(const char *s, const char *reject) / strspn / strpbrk:
  * the span functions, each over the guest's own bytes. */
 static uint32_t span(uint32_t s_addr, uint32_t set_addr, int in_set, const char *who) {
@@ -419,6 +482,11 @@ void vita_hle_vfprintf(void) { vita_vargs v = { 0, 0, r2 }; print_console(r1, &v
 void vita_hle_snprintf(void)  { vita_vargs v = { 3, 0, 0 };  print_guest(r0, r1, r2, &v); }
 /* int vsnprintf(char *dst, size_t n, const char *fmt, va_list ap) */
 void vita_hle_vsnprintf(void) { vita_vargs v = { 0, 0, r3 }; print_guest(r0, r1, r2, &v); }
+/* int snprintf_s(char *dst, rsize_t n, const char *fmt, ...) and the va_list
+ * form: the same arguments as the plain ones, and the same answer where the
+ * result fits. */
+void vita_hle_snprintf_s(void)  { vita_vargs v = { 3, 0, 0 };  print_guest(r0, r1, r2, &v); }
+void vita_hle_vsnprintf_s(void) { vita_vargs v = { 0, 0, r3 }; print_guest(r0, r1, r2, &v); }
 /* int sprintf(char *dst, const char *fmt, ...): unbounded, so bounded by what
  * the destination has behind it. */
 void vita_hle_sprintf(void)  { vita_vargs v = { 2, 0, 0 };  print_guest(r0, vita_mem_avail(r0), r1, &v); }

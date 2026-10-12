@@ -128,6 +128,20 @@ void vita_hle_modff(void) {
 void vita_hle__FSin(void) { float x = vfp_getf(0); vfp_setf(0, (r0 & 1) ? cosf(x) : sinf(x)); }
 void vita_hle__Sin(void)  { double x = vfp_getd(0); vfp_setd(0, (r0 & 1) ? cos(x) : sin(x)); }
 
+/* float _FSinx(float x, unsigned int qoff, int quads) / double _Sinx: the
+ * later shape of the same thing, the sine of x moved on by qoff + quads
+ * quarter turns. sinf is (x, 0, 0) and cosf is (x, 1, 0). */
+static double sin_quarters(double x, uint32_t quarters) {
+    switch (quarters & 3) {
+    case 0:  return sin(x);
+    case 1:  return cos(x);
+    case 2:  return -sin(x);
+    default: return -cos(x);
+    }
+}
+void vita_hle__FSinx(void) { vfp_setf(0, (float)sin_quarters((double)vfp_getf(0), r0 + r1)); }
+void vita_hle__Sinx(void)  { vfp_setd(0, sin_quarters(vfp_getd(0), r0 + r1)); }
+
 /* double _Sinh(double x, double y) = y * sinh(x); _Cosh likewise; the float forms too. */
 void vita_hle__Sinh(void)  { vfp_setd(0, vfp_getd(1) * sinh(vfp_getd(0))); }
 void vita_hle__Cosh(void)  { vfp_setd(0, vfp_getd(1) * cosh(vfp_getd(0))); }
