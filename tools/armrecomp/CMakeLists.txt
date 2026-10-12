@@ -19,10 +19,13 @@ add_executable(armrecomp
     emit.c
     nids.c
     shader.c
+    sound.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/atrac9.c
 )
 
-# The shader listing shares the runtime's bytecode decoder.
-target_include_directories(armrecomp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# The shader listing shares the runtime's bytecode decoder, and the sound
+# command its ATRAC9 decoder.
+target_include_directories(armrecomp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(armrecomp PRIVATE vitashader vitacontainer)
 if(NOT MSVC)
     target_link_libraries(armrecomp PRIVATE m)

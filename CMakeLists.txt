@@ -85,6 +85,7 @@ add_library(vitarecomp STATIC
     src/hle_ult.c
     src/hle_gxm.c
     src/hle_ngs.c
+    src/atrac9.c
     src/hle_sas.c
     src/hle_audio.c
     src/hle_savedata.c

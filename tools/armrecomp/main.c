@@ -43,6 +43,8 @@ static const char *USAGE =
     "  armrecomp hlsl    <file.gxp> [words]  the same shader as HLSL for a host GPU; with a\n"
     "                                    number, so many words of the result leave as they are\n"
     "  armrecomp glsl    <file.gxp> [words]  and as GLSL, for a host reached through OpenGL\n"
+    "  armrecomp at9     <file.at9> [out.wav] [--all]  an ATRAC9 file decoded; with --all the\n"
+    "                                    decoder's lead-in and the last superframe's padding stay\n"
     "\n"
     "Accepts a SELF (eboot.bin, *.suprx) or a plain ELF/velf. A PFS-encrypted\n"
     "NoNpDrm dump is reported as such rather than parsed as garbage.\n";
@@ -81,6 +83,7 @@ static const char *flags_str(uint32_t f, char *tmp) {
 
 int cmd_gxp(const char *path, int listing_only);      /* shader.c */
 int cmd_hlsl(const char *path, int raw, int glsl);
+int cmd_at9(const char *in_path, const char *out_path, int all);       /* sound.c */
 
 static int cmd_info(const char *path) {
     size_t size = 0;
@@ -938,6 +941,10 @@ int main(int argc, char **argv) {
         return cmd_gxp(argv[2], argc >= 4 && strcmp(argv[3], "--listing") == 0);
     if ((strcmp(argv[1], "hlsl") == 0 || strcmp(argv[1], "glsl") == 0) && argc >= 3)
         return cmd_hlsl(argv[2], argc >= 4 ? atoi(argv[3]) : 0, argv[1][0] == 'g');
+    if (strcmp(argv[1], "at9") == 0 && argc >= 3) {
+        const int all = strcmp(argv[argc - 1], "--all") == 0;
+        return cmd_at9(argv[2], argc - all >= 4 ? argv[3] : NULL, all);
+    }
 
     fputs(USAGE, stderr);
     return 2;

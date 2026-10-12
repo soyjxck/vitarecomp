@@ -36,7 +36,7 @@ a type's type_info against the runtime's `__si_class_type_info` by address.
 it, and the loader writes the address at every site the module's relocation
 blocks name (docs/ARCHITECTURE.md, "Variables are bound like functions").
 
-## Audio: the graph without the signal
+## Audio: the graph, and the one voice that is heard
 
 SceNgs, the synthesiser, is a graph the title builds and then reads back:
 racks of voices, each voice a fixed chain of modules (a sample player, an
@@ -47,23 +47,57 @@ again and expects the same bytes; it polls how far a voice has played; it
 frees a voice when the callback says the sample has finished. A stub that
 accepts every call and remembers nothing breaks all three.
 
-`src/hle_ngs.c` keeps the graph and leaves out the sound. A rack lives in
-the block the title passes to `sceNgsRackInit`, sized by what
-`sceNgsRackGetRequiredMemorySize` asked for, so nothing is allocated behind
-the title's back: voice handles, patch handles and each module's parameter
-block are addresses in that block, and the host keeps what they mean. Each
-update moves every playing voice on by the block's samples at the voice's
-own rate, converted to bytes for 16-bit PCM, ADPCM or ATRAC9 from the
-stream's configuration word, through the buffer chain with its loop counts.
-A voice that reaches the end of its data, or was keyed off, finishes at that
-update and its callback runs on the thread that asked for the update. The
-audio output port takes as long to accept a block as the block lasts, which
-is what paces the thread. A decoder and a mixer can replace the silence
-without the title seeing a difference in anything but the samples.
+`src/hle_ngs.c` keeps the graph. A rack lives in the block the title
+passes to `sceNgsRackInit`, sized by what `sceNgsRackGetRequiredMemorySize`
+asked for, so nothing is allocated behind the title's back: voice handles,
+patch handles and each module's parameter block are addresses in that
+block, and the host keeps what they mean. Each update moves every playing
+voice on by the block's samples at the voice's own rate, through the buffer
+chain with its loop counts. A voice that reaches the end of its data, or
+was keyed off, finishes at that update and its callback runs on the thread
+that asked for the update. The audio output port takes as long to accept a
+block as the block lasts, which is what paces the thread.
 
-The voice definitions' module chains and the parameter structures' sizes
-are the console's interface, taken from Vita3K's documentation of it
-(`vita3k/ngs`).
+One kind of voice has its signal: the ATRAC9 voice, which is what a title
+streams its music and speech through. It is decoded as it plays
+(`src/atrac9.c`, a decoder written for the toolkit): superframes are taken
+from the voice's buffers as the block being made needs them, the samples a
+buffer says to leave out of its ends are left out, and the result goes down
+the voice's patches, each with its volume matrix, to a master buss. The
+master buss's sum is the state of its output module, which is where a
+title that plays the mix itself reads it (`sceNgsVoiceGetStateData`), adds
+what else it has and hands the block to an output port. A buss on the way
+passes on what it is given; none of the effects is here.
+
+A title that streams depends on one thing more than on the samples: the
+player's callback that says a buffer has been used up, which is the
+title's cue to refill it. Without the callback the stream goes round its
+first two buffers for ever. So the check that matters is of the whole
+chain and not of the decoder alone: what the title hands the output port
+(`VITARECOMP_AUDIO_DUMP`) against another decoder's reading of the same
+file, at the gain the title set, and on across the music's loop.
+`VITARECOMP_NGS_SOUND=0` puts the ATRAC9 voice back among the silent ones.
+
+Every other voice keeps time in silence: the PCM and ADPCM players, and
+the ATRAC9 player of the definitions that follow it with an envelope and
+filters, play for as long as their sample lasts and finish when they would
+have.
+
+The voice definitions' module chains, the parameter structures' sizes and
+the ATRAC9 player's buffers and callbacks are the console's interface,
+taken from Vita3K's documentation of it (`vita3k/ngs`).
+
+One fault that sounded like the synthesiser's was the file library's. A
+title that starts a sound by opening and reading its file a step at each
+turn of its sound thread can lean on the steps taking turns: this one
+sends "stop" and then "play" for each line of speech, keeps a stop that
+finds nothing playing for the next turn, and drops it then only if the
+sound is still loading. With every file operation over in the instant it
+was asked for, the sound was playing by the next turn, and each line was
+stopped a twentieth of a second in. On the console an operation belongs
+to the library's own thread, and is never over when the program first
+asks; `src/hle_fios.c` now says "not yet" to the first
+`sceFiosOpIsDone` about an operation and "done" from the second.
 
 ## Movies: a library that is not there
 
