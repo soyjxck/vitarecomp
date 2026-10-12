@@ -73,6 +73,12 @@ void vita_sched_wake(int kind, uint32_t obj, int all);
 int  vita_callback_notify(uint32_t uid, uint32_t arg);
 void vita_callbacks_run(void);
 
+/* The display's blank callbacks given their notice if the clock has moved
+ * into another sixtieth of a second since they last had one
+ * (hle_display.c): for a wait that is not for a blank and lets callbacks
+ * run. */
+void vita_display_poll(void);
+
 /* Let another runnable thread go, if there is one. */
 void vita_sched_yield(void);
 

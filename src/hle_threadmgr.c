@@ -541,7 +541,7 @@ void vita_hle_sceKernelGetThreadCurrentPriority(void)    { r0 = 0x40; }
 
 /* int sceKernelDelayThread(SceUInt usec): the others run meanwhile */
 void vita_hle_sceKernelDelayThread(void)   { vita_sched_delay(r0); r0 = 0; }
-void vita_hle_sceKernelDelayThreadCB(void) { vita_sched_delay(r0); vita_callbacks_run(); r0 = 0; }
+void vita_hle_sceKernelDelayThreadCB(void) { vita_sched_delay(r0); vita_display_poll(); vita_callbacks_run(); r0 = 0; }
 
 /* --- event flags ---------------------------------------------------------------------
  *

@@ -140,8 +140,27 @@ void vita_hle_sceDisplayUnregisterVblankStartCallback(void) {
 /* int sceDisplayGetVcount(void): blanks since the start, sixteen bits of them */
 void vita_hle_sceDisplayGetVcount(void) { r0 = g_vcount & 0xFFFFu; }
 
+#define BLANK_US 16667u
+static uint64_t g_clock_blank;      /* the blank the clock stood in when the callbacks last had their notice */
+
 static void vblank_passed(void) {
     g_vcount++;
+    g_clock_blank = vita_clock_us() / BLANK_US;
+    for (int i = 0; i < MAX_VBLANK_CBS; i++)
+        if (g_vblank_cb[i]) vita_callback_notify(g_vblank_cb[i], 0);
+}
+
+/* The console's display blanks sixty times a second whether or not anybody
+ * waits for it, and a program may count on its blank callback while it
+ * sleeps another way (a loop of short delays, until the callback has done
+ * what was asked of it). Here a blank is otherwise made by the wait for
+ * one, so a wait that lets callbacks run asks this first: if the clock has
+ * moved into another sixtieth since the callbacks last heard, they hear
+ * now. */
+void vita_display_poll(void) {
+    const uint64_t now = vita_clock_us() / BLANK_US;
+    if (now <= g_clock_blank) return;
+    g_clock_blank = now;
     for (int i = 0; i < MAX_VBLANK_CBS; i++)
         if (g_vblank_cb[i]) vita_callback_notify(g_vblank_cb[i], 0);
 }
