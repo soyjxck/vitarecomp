@@ -214,25 +214,169 @@ int gpu_ordered(unsigned format) {
 
 const char *gpu_name(void) { return G.ok ? G.name : "nothing"; }
 
+/* --- programs compiled before ---------------------------------------------------------------
+ *
+ * What the compiler makes of a program depends on the text, on which kind
+ * of program it is and on how the compiler was asked, and on nothing else.
+ * So it is kept, by a hash of those three, in one file in the directory
+ * VITARECOMP_GPU_CACHE names, and a text met again in a later run is not
+ * compiled again.
+ *
+ * The file is records, each a mark, the hash, a length, a sum of the
+ * bytes, and the bytes. A record is added at the end in one write and
+ * nothing is ever changed, so two runs at once may share the file. Reading
+ * it, whatever is not a whole record whose sum is right is passed over a
+ * byte at a time until the next mark: a record cut short by a run that
+ * was stopped costs that record. */
+
+#define KEPT_MARK 0x31474F5250525656ull         /* the bytes "VVRPROG1" */
+
+typedef struct { uint64_t mark, key[2]; uint32_t size, sum; } kept_head;
+typedef struct { uint64_t key[2]; const uint8_t *bytes; uint32_t size; } kept_program;
+
+static struct {
+    int asked;
+    HANDLE file;
+    kept_program *slots;                    /* found by the hash's low bits, and the next after that */
+    unsigned count, cap;
+    unsigned compiled;
+} K;
+
+static void key_of(const char *text, size_t length, const char *target, UINT flags, uint64_t key[2]) {
+    uint64_t a = 0xCBF29CE484222325ull ^ flags, b = 0x9E3779B97F4A7C15ull ^ length;
+    for (int part = 0; part < 2; part++) {
+        const uint8_t *p = (const uint8_t *)(part ? text : target);
+        size_t n = part ? length : strlen(target);
+        for (size_t i = 0; i < n; i++) {
+            a = (a ^ p[i]) * 0x100000001B3ull;
+            b = (b + p[i]) * 0x9FB21C651E98DF25ull;
+            b ^= b >> 29;
+        }
+    }
+    key[0] = a;
+    key[1] = b;
+}
+
+static uint32_t sum_of(const uint8_t *p, size_t n) {
+    uint32_t s = 0x811C9DC5u;
+    for (size_t i = 0; i < n; i++) s = (s ^ p[i]) * 16777619u;
+    return s;
+}
+
+/* Where a program of this hash is, or would go. */
+static kept_program *kept_slot(const uint64_t key[2]) {
+    for (unsigned at = (unsigned)key[0] & (K.cap - 1);; at = (at + 1) & (K.cap - 1)) {
+        kept_program *p = &K.slots[at];
+        if (!p->bytes || (p->key[0] == key[0] && p->key[1] == key[1])) return p;
+    }
+}
+
+/* Remember one. The bytes must stay where they are. Returns 0 when it was not taken: it was there already, or there is no room to be had. */
+static int kept_note(const uint64_t key[2], const uint8_t *bytes, uint32_t size) {
+    if ((K.count + 1) * 2 > K.cap) {
+        unsigned cap = K.cap ? K.cap * 2 : 1024, old_cap = K.cap;
+        kept_program *old = K.slots, *slots = calloc(cap, sizeof(*slots));
+        if (!slots) return 0;
+        K.slots = slots;
+        K.cap = cap;
+        for (unsigned i = 0; i < old_cap; i++)
+            if (old[i].bytes) *kept_slot(old[i].key) = old[i];
+        free(old);
+    }
+    kept_program *p = kept_slot(key);
+    if (p->bytes) return 0;
+    p->key[0] = key[0];
+    p->key[1] = key[1];
+    p->bytes = bytes;
+    p->size = size;
+    K.count++;
+    return 1;
+}
+
+static void kept_open(void) {
+    const char *dir = getenv("VITARECOMP_GPU_CACHE");
+    char path[1024];
+    LARGE_INTEGER size;
+    DWORD got = 0;
+    K.asked = 1;
+    K.file = INVALID_HANDLE_VALUE;
+    if (!dir || !*dir || snprintf(path, sizeof(path), "%s/programs.d3d11", dir) >= (int)sizeof(path)) return;
+    CreateDirectoryA(dir, NULL);                    /* the last of its names, when that is all that is missing */
+    K.file = CreateFileA(path, FILE_READ_DATA | FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                         FILE_ATTRIBUTE_NORMAL, NULL);
+    if (K.file == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "gpu: %s cannot be opened; compiled programs are not kept\n", path);
+        return;
+    }
+    if (!GetFileSizeEx(K.file, &size) || size.QuadPart <= 0 || size.QuadPart > 0x40000000) return;
+    uint8_t *all = malloc((size_t)size.QuadPart);   /* never let go of: the programs are read from where they lie in it */
+    if (!all || !ReadFile(K.file, all, (DWORD)size.QuadPart, &got, NULL)) { free(all); return; }
+    for (size_t at = 0; at + sizeof(kept_head) <= got;) {
+        kept_head h;
+        memcpy(&h, all + at, sizeof(h));
+        if (h.mark != KEPT_MARK || !h.size || h.size > got - at - sizeof(h) || sum_of(all + at + sizeof(h), h.size) != h.sum) { at++; continue; }
+        kept_note(h.key, all + at + sizeof(h), h.size);
+        at += sizeof(h) + (((size_t)h.size + 7u) & ~(size_t)7u);
+    }
+}
+
+static void kept_add(const uint64_t key[2], const void *bytes, size_t size) {
+    kept_head h;
+    DWORD wrote = 0;
+    size_t total = sizeof(h) + ((size + 7u) & ~(size_t)7u);
+    if (K.file == INVALID_HANDLE_VALUE || !size || size > 0x1000000) return;
+    uint8_t *record = calloc(1, total);
+    if (!record) return;
+    h.mark = KEPT_MARK;
+    h.key[0] = key[0];
+    h.key[1] = key[1];
+    h.size = (uint32_t)size;
+    h.sum = sum_of(bytes, size);
+    memcpy(record, &h, sizeof(h));
+    memcpy(record + sizeof(h), bytes, size);
+    /* one write, to the end wherever the end is by now */
+    WriteFile(K.file, record, (DWORD)total, &wrote, NULL);
+    if (!kept_note(key, record + sizeof(h), (uint32_t)size)) free(record);
+}
+
+unsigned gpu_shaders_compiled(void) { return K.compiled; }
+
 /* --- shaders --------------------------------------------------------------------------------- */
 
 gpu_shader *gpu_shader_make(int fragment, const char *hlsl, unsigned pa_words, char *log, size_t log_size) {
+    /* the translation leans on the arithmetic being done as written: a NaN test must stay a test */
+    const UINT flags = D3DCOMPILE_IEEE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL1;
+    const char *target = fragment ? "ps_5_0" : "vs_5_0";
     ID3DBlob *code = NULL, *errors = NULL;
+    size_t length = strlen(hlsl);
+    uint64_t key[2];
+    const void *bytes = NULL;
+    SIZE_T size = 0;
+    HRESULT hr = S_OK;
     if (log && log_size) log[0] = '\0';
     if (!G.ok) return NULL;
-    /* the translation leans on the arithmetic being done as written: a NaN test must stay a test */
-    HRESULT hr = D3DCompile(hlsl, strlen(hlsl), NULL, NULL, NULL, "main", fragment ? "ps_5_0" : "vs_5_0",
-                            D3DCOMPILE_IEEE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL1, 0, &code, &errors);
-    if (FAILED(hr)) {
-        if (log && log_size && errors)
-            snprintf(log, log_size, "%.*s", (int)ID3D10Blob_GetBufferSize(errors), (const char *)ID3D10Blob_GetBufferPointer(errors));
-        RELEASE(errors);
-        return NULL;
+    if (!K.asked) kept_open();
+    key_of(hlsl, length, target, flags, key);
+    if (K.cap) {
+        const kept_program *before = kept_slot(key);
+        bytes = before->bytes;
+        size = before->size;
     }
-    RELEASE(errors);
+    if (!bytes) {
+        hr = D3DCompile(hlsl, length, NULL, NULL, NULL, "main", target, flags, 0, &code, &errors);
+        if (FAILED(hr)) {
+            if (log && log_size && errors)
+                snprintf(log, log_size, "%.*s", (int)ID3D10Blob_GetBufferSize(errors), (const char *)ID3D10Blob_GetBufferPointer(errors));
+            RELEASE(errors);
+            return NULL;
+        }
+        RELEASE(errors);
+        bytes = ID3D10Blob_GetBufferPointer(code);
+        size = ID3D10Blob_GetBufferSize(code);
+        K.compiled++;
+        kept_add(key, bytes, size);
+    }
     gpu_shader *s = calloc(1, sizeof(*s));
-    const void *bytes = ID3D10Blob_GetBufferPointer(code);
-    SIZE_T size = ID3D10Blob_GetBufferSize(code);
     if (s && fragment) {
         hr = ID3D11Device_CreatePixelShader(G.dev, bytes, size, NULL, &s->ps);
     } else if (s) {

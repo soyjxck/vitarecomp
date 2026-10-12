@@ -49,9 +49,18 @@ const char *gpu_name(void);
 
 /* Compile a program (gxp_hlsl.h). A vertex program says how many words of
  * primary attributes a vertex has. NULL with the compiler's complaint in
- * `log` when it does not compile. */
+ * `log` when it does not compile.
+ *
+ * Compiling is slow, a tenth of a second and more for a program of any
+ * length, and what comes of it depends on the text alone. An
+ * implementation may keep what it compiled, in the directory the
+ * environment's VITARECOMP_GPU_CACHE names, and not compile in a later
+ * run a text it has compiled in an earlier one. With no directory named
+ * nothing is kept. gpu_shaders_compiled counts the programs that were
+ * compiled since the card was opened, and not found already compiled. */
 gpu_shader *gpu_shader_make(int fragment, const char *hlsl, unsigned pa_words, char *log, size_t log_size);
 void gpu_shader_free(gpu_shader *s);
+unsigned gpu_shaders_compiled(void);
 
 /* A texture of `levels` levels, each half the last and at least one texel
  * a side; six faces of each when it is a cube, which a program samples as

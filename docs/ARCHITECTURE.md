@@ -918,6 +918,7 @@ through the first title's front end and its first minute of play.
 | What travels | `VITARECOMP_GXM_GPU_LOG=1` | each texture made from memory: size, levels, format, filters; each surface filled from memory or sent back to it |
 | The long way round | `VITARECOMP_GXM_GPU_KEEP=0` | every surface back in memory after every list |
 | Another card | `VITARECOMP_GPU_WARP=1`, `VITARECOMP_GPU_DEBUG=1` | the system's own rasteriser in place of the card; Direct3D's checking layer |
+| Programs kept | `VITARECOMP_GPU_CACHE=<dir>` | compiled programs kept in that directory from one run to the next; with the log, each program compiled and how long it took |
 
 `VITARECOMP_GXM_AT_ONCE=1` makes a list of every draw, which is how a
 difference in a scene of two hundred draws is brought down to one.
@@ -1020,6 +1021,23 @@ that pixel; one that lies across two is as much of each as it covers. So
 at twice or three times the frame's size every pixel of the frame is a
 whole block of the window's, to the byte, and at one and a half times
 its edges are blended and its middle is not.
+
+One thing is kept from one run to the next: a compiled program. A
+program is translated and compiled when a draw first uses it, and the
+system's compiler takes a tenth of a second to a second over each, so
+the first frames of a level waited ten seconds and more with the title's
+loading screen standing still. What the compiler makes depends on the
+text it is given, the kind of program and the way it is asked, and on
+nothing else: `gpu_d3d11.c` keeps it by a hash of those in one file,
+`programs.d3d11` in the directory `VITARECOMP_GPU_CACHE` names, and a
+text met again is not compiled. Nothing is kept when no directory is
+named; a game's program names one of its own. The file is records added
+at the end in one write each and never changed, so two runs may share
+it, and reading it passes over whatever is not a whole record whose sum
+is right: a file cut short, or spoilt in the middle, costs the records
+that were. A change to the translation changes the text, so nothing kept
+is ever stale. The profile's line for the card says how many programs a
+stretch made ready and how many of those it had to compile.
 
 What is not yet known is when a title's own code reads a larger surface.
 The plan for that is a watch on the pages (PLAN.md).

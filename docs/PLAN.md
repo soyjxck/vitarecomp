@@ -396,14 +396,16 @@ card from one list to the next, a draw's geometry from one frame to the
 next, and bytes that were not written are not read again: a frame of play
 takes 23 ms against the processor's 85, which is past the console's
 thirty a second. The frame is shown in the host's window by the card
-that drew it, and does not pass through the title's memory on the way.
-It is switched on by `VITARECOMP_GXM_GPU=1` and is not yet the default.
-What is left:
+that drew it, and does not pass through the title's memory on the way;
+and a program compiled in one run is not compiled in the next
+(`VITARECOMP_GPU_CACHE`). It is switched on by `VITARECOMP_GXM_GPU=1`
+and is not yet the default. What is left:
 
-1. **Compiled programs kept from one run to the next.** A program is
-   translated and compiled when a draw first uses it, and a level's
-   first frames wait half a minute in all for the system's compiler.
-   Kept in a file by what their text is, they are compiled once.
+1. **Two lists in three thousand that differ.** The check over the front
+   end and the first minute of play finds two, the same draw each time:
+   seventy-five pixels of a surface of floats where the processor has
+   what is not a number and the card has nothing. Which is right, and
+   what the title does with them, is not yet known.
 2. **A watch on the pages of a surface the card holds**, so that the
    title's own code reading it is noticed. Today that is known only for
    surfaces of a few pixels, by sending those back always.

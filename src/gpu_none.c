@@ -12,6 +12,7 @@ gpu_shader *gpu_shader_make(int fragment, const char *hlsl, unsigned pa_words, c
     return NULL;
 }
 void gpu_shader_free(gpu_shader *s) { (void)s; }
+unsigned gpu_shaders_compiled(void) { return 0; }
 
 gpu_texture *gpu_texture_make(unsigned format, unsigned width, unsigned height, unsigned levels, int cube,
                               const void *const *images) {

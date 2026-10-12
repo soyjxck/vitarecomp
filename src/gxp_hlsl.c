@@ -892,28 +892,38 @@ static const char PRELUDE[] =
     "cbuffer draw : register(b0) { uint4 SAv[66]; float4 VP[3]; uint4 MEMR[8]; };\n"
     "Buffer<uint> MEM : register(t16);\n"
     "uint sa_at(int i) { uint u = uint(clamp(i, 0, 263)); return SAv[u >> 2][u & 3u]; }\n"
+    /* The first of the eight runs that holds the address, looked for from the last so that the first is what is
+     * left, and one load at the end. Written as a loop that returns from its middle, the same thing took the
+     * compiler four to six seconds for a program with fifty loads: it is unrolled into each of them. */
     "uint mem(uint address) {\n"
-    "    for (int k = 0; k < 8; k++) {\n"
+    "    int word = -1;\n"
+    "    for (int k = 7; k >= 0; k--) {\n"
     "        uint at = address - MEMR[k].x;\n"
-    "        if (at < MEMR[k].y) return MEM.Load(int(MEMR[k].z + (at >> 2)));\n"
+    "        if (at < MEMR[k].y) word = int(MEMR[k].z + (at >> 2));\n"
     "    }\n"
-    "    return 0u;\n"
+    "    if (word < 0) return 0u;\n"
+    "    return MEM.Load(word);\n"
     "}\n"
     /* A float as a half, to the nearest and to the even one of two as near:
      * what the interpreter does. The card's own conversion cuts the bits
      * off, which over a program's worth of halves is a different picture:
      * a coordinate a step short samples somewhere else. So the card's
-     * answer is taken and put right from its neighbour. */
+     * answer is taken and put right from its neighbour.
+     *
+     * It is written as choices and not as ways out: what is not a number
+     * or is past the largest half is worked through like the rest and the
+     * answer chosen last. A program stores a hundred halves and more, this
+     * is written out for each, and a function left from its middle is one
+     * the compiler takes a second over a hundred of. */
     "uint h16(float f) {\n"
     "    uint h = f32tof16(f), m = h & 0x7FFFu;\n"
-    "    float a = abs(f);\n"
-    "    if (m >= 0x7C00u) return h;\n"
-    "    if (a >= 65520.0) return (h & 0x8000u) | 0x7C00u;\n"
-    "    float at = f16tof32(m);\n"
+    "    float a = abs(f), at = f16tof32(m);\n"
     "    uint other = at > a ? m - 1u : m + 1u;\n"
     "    float near = abs(a - at), far = abs(f16tof32(other) - a);\n"
-    "    if (far < near || (far == near && (other & 1u) == 0u)) m = other;\n"
-    "    return (h & 0x8000u) | m;\n"
+    "    uint best = (far < near || (far == near && (other & 1u) == 0u)) ? other : m;\n"
+    "    best = a >= 65520.0 ? 0x7C00u : best;\n"
+    "    best = m >= 0x7C00u ? m : best;\n"
+    "    return (h & 0x8000u) | best;\n"
     "}\n"
     /* A flat texture's texel by number, wrapped as the console's mode says,
      * and where a point lies among the texels: on 256 steps to a texel, as
@@ -968,10 +978,10 @@ static const char PRELUDE[] =
     "uint to_c10(float f) { return uint(int(round(clamp(f, -2.0, 2.0) * 255.0))) & 0x3FFu; }\n"
     "float unit(float f, float low) { return f != f ? 0.0 : f < low ? low : f > 1.0 ? 1.0 : f; }\n"
     "int to_int(float f) {\n"
-    "    if (f != f) return 0;\n"
-    "    if (f >= 2147483520.0) return 2147483520;\n"
-    "    if (f <= -2147483648.0) return int(0x80000000u);\n"
-    "    return int(f);\n"
+    "    int i = int(f);\n"
+    "    i = f <= -2147483648.0 ? int(0x80000000u) : i;\n"
+    "    i = f >= 2147483520.0 ? 2147483520 : i;\n"
+    "    return f != f ? 0 : i;\n"
     "}\n";
 
 /* A float into the registers as its type packs it: for the inputs. */

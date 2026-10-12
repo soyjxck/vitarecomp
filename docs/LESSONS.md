@@ -1233,5 +1233,27 @@ took a tenth of a second each.
    program of the title is translated and compiled when a draw first
    uses it, and a level's first frames use a great many for the first
    time: twenty-nine seconds in all. The virtual clock had hidden that
-   as well, a frame there being a frame however long it took. Kept from
-   one run to the next, a compiled program is compiled once (PLAN.md).
+   as well, a frame there being a frame however long it took.
+4. **Nine programs were most of it.** With each compile timed, eighty
+   programs took a few tenths of a second each and nine vertex programs
+   four to six seconds. Those nine load words from the title's memory,
+   fifty times each, through a helper that looked in eight places with a
+   loop and returned from the middle of it when it found the one. The
+   compiler writes a helper out wherever it is called and unrolls its
+   loop, and a way out of the middle is the expensive thing to write
+   out. The same search from the last place to the first, keeping what
+   it finds and loading once at the end, is the same answer: the nine
+   take a quarter of a second each. The helper that rounds a half the
+   way the interpreter does had two ways out of its middle and is called
+   a hundred times by a long fragment program; as choices made at the
+   end it is a third faster to compile. Fifty-five seconds of compiling
+   became eleven, and the pictures are the same bytes.
+5. **Asking the compiler to try less made it slower.** Its lowest level
+   took twenty-seven seconds over what the next level up takes eleven.
+6. **And then it is kept.** What the compiler makes depends on the text
+   and nothing else, so it is kept in a file by a hash of the text, and
+   a run that finds it there compiles nothing. The level that took a
+   hundred seconds to arrive takes eleven the first time and four after
+   that. The file was then cut short, spoilt in the middle and given a
+   false start, and a run with it compiled the two programs that had
+   been lost and drew the same frame.

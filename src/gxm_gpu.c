@@ -50,8 +50,8 @@ static uint32_t g_now;                      /* the moment the list in hand began
 
 /* What the path costs, for the stage profile (VITARECOMP_GXM_PROFILE):
  * nanoseconds since the last report, by what was being done. */
-enum { P_HASH = 0, P_TEXTURE, P_IN, P_VERTICES, P_DRAW, P_BACK, P_OUT, P_SHOW, P_STAGES };
-static uint64_t g_ns[P_STAGES], g_hashed, g_made, g_lists, g_draws, g_backs, g_puts, g_views;
+enum { P_HASH = 0, P_TEXTURE, P_IN, P_VERTICES, P_DRAW, P_BACK, P_OUT, P_SHOW, P_PROGRAM, P_STAGES };
+static uint64_t g_ns[P_STAGES], g_hashed, g_made, g_lists, g_draws, g_backs, g_puts, g_views, g_programs;
 static uint64_t g_mesh_hits, g_mesh_made, g_mesh_passed;
 static int g_timed = -1;
 
@@ -66,19 +66,24 @@ static uint64_t now_ns(void) {
 void gxm_gpu_profile(uint32_t frames) {
     static const char *const NAME[P_STAGES] = { "textures' bytes looked over", "textures made from memory", "targets and textures made ready",
                                                 "vertices made ready", "draws handed over", "the card waited for and surfaces read back",
-                                                "surfaces put back in memory", "the picture shown" };
+                                                "surfaces put back in memory", "the picture shown", "programs made ready" };
+    static unsigned compiled;
+    unsigned compiled_now = gpu_shaders_compiled();
     double per = frames ? 1e-6 / (double)frames : 0.0;
     if (!g_lists) return;
     fprintf(stderr, "    on the card, ms a frame:");
     for (int k = 0; k < P_STAGES; k++) fprintf(stderr, "%s %s %.1f", k ? "," : "", NAME[k], (double)g_ns[k] * per);
     fprintf(stderr, "; %.1f lists and %.0f draws a frame, %.1f MB of textures looked over, %.1f textures made from memory and %.1f from "
                     "surfaces on the card, %.1f surfaces filled from memory and %.1f sent back to it; of the draws' geometry %.0f was "
-                    "kept from before, %.0f made and kept, %.0f made for the once\n",
+                    "kept from before, %.0f made and kept, %.0f made for the once; %u programs made ready in all, %u of them compiled "
+                    "and the rest found compiled\n",
             (double)g_lists / (double)frames, (double)g_draws / (double)frames, (double)g_hashed / (double)frames / 1048576.0,
             (double)g_made / (double)frames, (double)g_views / (double)frames, (double)g_puts / (double)frames, (double)g_backs / (double)frames,
-            (double)g_mesh_hits / (double)frames, (double)g_mesh_made / (double)frames, (double)g_mesh_passed / (double)frames);
+            (double)g_mesh_hits / (double)frames, (double)g_mesh_made / (double)frames, (double)g_mesh_passed / (double)frames,
+            (unsigned)g_programs, compiled_now - compiled);
+    compiled = compiled_now;
     memset(g_ns, 0, sizeof(g_ns));
-    g_hashed = g_made = g_lists = g_draws = g_backs = g_puts = g_views = 0;
+    g_hashed = g_made = g_lists = g_draws = g_backs = g_puts = g_views = g_programs = 0;
     g_mesh_hits = g_mesh_made = g_mesh_passed = 0;
 }
 
@@ -141,6 +146,7 @@ static gpu_shader *shader_for(const gxm_program *program, const gxp_hlsl_bind *b
 
         char why[200], log[1024];
         int fragment = (program->gxp.flags & GXP_FLAG_FRAGMENT) != 0;
+        uint64_t began = now_ns();
         char *text = gxp_hlsl(&program->gxp, bind, why, sizeof(why));
         s->used = 1;
         s->name = program->name;
@@ -150,7 +156,13 @@ static gpu_shader *shader_for(const gxm_program *program, const gxp_hlsl_bind *b
             refuse("program %016llx is not translated: it has %s", (unsigned long long)program->name, why);
             return NULL;
         }
+        unsigned compiled = gpu_shaders_compiled();
         s->shader = gpu_shader_make(fragment, text, bind->pa_words, log, sizeof(log));
+        if (logging() && gpu_shaders_compiled() != compiled)
+            fprintf(stderr, "gxm gpu: list %u: %s program %016llx compiled, %u bytes of text, %.0f ms\n", g_list, fragment ? "fragment" : "vertex",
+                    (unsigned long long)program->name, (unsigned)strlen(text), (double)(now_ns() - began) * 1e-6);
+        g_ns[P_PROGRAM] += now_ns() - began;
+        g_programs++;
         if (!s->shader) refuse("program %016llx did not compile: %.120s", (unsigned long long)program->name, log);
         const char *dump = getenv("VITARECOMP_GXM_GPU_SHADERS");
         if (dump && *dump) {                        /* the text, for reading: a file a program and binding */
@@ -1468,7 +1480,10 @@ static gpu_shader *view_program_for(char *text) {
     for (unsigned i = 0; i < g_view_program_count; i++)
         if (g_view_programs[i].hash == hash) { free(text); return g_view_programs[i].program; }
     char log[1024];
+    uint64_t began = now_ns();
     gpu_shader *made = gpu_shader_make(1, text, 0, log, sizeof(log));
+    g_ns[P_PROGRAM] += now_ns() - began;
+    g_programs++;
     if (!made) refuse("a program to read a surface as a texture did not compile: %.120s", log);
     const char *dump = getenv("VITARECOMP_GXM_GPU_SHADERS");
     if (dump && *dump) {
