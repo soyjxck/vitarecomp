@@ -993,16 +993,25 @@ static int chain_for(HWND window) {
 int gpu_show(void *window, gpu_surface *s, int fresh) {
     /* Where in the surface a pixel of the window looks. A pixel of the window that lies wholly within one of the
      * surface's is that one; one that lies across two is as much of each as it covers, which is what the card's own
-     * blending of four neighbours gives when it is asked a little to one side of where the pixel is. */
+     * blending of four neighbours gives when it is asked a little to one side of where the pixel is. And where the
+     * window is the smaller, a pixel of it covers several of the surface's and is their mean: up to four looks each
+     * way, spread over what it covers. */
     static const char SHOW[] =
         "cbuffer C : register(b0) { float4 RECT; float4 SIZE; };\n"
         "Texture2D<float4> SRC : register(t0);\n"
         "SamplerState SMOOTH : register(s0);\n"
         "float4 main(float4 pos : SV_Position) : SV_Target {\n"
         "    float2 at = (pos.xy - RECT.xy) * SIZE.zw, cell = floor(at), part = at - cell;\n"
-        "    float2 grown = max(1.0 / SIZE.zw, 1.0);\n"
+        "    float2 grown = max(1.0 / SIZE.zw, 1.0), shrunk = max(SIZE.zw, 1.0);\n"
         "    float2 from = cell + clamp(part * grown, 0.0, 0.5) + clamp((part - 1.0) * grown + 0.5, 0.0, 0.5);\n"
-        "    return float4(SRC.SampleLevel(SMOOTH, from / SIZE.xy, 0.0).rgb, 1.0);\n"
+        "    int2 looks = int2(min(ceil(shrunk), 4.0));\n"
+        "    float3 sum = float3(0.0, 0.0, 0.0);\n"
+        "    for (int j = 0; j < looks.y; j++)\n"
+        "        for (int k = 0; k < looks.x; k++) {\n"
+        "            float2 aside = ((float2(k, j) + 0.5) / float2(looks) - 0.5) * shrunk;\n"
+        "            sum += SRC.SampleLevel(SMOOTH, (from + aside) / SIZE.xy, 0.0).rgb;\n"
+        "        }\n"
+        "    return float4(sum / float(looks.x * looks.y), 1.0);\n"
         "}\n";
     static const float BLACK[4] = { 0.0f, 0.0f, 0.0f, 1.0f }, NO_FACTOR[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     static const gpu_sampler SMOOTH = { 1, 1, 0, 2, 2, 0.0f, 0.0f, 0.0f };

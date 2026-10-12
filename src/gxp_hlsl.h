@@ -86,6 +86,18 @@ typedef struct {
      * red, green, blue and alpha are written (bits 0 to 3). For a colour
      * of four floats. */
     uint8_t  ordered;
+    /* A fragment program drawn to a target `larger` times the size the
+     * title made it, when that is more than once; and by unit, whether the
+     * texture there is one whose texels are parts of the pixels of a
+     * surface: a title keeps two words a pixel and reads them as a texture
+     * twice as wide, a word a texel. On a larger target the point a
+     * fragment samples at moves by parts of a pixel, and here a part of a
+     * pixel is a whole texel and another word. Such a texture's texel is
+     * the one the title's own pixel would have read, found from the
+     * coordinate taken back to that pixel's middle; and when the texture
+     * is itself kept larger, which the bit of its unit in VP[2].w says
+     * draw by draw, the texel's part that this fragment is. */
+    uint8_t  larger, tex_locked[GXP_TEXTURE_UNITS];
 } gxp_hlsl_bind;
 
 /* The program as HLSL, in memory the caller frees. NULL when it cannot be

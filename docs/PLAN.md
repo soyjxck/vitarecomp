@@ -397,9 +397,11 @@ next, and bytes that were not written are not read again: a frame of play
 takes 23 ms against the processor's 85, which is past the console's
 thirty a second. The frame is shown in the host's window by the card
 that drew it, and does not pass through the title's memory on the way;
-and a program compiled in one run is not compiled in the next
-(`VITARECOMP_GPU_CACHE`). It is switched on by `VITARECOMP_GXM_GPU=1`
-and is not yet the default. What is left:
+a program compiled in one run is not compiled in the next
+(`VITARECOMP_GPU_CACHE`); and the card draws at a whole number of times
+the title's size when asked (`VITARECOMP_GXM_GPU_SCALE`), twice at no
+cost. It is switched on by `VITARECOMP_GXM_GPU=1` and is not yet the
+default. What is left:
 
 1. **Where the title's own not-a-numbers come from.** The check over the
    front end and the first minute of play finds two lists in three
@@ -423,10 +425,11 @@ and is not yet the default. What is left:
 4. **Textures in their own form.** A compressed texture goes to the card
    as four floats a texel; the card has the compressed forms. It costs
    memory and the first frame of a scene, not the frames after.
-5. **Drawing larger than the console did.** The card draws 960 by 544
-   because the title asks for that; a window three times the size shows
-   each of those pixels nine times. Surfaces some whole number of times
-   the size the title names, and the picture is the card's own.
+5. **A frame's time by the real clock.** In a window, in play, a frame
+   is 33 to 37 ms where the virtual clock says 23 to 28 of work: some
+   frames miss their sixtieth. What the other threads take while the
+   main one waits, and what the wait itself costs, has not been
+   measured.
 6. A second implementation of `src/gpu.h` for hosts without Direct3D.
 7. Making it the default where there is a card, with the processor's
    renderer for what a card's path leaves and for checking it.

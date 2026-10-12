@@ -919,6 +919,7 @@ through the first title's front end and its first minute of play.
 | The long way round | `VITARECOMP_GXM_GPU_KEEP=0` | every surface back in memory after every list |
 | Another card | `VITARECOMP_GPU_WARP=1`, `VITARECOMP_GPU_DEBUG=1` | the system's own rasteriser in place of the card; Direct3D's checking layer |
 | Programs kept | `VITARECOMP_GPU_CACHE=<dir>` | compiled programs kept in that directory from one run to the next; with the log, each program compiled and how long it took |
+| A larger picture | `VITARECOMP_GXM_GPU_SCALE=<n>` | every surface the card keeps `n` times as wide and as high as the title made it, `n` from 2 to 8 |
 
 `VITARECOMP_GXM_AT_ONCE=1` makes a list of every draw, which is how a
 difference in a scene of two hundred draws is brought down to one.
@@ -1038,6 +1039,38 @@ is right: a file cut short, or spoilt in the middle, costs the records
 that were. A change to the translation changes the text, so nothing kept
 is ever stale. The profile's line for the card says how many programs a
 stretch made ready and how many of those it had to compile.
+
+**Larger than the title drew.** With `VITARECOMP_GXM_GPU_SCALE=n` every
+surface the card keeps is `n` times as wide and as high as the title
+made it, and a list is drawn into it at that size. Almost nothing has to
+know. A title's viewports, its textures' coordinates and its programs
+are in fractions of a surface; a program that reads the pixel it writes
+reads the one it is at; a surface read as a texture is made the larger
+size too, each texel of the title's the `n` by `n` the card has for it
+(`view_text`). What is in the title's own units is put right where it
+meets the card: a clip rectangle, the count of pixels a draw passed,
+and a surface's rows on their way from memory, each pixel repeated, or
+back to it, each pixel the mean of what it has become (or the middle
+one, for a form that is not numbers to be averaged). The window shows
+the surface at whatever size the window is: where it is the smaller, a
+pixel of it is the mean of the surface's it covers.
+
+One thing does have to know. The first title keeps two words a pixel in
+its geometry buffer and reads them back as a texture twice as wide, a
+word a texel. On a larger target the point a fragment samples at moves
+by parts of a pixel, and there a part of a pixel is a whole texel and
+the other word: at twice the size every other column of the picture was
+lit from the wrong half of its pixel. A texture whose texels are parts
+of a surface's pixels (`packed_in_surface`, the binding's `tex_locked`)
+is read another way, by `texel_locked`: the coordinate is taken back to
+the middle of the title's own pixel, by how fast it changes across the
+screen, the texel found as the title's size would have found it, and of
+the `n` by `n` the card keeps for that texel the one this fragment is.
+
+It is not done while the card is checked against the processor, which
+draws at the title's size. A frame of play on the first title, with
+other programs at work on the machine: 28 ms at the title's size, 26 at
+twice, 35 at three times, 38 at four (GeForce RTX 4090).
 
 What is not yet known is when a title's own code reads a larger surface.
 The plan for that is a watch on the pages (PLAN.md).

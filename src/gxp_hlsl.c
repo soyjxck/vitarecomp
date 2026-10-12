@@ -850,6 +850,9 @@ static void emit(gen *g, const usse_insn *in) {
         } else if (g->b->tex_cube[unit]) {
             put(o, "        float4 s%d = TEX%d.SampleLevel(SMP%d, cube_at(float3(%s, %s, %s)), %s);\n", n, unit, unit,
                 c.n > 0 ? c.e[0] : "0.0", c.n > 1 ? c.e[1] : "0.0", c.n > 2 ? c.e[2] : "0.0", lod);
+        } else if (g->b->tex_point[unit] && g->b->larger > 1 && g->b->tex_locked[unit] && g->fragment) {
+            put(o, "        float4 s%d = texel_locked(TEX%d, float2(%s, %s), i.pos.xy, %d, ((asuint(VP[2].w) >> %d) & 1u) != 0u, %d, %d);\n", n, unit,
+                c.n > 0 ? c.e[0] : "0.0", c.n > 1 ? c.e[1] : "0.0", g->b->larger, unit, g->b->tex_wrap[unit] & 15, g->b->tex_wrap[unit] >> 4);
         } else if (g->b->tex_point[unit]) {
             put(o, "        float4 s%d = texel_at(TEX%d, float2(%s, %s), %d, %d);\n", n, unit, c.n > 0 ? c.e[0] : "0.0",
                 c.n > 1 ? c.e[1] : "0.0", g->b->tex_wrap[unit] & 15, g->b->tex_wrap[unit] >> 4);
@@ -1112,6 +1115,24 @@ char *gxp_hlsl(const gxp_program *p, const gxp_hlsl_bind *bind, char *why, size_
     for (int k = 0; k < 3; k++) if (g.top[k] > USSE_WORDS) g.top[k] = USSE_WORDS;
 
     put(&out, "%s", PRELUDE);
+    int locked = 0;
+    if (g.fragment && bind->larger > 1)
+        for (unsigned unit = 0; unit < GXP_TEXTURE_UNITS; unit++) locked |= bind->tex_locked[unit] && bind->tex_point[unit];
+    if (locked)
+        put(&out, "float4 texel_locked(Texture2D t, float2 uv, float2 pos, int n, bool kept, int across, int down) {\n"
+                  "    uint w, h;\n"
+                  "    t.GetDimensions(w, h);\n"
+                  "    int2 part = int2(pos) %% n, size = int2(w, h) / (kept ? n : 1);\n"
+                  "    float2 back = float2(n - 1, n - 1) * 0.5 - float2(part);\n"
+                  "    uv += ddx_fine(uv) * back.x + ddy_fine(uv) * back.y;\n"
+                  "    bool none = uv.x != uv.x || uv.y != uv.y;\n"
+                  "    uv.x = abs(uv.x) > 32768.0 ? 0.0 : uv.x;\n"
+                  "    uv.y = abs(uv.y) > 32768.0 ? 0.0 : uv.y;\n"
+                  "    float2 p = floor(floor(uv * float2(size) * 256.0 + 0.5) / 256.0);\n"
+                  "    int2 texel = int2(wrapped(int(p.x), size.x, across), wrapped(int(p.y), size.y, down));\n"
+                  "    float4 found = t.Load(int3(kept ? texel * n + part : texel, 0));\n"
+                  "    return none ? float4(0.0, 0.0, 0.0, 0.0) : found;\n"
+                  "}\n");
     for (unsigned unit = 0; unit < GXP_TEXTURE_UNITS; unit++) {
         if (!bind->tex_components[unit] || !((p->textures_used >> unit) & 1)) continue;
         put(&out, "%s TEX%u : register(t%u);\nSamplerState SMP%u : register(s%u);\n", bind->tex_cube[unit] ? "Texture2DArray" : "Texture2D",
@@ -1173,6 +1194,9 @@ char *gxp_hlsl(const gxp_program *p, const gxp_hlsl_bind *bind, char *why, size_
                     else snprintf(at, sizeof(at), "v.xy");
                     /* a cube is read from its first level unless the code names another: gxm_draw.c's sample_input */
                     if (bind->tex_cube[unit]) put(&out, "        float4 s = TEX%u.SampleLevel(SMP%u, cube_at(v.xyz), 0.0);\n", unit, unit);
+                    else if (bind->tex_point[unit] && bind->larger > 1 && bind->tex_locked[unit])
+                        put(&out, "        float4 s = texel_locked(TEX%u, %s, i.pos.xy, %d, ((asuint(VP[2].w) >> %u) & 1u) != 0u, %d, %d);\n", unit, at,
+                            bind->larger, unit, bind->tex_wrap[unit] & 15, bind->tex_wrap[unit] >> 4);
                     else if (bind->tex_point[unit])
                         put(&out, "        float4 s = texel_at(TEX%u, %s, %d, %d);\n", unit, at, bind->tex_wrap[unit] & 15, bind->tex_wrap[unit] >> 4);
                     else put(&out, "        float4 s = TEX%u.Sample(SMP%u, %s);\n", unit, unit, at);

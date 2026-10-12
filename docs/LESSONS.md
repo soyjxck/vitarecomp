@@ -1279,3 +1279,35 @@ found them again with the translation changed and unchanged.
    makers give, which say only that such texels are not to be relied
    on. The check is right to report it and the renderers are left as
    they are.
+
+## Twice the size (2026-10-12)
+
+Making every surface on the card twice as wide and as high was a
+wrapper round the three places a surface's size is said and the four
+where rows cross between memory and the card. The first frame had the
+right shapes and the wrong colours, in stripes one pixel wide.
+
+1. **A texture that is not a picture.** The stripes were the geometry
+   buffer. The title keeps two words a pixel and reads them as a texture
+   of twice the width, a word a texel, choosing the word by a quarter of
+   a pixel in the coordinate. At twice the size the fragments of one of
+   the title's pixels sit a quarter of a pixel either side of its
+   middle, and a quarter of a pixel was the whole of what told the two
+   words apart. No arrangement of the larger texture can answer from the
+   coordinate alone: the same coordinate is one word for one fragment
+   and the other for its neighbour. The fragment has to say which part
+   of the pixel it is, and the coordinate has to be the pixel's, not
+   the fragment's. Saying each way a surface is read as a texture, once,
+   in the log, is what showed a 720 wide surface read 1440 wide.
+2. **Only that one.** Taking every unfiltered texture's coordinate back
+   to the pixel's middle would have been simpler and wrong: a texture
+   half the target's size, read without a filter, would have had each
+   of its texels' four parts repeated over four pixels. The rule is for
+   a texture whose texels are parts of a surface's pixels and for no
+   other.
+3. **A percent sign in a format.** The first try compiled no program at
+   all: the text of a program is written through a function that takes
+   a format, and a remainder was written with one percent sign. Every
+   list that read a surface was left to the processor, and the picture
+   at the title's own size differed from the reference, which is what
+   gave it away before the larger one was looked at.
