@@ -401,11 +401,19 @@ and a program compiled in one run is not compiled in the next
 (`VITARECOMP_GPU_CACHE`). It is switched on by `VITARECOMP_GXM_GPU=1`
 and is not yet the default. What is left:
 
-1. **Two lists in three thousand that differ.** The check over the front
-   end and the first minute of play finds two, the same draw each time:
-   seventy-five pixels of a surface of floats where the processor has
-   what is not a number and the card has nothing. Which is right, and
-   what the title does with them, is not yet known.
+1. **Where the title's own not-a-numbers come from.** The check over the
+   front end and the first minute of play finds two lists in three
+   thousand that differ, the same draw each time, and what it found is
+   older than the difference: the textures that draw reads, the chain a
+   bright part of the picture is spread through, hold what is not a
+   number at a hundred to fourteen hundred texels, in both renderers.
+   The two differ only at the edge of those, in seventy-six pixels,
+   where a sample falls on the middle of a texel and its neighbour has
+   no weight: the card's filter gives a neighbour of no weight no say,
+   and the interpreter's arithmetic makes nothing times not-a-number
+   not a number. Nothing here says which the console does, and the
+   frames that come of it agree. What makes the first of them, and
+   whether the console's own arithmetic would, is the question.
 2. **A watch on the pages of a surface the card holds**, so that the
    title's own code reading it is noticed. Today that is known only for
    surfaces of a few pixels, by sending those back always.

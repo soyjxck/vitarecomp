@@ -1257,3 +1257,25 @@ took a tenth of a second each.
    that. The file was then cut short, spoilt in the middle and given a
    false start, and a run with it compiled the two programs that had
    been lost and drew the same frame.
+
+## Two lists in three thousand (2026-10-12)
+
+The check of card against processor, run over the front end and a minute
+of play together for the first time, found two lists that differ, and
+found them again with the translation changed and unchanged.
+
+1. **Look at what both hold before what they differ by.** The report
+   said seventy-six pixels where the processor has not-a-number and the
+   card has nothing. Both results, read as numbers, had not-a-number at
+   more than four thousand pixels each: the difference was the edge of
+   something the two agree on, and the something is the finding. The
+   draw's three textures hold not-a-number at ninety, three hundred and
+   eighty and fourteen hundred texels, a region that widens from one to
+   the next as a blur widens it.
+2. **A neighbour of no weight.** At the edge the sample falls exactly on
+   a texel's middle. Its neighbour, not a number, has a weight of
+   nothing; the interpreter multiplies and gets not-a-number, the
+   card's filter leaves it out. Neither is wrong by any rule the card's
+   makers give, which say only that such texels are not to be relied
+   on. The check is right to report it and the renderers are left as
+   they are.
