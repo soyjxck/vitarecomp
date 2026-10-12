@@ -70,14 +70,18 @@ static void bad(uint32_t addr, uint32_t len) {
  * is told once that it changed, and reads what it had. */
 
 #define PAGE 4096u
+#define CHUNK 16u                           /* pages asked about together: see vita_mem_written */
 
 static uint32_t *g_page_moment;             /* a page: the last moment it was found written at; NULL where nothing keeps count */
 static uint32_t *g_page_asked;              /* a page: the moment the system was last asked about it */
 static uint32_t  g_moment = 1;
 
 /* What the counting has come to, for whoever profiles: how many times the
- * system was asked and how many pages it said were written. */
-uint64_t vita_mem_counts, vita_mem_counted;
+ * system was asked, how many pages it said were written, and, while
+ * vita_mem_timed is set, how long the asking took in all, in the units of
+ * the system's finest clock (vita_mem_ticks of them to a second). */
+uint64_t vita_mem_counts, vita_mem_counted, vita_mem_asking, vita_mem_ticks;
+int vita_mem_timed;
 
 #ifdef _WIN32
 static uint8_t *region_make(size_t size) {
@@ -95,6 +99,8 @@ static void region_free(uint8_t *p) { if (p) VirtualFree(p, 0, MEM_RELEASE); }
  * about at this moment yet. */
 static void pages_ask(size_t first, size_t pages) {
     static void *written[4096];
+    LARGE_INTEGER began, ended;
+    if (vita_mem_timed) QueryPerformanceCounter(&began);
     for (;;) {
         ULONG_PTR count = sizeof(written) / sizeof(written[0]);
         DWORD granularity = 0;
@@ -111,6 +117,11 @@ static void pages_ask(size_t first, size_t pages) {
         if (count < sizeof(written) / sizeof(written[0])) break;
     }
     for (size_t i = 0; i < pages; i++) g_page_asked[first + i] = g_moment;
+    if (vita_mem_timed) {
+        if (!vita_mem_ticks) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); vita_mem_ticks = (uint64_t)f.QuadPart; }
+        QueryPerformanceCounter(&ended);
+        vita_mem_asking += (uint64_t)(ended.QuadPart - began.QuadPart);
+    }
 }
 
 uint32_t vita_mem_moment(void) {
@@ -129,11 +140,16 @@ int vita_mem_written(const void *bytes, size_t count, uint32_t since) {
     if (!g_page_moment || !p || p < g_mem || p + count > g_mem + g_size) return 1;
     if (!count) return 0;
     size_t first = (size_t)(p - g_mem) / PAGE, last = (size_t)(p - g_mem + count - 1) / PAGE;
-    /* what is known of these pages is brought up to this moment, a run of them not yet asked about at a time */
-    for (size_t i = first; i <= last && g_page_moment;) {
+    /* What is known of these pages is brought up to this moment, a run of them not yet asked about at a time; and
+     * of their neighbours, sixteen pages together. What lies beside a draw's vertices is the next draw's, as a
+     * rule, and one asking for both is half the askings; larger pieces take in more of what the program writes
+     * for itself, which the system then has to make ready again. */
+    size_t wide_first = first & ~(size_t)(CHUNK - 1), wide_last = last | (CHUNK - 1), pages = g_size / PAGE;
+    if (wide_last >= pages) wide_last = pages - 1;
+    for (size_t i = wide_first; i <= wide_last && g_page_moment;) {
         size_t run = i;
         if (g_page_asked[i] == g_moment) { i++; continue; }
-        while (run <= last && g_page_asked[run] != g_moment) run++;
+        while (run <= wide_last && g_page_asked[run] != g_moment) run++;
         pages_ask(i, run - i);
         i = run;
     }

@@ -51,14 +51,15 @@ static uint32_t g_now;                      /* the moment the list in hand began
 /* What the path costs, for the stage profile (VITARECOMP_GXM_PROFILE):
  * nanoseconds since the last report, by what was being done. */
 enum { P_HASH = 0, P_TEXTURE, P_IN, P_VERTICES, P_DRAW, P_BACK, P_OUT, P_SHOW, P_PROGRAM, P_WRITTEN, P_STAGES };
-extern uint64_t vita_mem_counts, vita_mem_counted;          /* mem.c */
+extern uint64_t vita_mem_counts, vita_mem_counted, vita_mem_asking, vita_mem_ticks;         /* mem.c */
+extern int vita_mem_timed;
 static uint64_t g_ns[P_STAGES], g_hashed, g_made, g_lists, g_draws, g_backs, g_puts, g_views, g_programs;
 static uint64_t g_mesh_hits, g_mesh_made, g_mesh_passed;
 static int g_timed = -1;
 
 static uint64_t now_ns(void) {
     struct timespec t;
-    if (g_timed < 0) { const char *e = getenv("VITARECOMP_GXM_PROFILE"); g_timed = e && strtoul(e, NULL, 0) != 0; }
+    if (g_timed < 0) { const char *e = getenv("VITARECOMP_GXM_PROFILE"); g_timed = e && strtoul(e, NULL, 0) != 0; vita_mem_timed = g_timed; }
     if (!g_timed) return 0;
     timespec_get(&t, TIME_UTC);
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
@@ -68,9 +69,12 @@ void gxm_gpu_profile(uint32_t frames) {
     static const char *const NAME[P_STAGES] = { "textures' bytes looked over", "textures made from memory", "targets and textures made ready",
                                                 "vertices made ready", "draws handed over", "the card waited for and surfaces read back",
                                                 "surfaces put back in memory", "the picture shown", "programs made ready",
-                                                "asking which pages were written" };
+                                                "and of all those, asking which pages were written" };
     static unsigned compiled;
-    static uint64_t counts, counted;
+    static uint64_t counts, counted, asking;
+    /* the asking is done wherever bytes are about to be looked at, inside the other stages: its time is of theirs */
+    g_ns[P_WRITTEN] = vita_mem_ticks ? (vita_mem_asking - asking) * 1000000000ull / vita_mem_ticks : 0;
+    asking = vita_mem_asking;
     unsigned compiled_now = gpu_shaders_compiled();
     double per = frames ? 1e-6 / (double)frames : 0.0;
     if (!g_lists) return;
@@ -1892,11 +1896,7 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
     static uint32_t shaders_cap;
     g_aside.held = 0;
     g_list++;
-    {
-        uint64_t began = now_ns();
-        g_now = vita_mem_moment();
-        g_ns[P_WRITTEN] += now_ns() - began;
-    }
+    g_now = vita_mem_moment();
     retired_go();
 
     /* --- is it a list the card's path draws as the processor's would? --- */

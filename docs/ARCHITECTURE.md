@@ -1001,12 +1001,12 @@ frame from the same bytes.
   written since they were last read are not looked at. Where nothing
   keeps count the answer is "perhaps", and the bytes are hashed as
   before. The system is asked about the pages somebody asks about,
-  when they ask, and about a page once a list: asked about all of the
-  program's memory at the start of every list it took half a
-  millisecond each time, because every page it reports is made ready
-  to be caught again and a program's stack and heap are written all
-  the time. Five hundred small askings a frame find six pages written
-  and take half a millisecond between them.
+  when they ask, sixty-four kilobytes at a time, and about a page once
+  a list: asked about all of the program's memory at the start of
+  every list it took half a millisecond each time, because every page
+  it reports is made ready to be caught again and a program's stack
+  and heap are written all the time. Two hundred and sixty askings a
+  frame find seventeen pages written and take 0.6 ms between them.
 
 And the frame itself does not come back to be looked at. A host with a
 window asks for the display's frame to be shown in it

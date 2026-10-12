@@ -1332,7 +1332,11 @@ one that says which pages have been written.
    about; each page it names it makes ready to be caught again. Asked
    only about the pages a texture or a draw's vertices lie on, when one
    of those is about to be looked at, it is asked five hundred times a
-   frame, finds six pages, and takes half a millisecond in all. The
+   frame, finds six pages, and takes 1.2 ms in all; asked about sixteen
+   pages together, since what lies beside one draw's vertices is the
+   next draw's, two hundred and sixty times, seventeen pages and 0.6
+   ms. (A megabyte together was a hundred askings, ninety pages and 0.4
+   ms: more of the program's own writing taken in, for little.) The
    card's path went from fifteen milliseconds of a frame to six, and
    the frames of a run through the front end and into play are the
    same bytes, all hundred and seven of them.
