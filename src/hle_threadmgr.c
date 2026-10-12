@@ -12,11 +12,13 @@
  * stack, result in r0, every pointer a guest address.
  */
 
+#include "vitarecomp/dispatch.h"
 #include "vitarecomp/hle.h"
 #include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
 #include "sched.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define SCE_KERNEL_ERROR_INVALID_ARGUMENT 0x80020005u
@@ -539,4 +541,285 @@ void vita_hle_sceKernelGetThreadCurrentPriority(void)    { r0 = 0x40; }
 
 /* int sceKernelDelayThread(SceUInt usec): the others run meanwhile */
 void vita_hle_sceKernelDelayThread(void)   { vita_sched_delay(r0); r0 = 0; }
-void vita_hle_sceKernelDelayThreadCB(void) { vita_hle_sceKernelDelayThread(); }
+void vita_hle_sceKernelDelayThreadCB(void) { vita_sched_delay(r0); vita_callbacks_run(); r0 = 0; }
+
+/* --- event flags ---------------------------------------------------------------------
+ *
+ * Thirty-two bits that threads set, clear and wait for. A wait names the
+ * bits it wants, whether all of them or any (SCE_KERNEL_EVF_WAITMODE_OR),
+ * and whether what it saw is cleared as it leaves: all the bits
+ * (CLEAR_ALL) or the ones it asked for (CLEAR_PAT). Clearing takes a mask of
+ * the bits to KEEP, as the console's does. */
+#define EVF_UID_FIRST 0x40050000u
+#define MAX_EVFS      64
+#define SCE_KERNEL_EVF_WAITMODE_OR        1u
+#define SCE_KERNEL_EVF_WAITMODE_CLEAR_ALL 2u
+#define SCE_KERNEL_EVF_WAITMODE_CLEAR_PAT 4u
+#define SCE_KERNEL_ERROR_UNKNOWN_EVF_ID   0x800280E1u
+#define SCE_KERNEL_ERROR_EVF_COND         0x800280E3u
+
+typedef struct { int used; uint32_t bits; char name[32]; } evf;
+static evf g_evfs[MAX_EVFS];
+
+static int evf_index(uint32_t uid) {
+    if (uid < EVF_UID_FIRST || uid >= EVF_UID_FIRST + MAX_EVFS) return -1;
+    int i = (int)(uid - EVF_UID_FIRST);
+    return g_evfs[i].used ? i : -1;
+}
+
+/* Whether the flag holds what a wait asks for; if so, what it saw goes to
+ * `out` and the wait's clearing is done. */
+static int evf_take(evf *e, uint32_t want, uint32_t mode, uint32_t out) {
+    const int met = (mode & SCE_KERNEL_EVF_WAITMODE_OR) ? (e->bits & want) != 0 : (e->bits & want) == want;
+    if (!met) return 0;
+    if (out && vita_mem_ptr(out, 4)) vita_write32(out, e->bits);
+    if (mode & SCE_KERNEL_EVF_WAITMODE_CLEAR_ALL) e->bits = 0;
+    else if (mode & SCE_KERNEL_EVF_WAITMODE_CLEAR_PAT) e->bits &= ~want;
+    return 1;
+}
+
+/* SceUID sceKernelCreateEventFlag(const char *name, int attr, int bits, opt) */
+void vita_hle_sceKernelCreateEventFlag(void) {
+    int i;
+    for (i = 0; i < MAX_EVFS && g_evfs[i].used; i++) {}
+    if (i == MAX_EVFS) { r0 = SCE_KERNEL_ERROR_NO_MEMORY; return; }
+    g_evfs[i].used = 1;
+    g_evfs[i].bits = r2;
+    copy_name(g_evfs[i].name, r0);
+    r0 = EVF_UID_FIRST + (uint32_t)i;
+    vita_hle_trace("sceKernelCreateEventFlag(\"%s\", bits 0x%X) -> 0x%08X", g_evfs[i].name, r2, r0);
+}
+
+/* int sceKernelSetEventFlag(SceUID id, unsigned int bits) */
+void vita_hle_sceKernelSetEventFlag(void) {
+    int i = evf_index(r0);
+    if (i < 0) { r0 = SCE_KERNEL_ERROR_UNKNOWN_EVF_ID; return; }
+    g_evfs[i].bits |= r1;
+    vita_sched_wake(VW_EVENT_FLAG, EVF_UID_FIRST + (uint32_t)i, 1);
+    r0 = 0;
+}
+
+/* int sceKernelClearEventFlag(SceUID id, unsigned int keep) */
+void vita_hle_sceKernelClearEventFlag(void) {
+    int i = evf_index(r0);
+    if (i < 0) { r0 = SCE_KERNEL_ERROR_UNKNOWN_EVF_ID; return; }
+    g_evfs[i].bits &= r1;
+    r0 = 0;
+}
+
+/* int sceKernelPollEventFlag(SceUID id, unsigned int bits, unsigned int mode, unsigned int *out) */
+void vita_hle_sceKernelPollEventFlag(void) {
+    int i = evf_index(r0);
+    if (i < 0) { r0 = SCE_KERNEL_ERROR_UNKNOWN_EVF_ID; return; }
+    if (evf_take(&g_evfs[i], r1, r2, r3)) { r0 = 0; return; }
+    if (r3 && vita_mem_ptr(r3, 4)) vita_write32(r3, g_evfs[i].bits);
+    r0 = SCE_KERNEL_ERROR_EVF_COND;
+}
+
+/* int sceKernelWaitEventFlag(SceUID id, unsigned int bits, unsigned int mode,
+ *                            unsigned int *out, SceUInt *timeout): the timeout is on the stack */
+void vita_hle_sceKernelWaitEventFlag(void) {
+    int i = evf_index(r0);
+    if (i < 0) { r0 = SCE_KERNEL_ERROR_UNKNOWN_EVF_ID; return; }
+    const uint32_t want = r1, mode = r2, out = r3, uid = EVF_UID_FIRST + (uint32_t)i;
+    const uint32_t timeout = timeout_us(vita_read32(sp));
+    for (;;) {
+        if (evf_take(&g_evfs[i], want, mode, out)) { r0 = 0; return; }
+        if (vita_sched_block(VW_EVENT_FLAG, uid, timeout) < 0) { r0 = SCE_KERNEL_ERROR_WAIT_TIMEOUT; return; }
+        if (evf_index(uid) < 0) { r0 = SCE_KERNEL_ERROR_UNKNOWN_EVF_ID; return; }
+    }
+}
+void vita_hle_sceKernelWaitEventFlagCB(void) { vita_hle_sceKernelWaitEventFlag(); }
+
+/* int sceKernelDeleteEventFlag(SceUID id) */
+void vita_hle_sceKernelDeleteEventFlag(void) {
+    int i = evf_index(r0);
+    if (i < 0) { r0 = SCE_KERNEL_ERROR_UNKNOWN_EVF_ID; return; }
+    g_evfs[i].used = 0;
+    vita_sched_wake(VW_EVENT_FLAG, EVF_UID_FIRST + (uint32_t)i, 1);
+    r0 = 0;
+}
+
+/* --- message pipes -------------------------------------------------------------------
+ *
+ * A pipe of bytes between threads, with a buffer of the size it was made
+ * with. A send waits for room and a receive for bytes, unless its mode says
+ * not to (SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT); MODE_FULL asks for the whole
+ * of what was named, and without it a receive leaves with whatever is there
+ * once anything is. How much moved goes to the result pointer. */
+#define MPP_UID_FIRST 0x40060000u
+#define MAX_MPPS      32
+#define SCE_KERNEL_MSG_PIPE_MODE_FULL        0x01u
+#define SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT   0x10u
+#define SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID 0x80028221u
+#define SCE_KERNEL_ERROR_MPP_FULL            0x80028223u
+#define SCE_KERNEL_ERROR_MPP_EMPTY           0x80028224u
+
+typedef struct { int used; uint8_t *buf; uint32_t cap, head, count; char name[32]; } mpp;
+static mpp g_mpps[MAX_MPPS];
+
+static int mpp_index(uint32_t uid) {
+    if (uid < MPP_UID_FIRST || uid >= MPP_UID_FIRST + MAX_MPPS) return -1;
+    int i = (int)(uid - MPP_UID_FIRST);
+    return g_mpps[i].used ? i : -1;
+}
+
+static void mpp_result(uint32_t result, uint32_t done) {
+    if (result && vita_mem_ptr(result, 4)) vita_write32(result, done);
+}
+
+/* SceUID sceKernelCreateMsgPipe(const char *name, int type, int attr, unsigned int bufSize, opt) */
+void vita_hle_sceKernelCreateMsgPipe(void) {
+    int i;
+    for (i = 0; i < MAX_MPPS && g_mpps[i].used; i++) {}
+    if (i == MAX_MPPS) { r0 = SCE_KERNEL_ERROR_NO_MEMORY; return; }
+    uint32_t cap = r3 ? r3 : 0x1000;
+    g_mpps[i].buf = (uint8_t *)malloc(cap);
+    if (!g_mpps[i].buf) { r0 = SCE_KERNEL_ERROR_NO_MEMORY; return; }
+    g_mpps[i].used = 1; g_mpps[i].cap = cap; g_mpps[i].head = 0; g_mpps[i].count = 0;
+    copy_name(g_mpps[i].name, r0);
+    r0 = MPP_UID_FIRST + (uint32_t)i;
+    vita_hle_trace("sceKernelCreateMsgPipe(\"%s\", %u bytes) -> 0x%08X", g_mpps[i].name, cap, r0);
+}
+
+/* int sceKernelSendMsgPipe(SceUID id, const void *msg, SceSize size, int mode,
+ *                          SceSize *result, SceUInt *timeout): the last two on the stack */
+static void mpp_send(int may_wait) {
+    int i = mpp_index(r0);
+    if (i < 0) { r0 = SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID; return; }
+    const uint32_t uid = MPP_UID_FIRST + (uint32_t)i, size = r2, mode = r3, result = vita_read32(sp);
+    const uint32_t timeout = may_wait ? timeout_us(vita_read32(sp + 4)) : 0;
+    const uint8_t *src = size ? (const uint8_t *)vita_mem_ptr(r1, size) : NULL;
+    mpp *p = &g_mpps[i];
+    uint32_t done = 0;
+    if (size && !src) { r0 = SCE_KERNEL_ERROR_INVALID_ARGUMENT; return; }
+    while (done < size) {
+        const uint32_t room = p->cap - p->count;
+        /* a whole message that the pipe can hold goes in in one piece */
+        if (!room || ((mode & SCE_KERNEL_MSG_PIPE_MODE_FULL) && !done && size <= p->cap && room < size)) {
+            if (!may_wait || (mode & SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT)) break;
+            if (vita_sched_block(VW_MSG_PIPE, uid, timeout) < 0) { mpp_result(result, done); r0 = SCE_KERNEL_ERROR_WAIT_TIMEOUT; return; }
+            if (mpp_index(uid) < 0) { r0 = SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID; return; }
+            continue;
+        }
+        const uint32_t take = size - done < room ? size - done : room;
+        for (uint32_t k = 0; k < take; k++) p->buf[(p->head + p->count + k) % p->cap] = src[done + k];
+        p->count += take;
+        done += take;
+        vita_sched_wake(VW_MSG_PIPE, uid, 1);
+    }
+    mpp_result(result, done);
+    r0 = done == size ? 0 : SCE_KERNEL_ERROR_MPP_FULL;
+}
+void vita_hle_sceKernelSendMsgPipe(void)    { mpp_send(1); }
+void vita_hle_sceKernelSendMsgPipeCB(void)  { mpp_send(1); }
+void vita_hle_sceKernelTrySendMsgPipe(void) { mpp_send(0); }
+
+/* int sceKernelReceiveMsgPipe(SceUID id, void *msg, SceSize size, int mode,
+ *                             SceSize *result, SceUInt *timeout) */
+static void mpp_receive(int may_wait) {
+    int i = mpp_index(r0);
+    if (i < 0) { r0 = SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID; return; }
+    const uint32_t uid = MPP_UID_FIRST + (uint32_t)i, size = r2, mode = r3, result = vita_read32(sp);
+    const uint32_t timeout = may_wait ? timeout_us(vita_read32(sp + 4)) : 0;
+    uint8_t *dst = size ? (uint8_t *)vita_mem_ptr(r1, size) : NULL;
+    mpp *p = &g_mpps[i];
+    uint32_t done = 0;
+    if (size && !dst) { r0 = SCE_KERNEL_ERROR_INVALID_ARGUMENT; return; }
+    while (done < size) {
+        if (!p->count) {
+            if (done && !(mode & SCE_KERNEL_MSG_PIPE_MODE_FULL)) break;   /* what was there is enough */
+            if (!may_wait || (mode & SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT)) break;
+            if (vita_sched_block(VW_MSG_PIPE, uid, timeout) < 0) { mpp_result(result, done); r0 = SCE_KERNEL_ERROR_WAIT_TIMEOUT; return; }
+            if (mpp_index(uid) < 0) { r0 = SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID; return; }
+            continue;
+        }
+        const uint32_t take = size - done < p->count ? size - done : p->count;
+        for (uint32_t k = 0; k < take; k++) dst[done + k] = p->buf[(p->head + k) % p->cap];
+        p->head = (p->head + take) % p->cap;
+        p->count -= take;
+        done += take;
+        vita_sched_wake(VW_MSG_PIPE, uid, 1);
+    }
+    mpp_result(result, done);
+    r0 = done == size || (done && !(mode & SCE_KERNEL_MSG_PIPE_MODE_FULL)) ? 0 : SCE_KERNEL_ERROR_MPP_EMPTY;
+}
+void vita_hle_sceKernelReceiveMsgPipe(void)    { mpp_receive(1); }
+void vita_hle_sceKernelReceiveMsgPipeCB(void)  { mpp_receive(1); }
+void vita_hle_sceKernelTryReceiveMsgPipe(void) { mpp_receive(0); }
+
+/* int sceKernelDeleteMsgPipe(SceUID id) */
+void vita_hle_sceKernelDeleteMsgPipe(void) {
+    int i = mpp_index(r0);
+    if (i < 0) { r0 = SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID; return; }
+    free(g_mpps[i].buf);
+    g_mpps[i].used = 0;
+    vita_sched_wake(VW_MSG_PIPE, MPP_UID_FIRST + (uint32_t)i, 1);
+    r0 = 0;
+}
+
+/* --- callbacks -------------------------------------------------------------------------
+ *
+ * A callback is a function of the program's that the kernel runs on the
+ * thread that made it, and only while that thread is in a wait that allows
+ * it (the ...CB forms). Something notifies it, here the display at each
+ * vertical blank (hle_display.c), and at the thread's next such wait the
+ * function runs once with how many notices came since the last time.
+ *
+ *   int cb(int notifyId, int notifyCount, int notifyArg, void *userData) */
+#define CB_UID_FIRST 0x40070000u
+#define MAX_CBS      32
+
+typedef struct { int used; uint32_t thread, func, arg, pending, notify_arg; char name[32]; } callback;
+static callback g_cbs[MAX_CBS];
+
+/* SceUID sceKernelCreateCallback(const char *name, unsigned int attr, func, void *userData) */
+void vita_hle_sceKernelCreateCallback(void) {
+    int i;
+    for (i = 0; i < MAX_CBS && g_cbs[i].used; i++) {}
+    if (i == MAX_CBS) { r0 = SCE_KERNEL_ERROR_NO_MEMORY; return; }
+    memset(&g_cbs[i], 0, sizeof g_cbs[i]);
+    g_cbs[i].used = 1;
+    g_cbs[i].thread = vita_thread_self();
+    g_cbs[i].func = r2;
+    g_cbs[i].arg = r3;
+    copy_name(g_cbs[i].name, r0);
+    r0 = CB_UID_FIRST + (uint32_t)i;
+    vita_hle_trace("sceKernelCreateCallback(\"%s\", function 0x%08X, data 0x%08X) -> 0x%08X", g_cbs[i].name, g_cbs[i].func, g_cbs[i].arg, r0);
+}
+
+/* int sceKernelDeleteCallback(SceUID id) */
+void vita_hle_sceKernelDeleteCallback(void) {
+    if (r0 < CB_UID_FIRST || r0 >= CB_UID_FIRST + MAX_CBS || !g_cbs[r0 - CB_UID_FIRST].used) { r0 = SCE_KERNEL_ERROR_INVALID_UID; return; }
+    g_cbs[r0 - CB_UID_FIRST].used = 0;
+    r0 = 0;
+}
+
+/* int sceKernelNotifyCallback(SceUID id, int arg) */
+void vita_hle_sceKernelNotifyCallback(void) { r0 = (uint32_t)vita_callback_notify(r0, r1); }
+
+int vita_callback_notify(uint32_t uid, uint32_t arg) {
+    if (uid < CB_UID_FIRST || uid >= CB_UID_FIRST + MAX_CBS || !g_cbs[uid - CB_UID_FIRST].used) return (int)SCE_KERNEL_ERROR_INVALID_UID;
+    g_cbs[uid - CB_UID_FIRST].pending++;
+    g_cbs[uid - CB_UID_FIRST].notify_arg = arg;
+    return 0;
+}
+
+/* The running thread is in a wait that lets its callbacks run: run those
+ * that were notified. The registers of the call that got here are the
+ * caller's own to keep. */
+void vita_callbacks_run(void) {
+    const uint32_t self = vita_thread_self();
+    for (int i = 0; i < MAX_CBS; i++) {
+        callback *c = &g_cbs[i];
+        if (!c->used || !c->pending || c->thread != self) continue;
+        const uint32_t s0 = r0, s1 = r1, s2 = r2, s3 = r3, s12 = r12, slr = lr;
+        r0 = CB_UID_FIRST + (uint32_t)i; r1 = c->pending; r2 = c->notify_arg; r3 = c->arg;
+        c->pending = 0;
+        vita_dispatch(0, c->func);
+        r0 = s0; r1 = s1; r2 = s2; r3 = s3; r12 = s12; lr = slr;
+    }
+}
+
+/* int sceKernelCheckCallback(void): run what is pending, now */
+void vita_hle_sceKernelCheckCallback(void) { vita_callbacks_run(); r0 = 0; }

@@ -135,7 +135,8 @@ uint32_t vita_sched_threads(uint32_t *runnable) {
 }
 
 void vita_sched_dump(FILE *f) {
-    static const char *const WAITS[] = { "nothing", "semaphore", "mutex", "condition", "the end of thread", "the clock", "SceUlt object" };
+    static const char *const WAITS[] = { "nothing", "semaphore", "mutex", "condition", "the end of thread", "the clock", "SceUlt object",
+                                         "event flag", "message pipe" };
     init_once();
     /* not under the lock: this runs on the thread that holds the baton, at exit */
     uint64_t now = now_us();
@@ -145,7 +146,7 @@ void vita_sched_dump(FILE *f) {
         uint32_t pc = t == g_cur ? vita_last_pc : t->regs.last_pc;
         fprintf(f, "  thread 0x%08X %-20s ", t->uid, t->name);
         if (t->state == T_WAITING) {
-            int kind = t->wait_kind >= 0 && t->wait_kind <= VW_ULT ? t->wait_kind : 0;
+            int kind = t->wait_kind >= 0 && t->wait_kind <= VW_MSG_PIPE ? t->wait_kind : 0;
             fprintf(f, "waits on %s", WAITS[kind]);
             if (kind != VW_DELAY) fprintf(f, " 0x%08X", t->wait_obj);
             if (t->wait_until) fprintf(f, ", %llu ms more at most", (unsigned long long)(t->wait_until > now ? (t->wait_until - now) / 1000 : 0));

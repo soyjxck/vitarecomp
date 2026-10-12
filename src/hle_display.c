@@ -24,6 +24,8 @@
 static vita_framebuf g_fb;
 static int           g_set;
 static uint32_t      g_flips;
+static uint32_t      g_vcount;       /* blanks so far                          */
+static uint32_t      g_set_vcount;   /* and how many when the buffer was last set */
 
 static int resolution_ok(uint32_t w, uint32_t h) {
     return (w == 960 && h == 544) || (w == 720 && h == 408)
@@ -58,21 +60,70 @@ void vita_hle_sceDisplaySetFrameBuf(void) {
     g_fb.width = w;   g_fb.height = h;
     g_set = 1;
     g_flips++;
+    g_set_vcount = g_vcount;
     r0 = 0;
 }
 
 /* int sceDisplayWaitVblankStart(void): the frame ends, and the other
  * threads get their turn before the next one starts. */
+static void vblank_passed(void);
+
 void vita_hle_sceDisplayWaitVblankStart(void) {
     vita_clock_vblank();
+    vblank_passed();
     vita_host_vblank();
     vita_sched_yield();
     r0 = 0;
 }
-void vita_hle_sceDisplayWaitVblankStartCB(void)    { vita_hle_sceDisplayWaitVblankStart(); }
 void vita_hle_sceDisplayWaitSetFrameBuf(void)      { vita_hle_sceDisplayWaitVblankStart(); }
 void vita_hle_sceDisplayWaitVblankStartMulti(void) { vita_hle_sceDisplayWaitVblankStart(); }
 void vita_hle_sceDisplayWaitSetFrameBufMulti(void) { vita_hle_sceDisplayWaitVblankStart(); }
+
+/* The ...CB forms, which also let the waiting thread's callbacks run. These
+ * count: sceDisplayWaitVblankStartMultiCB(n) is n blanks from now, and the
+ * SetFrameBuf forms wait for the n-th blank after the frame buffer was last
+ * set (one at the least), which is how a program holds itself to thirty
+ * frames a second however quickly it drew. */
+static void wait_blanks(uint32_t n) {
+    if (n < 1) n = 1;
+    if (n > 60) n = 60;
+    while (n--) vita_hle_sceDisplayWaitVblankStart();
+    vita_callbacks_run();
+    r0 = 0;
+}
+static uint32_t since_set(uint32_t n) {
+    const uint32_t due = g_set_vcount + n;
+    return due > g_vcount ? due - g_vcount : 1;
+}
+void vita_hle_sceDisplayWaitVblankStartCB(void)      { wait_blanks(1); }
+void vita_hle_sceDisplayWaitVblankStartMultiCB(void) { wait_blanks(r0); }
+void vita_hle_sceDisplayWaitSetFrameBufCB(void)      { wait_blanks(since_set(1)); }
+void vita_hle_sceDisplayWaitSetFrameBufMultiCB(void) { wait_blanks(since_set(r0)); }
+
+/* int sceDisplayRegisterVblankStartCallback(SceUID cb) / Unregister: the
+ * callbacks that get a notice at every blank. */
+#define MAX_VBLANK_CBS 8
+static uint32_t g_vblank_cb[MAX_VBLANK_CBS];
+
+void vita_hle_sceDisplayRegisterVblankStartCallback(void) {
+    for (int i = 0; i < MAX_VBLANK_CBS; i++)
+        if (!g_vblank_cb[i]) { g_vblank_cb[i] = r0; r0 = 0; return; }
+    r0 = SCE_DISPLAY_ERROR_INVALID_VALUE;
+}
+void vita_hle_sceDisplayUnregisterVblankStartCallback(void) {
+    for (int i = 0; i < MAX_VBLANK_CBS; i++)
+        if (g_vblank_cb[i] == r0) g_vblank_cb[i] = 0;
+    r0 = 0;
+}
+
+/* int sceDisplayGetVcount(void): blanks since the start, sixteen bits of them */
+void vita_hle_sceDisplayGetVcount(void) { r0 = g_vcount & 0xFFFFu; }
+
+static void vblank_passed(void) {
+    g_vcount++;
+    for (int i = 0; i < MAX_VBLANK_CBS; i++)
+        if (g_vblank_cb[i]) vita_callback_notify(g_vblank_cb[i], 0);
+}
 
 int vita_display_current(vita_framebuf *out) {
     if (!g_set) return 0;

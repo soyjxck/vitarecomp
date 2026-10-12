@@ -36,6 +36,8 @@ enum {
     VW_THREAD_END,  /* a thread's end, by its uid                      */
     VW_DELAY,       /* a delay: nothing wakes it but the clock         */
     VW_ULT,         /* a SceUlt object, by its address                 */
+    VW_EVENT_FLAG,  /* an event flag, by uid                           */
+    VW_MSG_PIPE,    /* a message pipe, by uid: room in it, or bytes    */
 };
 
 /* The uid of the running thread; the main thread's before any is made. */
@@ -64,6 +66,12 @@ int  vita_sched_block(int kind, uint32_t obj, uint32_t timeout_us);
 
 /* Make the threads waiting on (kind, obj) runnable: one, or all. */
 void vita_sched_wake(int kind, uint32_t obj, int all);
+
+/* Callbacks (hle_threadmgr.c): a notice for one, by its uid, and the run of
+ * those the running thread has notices for, which a wait that allows
+ * callbacks (the ...CB forms) does on its way. */
+int  vita_callback_notify(uint32_t uid, uint32_t arg);
+void vita_callbacks_run(void);
 
 /* Let another runnable thread go, if there is one. */
 void vita_sched_yield(void);
