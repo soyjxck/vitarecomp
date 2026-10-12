@@ -87,6 +87,17 @@ int vita_display_current(vita_framebuf *out);
  * drawing: the host shows vita_display_current as it would have. */
 int vita_display_show(void *window, uint32_t *width, uint32_t *height);
 
+/* Whether pictures are to be shown on the beat: the wait for the sixtieth
+ * of a second first, and the picture then. A host shows a program's frame
+ * when the program has finished it and waits afterwards, which is as soon
+ * as it can be seen and evenly spaced, the program finishing each frame
+ * about as far into its beat as the last. Where a frame between is shown
+ * for each of the program's (gpu_tween.h) there are two pictures to a
+ * frame, and shown that way the one between goes out when the program has
+ * finished and the program's own at the next beat: two close together,
+ * then a long wait. On the beat they are a sixtieth apart. */
+int vita_display_on_the_beat(void);
+
 /* sceDisplaySetFrameBuf calls so far. */
 uint32_t vita_display_flips(void);
 

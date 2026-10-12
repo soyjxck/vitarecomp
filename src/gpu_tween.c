@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* --- what was asked ------------------------------------------------------------------------- */
 
@@ -938,7 +939,47 @@ static void dump(gpu_surface *s, int between) {
     free(rows);
 }
 
+/* VITARECOMP_SHOW_LOG=1: once a second, how the pictures shown were spaced.
+ * A count of pictures a second hides what is seen as a hitch: one picture
+ * that stood for three vertical blanks among sixty. So each wait between
+ * two pictures is counted by how many blanks long it was, and how far the
+ * worst of them was off a whole number of blanks is said with it. */
+static void spaced(int between) {
+    static int asked, wanted;
+    static uint64_t last, since;
+    static uint32_t pictures, betweens, by_blanks[4];
+    static double off_most, longest;
+    struct timespec t;
+    if (!asked) { const char *e = getenv("VITARECOMP_SHOW_LOG"); asked = 1; wanted = e && *e && *e != '0'; }
+    if (!wanted) return;
+    timespec_get(&t, TIME_UTC);
+    uint64_t now = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+    if (last) {
+        double ms = (double)(now - last) * 1e-6, blank = 1000.0 / 60.0;
+        int blanks = (int)(ms / blank + 0.5);
+        double off = ms - blanks * blank;
+        if (off < 0.0) off = -off;
+        by_blanks[blanks < 1 ? 0 : blanks > 3 ? 3 : blanks]++;
+        if (off > off_most && blanks >= 1 && blanks <= 3) off_most = off;
+        if (ms > longest) longest = ms;
+    } else {
+        since = now;
+    }
+    last = now;
+    pictures++;
+    if (between) betweens++;
+    if (now - since < 1000000000ull) return;
+    fprintf(stderr, "show: %u pictures (%u between) in %.2f s: %u a blank apart, %u two, %u three or more, %u less than one; "
+                    "the longest wait %.1f ms, the worst off a blank's time by %.1f ms\n",
+            pictures, betweens, (double)(now - since) * 1e-9, by_blanks[1], by_blanks[2], by_blanks[3], by_blanks[0], longest, off_most);
+    since = now;
+    pictures = betweens = 0;
+    memset(by_blanks, 0, sizeof(by_blanks));
+    off_most = longest = 0.0;
+}
+
 static int shown(void *window, gpu_surface *s, int fresh, int between) {
+    if (fresh) spaced(between);
     if (fresh) g_pictures[between ? 1 : 0]++;
     if (fresh && g_dump && s) dump(s, between);
     return window ? gpu_show(window, s, fresh) : 0;
@@ -955,7 +996,10 @@ static int written_since(const gpu_surface *s) {
 
 int tween_show(void *window, gpu_surface *s, int fresh) {
     static gpu_surface *owed;               /* the title's frame, to follow the frame between that was shown for it */
-    if (!gpu_tween_on() || g_listing) return gpu_show(window, s, fresh);
+    if (!gpu_tween_on() || g_listing) {
+        if (fresh) spaced(0);
+        return gpu_show(window, s, fresh);
+    }
     g_turn++;
     if (fresh && !g_told) settle();         /* nobody says when a frame ends: it ends where it is shown */
     if (fresh) {

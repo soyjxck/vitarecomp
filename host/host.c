@@ -274,30 +274,36 @@ static void window_wait(void) {
 }
 
 void vita_host_vblank(void) {
-    g.frame++;
+    /* this blank's number, kept: another thread may come through here while this one waits, and count on */
+    const uint32_t frame = ++g.frame;
+    /* Two pictures to each of the program's frames are shown on the beat
+     * (vita_display_on_the_beat): the wait first. One to a frame is shown
+     * when the program has it ready, and the wait comes last. */
+    const int on_the_beat = g.window && vita_display_on_the_beat();
+    if (on_the_beat) window_wait();
     if (g.window) window_vblank();
     else vita_display_show(NULL, NULL, NULL);       /* a card that makes frames between makes them with no window too */
-    if (g.sample_to) vita_sampler_run(g.frame >= g.sample_from && g.frame < g.sample_to);
-    if (g.ran_to && g.frame == g.ran_from) vita_trace_fns = 2;
-    if (g.ran_to && g.frame == g.ran_to) {
+    if (g.sample_to) vita_sampler_run(frame >= g.sample_from && frame < g.sample_to);
+    if (g.ran_to && frame == g.ran_from) vita_trace_fns = 2;
+    if (g.ran_to && frame == g.ran_to) {
         FILE *f = fopen(g.ran_path, "w");
         vita_trace_fns = 0;
         if (f) { vita_coverage_write(f); fclose(f); }
         fprintf(stderr, "vita_host: %s %s (functions entered in vblanks %u to %u)\n",
                 f ? "wrote" : "cannot write", g.ran_path, g.ran_from, g.ran_to);
     }
-    if (g.dump_path && g.frame == g.dump_frame) write_ppm(g.dump_path);
-    if (g.dump_dir && g.frame % g.dump_every == 0) {
+    if (g.dump_path && frame == g.dump_frame) write_ppm(g.dump_path);
+    if (g.dump_dir && frame % g.dump_every == 0) {
         char path[1024];
-        snprintf(path, sizeof(path), "%s/vblank-%06u.ppm", g.dump_dir, g.frame);
+        snprintf(path, sizeof(path), "%s/vblank-%06u.ppm", g.dump_dir, frame);
         write_ppm(path);
     }
-    if (g.frames_max && g.frame >= g.frames_max) {
+    if (g.frames_max && frame >= g.frames_max) {
         fprintf(stderr, "vita_host: frame limit %u reached\n", g.frames_max);
         finish(0);
     }
     /* last, when everything this vertical blank asked for is done: another thread may come through here meanwhile */
-    if (g.window) window_wait();
+    if (g.window && !on_the_beat) window_wait();
 }
 
 uint32_t vita_host_buttons(void) {
