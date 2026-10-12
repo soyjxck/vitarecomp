@@ -40,6 +40,7 @@
 #include "vitarecomp/mem.h"
 #include "vitarecomp/recomp_rt.h"
 #include "sampler.h"
+#include "audio.h"
 #include "window.h"
 #include "../src/sched.h"
 
@@ -168,6 +169,11 @@ static void summary(void) {
             g.frame, vita_display_flips(), vita_trap_count(),
             vita_dispatch_hits(), vita_dispatch_misses(), vita_mem_bad_access,
             vita_heap_used(), vita_heap_size());
+    uint64_t taken = 0, empty = 0;
+    vita_audio_counts(&taken, &empty);
+    if (taken)
+        fprintf(stderr, "vita_host: sound: %.1f s went to the device, %.1f s of it silence for want of anything queued\n",
+                (double)taken / VITA_AUDIO_RATE, (double)empty / VITA_AUDIO_RATE);
     vita_sampler_report(stderr);
     /* with the trace on, where every thread was left */
     const char *e = getenv("VITARECOMP_TRACE");
@@ -179,6 +185,7 @@ static void summary(void) {
 
 static void finish(int status) {
     if (g.dump_path && g.dump_frame == 0) write_ppm(g.dump_path);
+    vita_host_audio_stop();
     summary();
     exit(status);
 }
@@ -419,6 +426,13 @@ int vita_host_main(int argc, char **argv) {
         g.window = 0;
     }
     if (g.window && g.fullscreen) vita_window_fullscreen();
+
+    /* Sound goes with a window and the real clock: a run with neither is
+     * a measurement, and plays to nobody. VITARECOMP_AUDIO=0 keeps a
+     * windowed run silent. */
+    const char *audio = getenv("VITARECOMP_AUDIO");
+    if (g.window && !g.virtual_clock && !(audio && audio[0] == '0') && vita_host_audio_start())
+        fprintf(stderr, "vita_host: no sound device; running without sound\n");
 
     vita_load_info info;
     if (vita_probe_elf(g.elf, &info)) {

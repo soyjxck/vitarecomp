@@ -90,6 +90,22 @@ int vita_display_show(void *window, uint32_t *width, uint32_t *height);
 /* sceDisplaySetFrameBuf calls so far. */
 uint32_t vita_display_flips(void);
 
+/* Sound. What the program plays through its output ports is kept at one
+ * rate, two channels of sixteen bits (hle_audio.c). A host with a sound
+ * device says so, and from then on a played block is queued for it and the
+ * program's sound thread is paced by what the device has taken; the device
+ * takes the sum of the ports with vita_audio_pull, on its own thread, which
+ * always gives the frames asked for and makes up what is missing with
+ * silence. With no device a block takes as long to play as it lasts and is
+ * not kept. */
+#define VITA_AUDIO_RATE 48000u
+void vita_audio_device(int present);
+void vita_audio_pull(int16_t *out, uint32_t frames);
+
+/* For the host's summary: frames the device has taken, and how many of
+ * them had nothing queued and went out as silence. */
+void vita_audio_counts(uint64_t *taken, uint64_t *empty);
+
 /* Time that moves only with what the program does, so that a run repeats
  * exactly: a sixtieth of a second at each vertical blank, the length of a
  * wait when every thread waits. Called before the program starts; without

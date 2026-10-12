@@ -14,9 +14,11 @@
 if(WIN32)
     set(VITARECOMP_HOST_WINDOW window_win32.c)
     set(VITARECOMP_HOST_SAMPLER sampler_win32.c)
+    set(VITARECOMP_HOST_AUDIO audio_win32.c)
 else()
     set(VITARECOMP_HOST_WINDOW window_none.c)
     set(VITARECOMP_HOST_SAMPLER sampler_none.c)
+    set(VITARECOMP_HOST_AUDIO audio_none.c)
 endif()
 
 # Objects and not an archive: the runtime calls the host and the host the
@@ -26,6 +28,7 @@ add_library(vitahost OBJECT
     host.c
     ${VITARECOMP_HOST_WINDOW}
     ${VITARECOMP_HOST_SAMPLER}
+    ${VITARECOMP_HOST_AUDIO}
 )
 target_link_libraries(vitahost PUBLIC vitarecomp)
 

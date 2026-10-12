@@ -72,50 +72,7 @@ void vita_hle_sceCameraSetAutoControlHold(void) { r0 = 0; }
 void vita_hle_sceCameraSetWhiteBalance(void)    { r0 = 0; }
 void vita_hle_sceCameraSetEV(void)              { r0 = 0; }
 
-/* --- audio output --------------------------------------------------------------------
- * A port remembers its length and rate; a write to it takes the time the
- * samples would take to play, which paces the thread that feeds it, and
- * lets the other threads run meanwhile. */
-
-typedef struct { int used; uint32_t len, freq, mode; } audio_port;
-static audio_port g_ports[8];
-
-/* int sceAudioOutOpenPort(SceAudioOutPortType type, int len, int freq, SceAudioOutMode mode) */
-void vita_hle_sceAudioOutOpenPort(void) {
-    int i;
-    for (i = 0; i < 8 && g_ports[i].used; i++) {}
-    if (i == 8) { r0 = 0x80260002u; return; }   /* SCE_AUDIO_OUT_ERROR_INVALID_PORT */
-    g_ports[i].used = 1; g_ports[i].len = r1; g_ports[i].freq = r2 ? r2 : 48000; g_ports[i].mode = r3;
-    vita_hle_trace("sceAudioOutOpenPort(type %u, len %u, %u Hz, mode %u) -> %d", r0, r1, r2, r3, i + 1);
-    r0 = (uint32_t)i + 1;
-}
-
-/* int sceAudioOutOutput(int port, const void *buf): blocks for the buffer's duration */
-void vita_hle_sceAudioOutOutput(void) {
-    int i = (int)r0 - 1;
-    if (i < 0 || i >= 8 || !g_ports[i].used) { r0 = 0x80260002u; return; }
-    /* VITARECOMP_AUDIO_DUMP=<folder>: what each port is given, as it is given
-     * (sixteen bits, the port's rate, one channel or two), a file a port */
-    static const char *dump;
-    static int asked;
-    if (!asked) { dump = getenv("VITARECOMP_AUDIO_DUMP"); asked = 1; }
-    if (dump && *dump) {
-        const uint32_t channels = g_ports[i].mode ? 2 : 1, bytes = g_ports[i].len * channels * 2;
-        const void *samples = vita_mem_ptr(r1, bytes);
-        char path[1024];
-        snprintf(path, sizeof path, "%s/port%d-%uHz-%uch.pcm", dump, i + 1, g_ports[i].freq, channels);
-        FILE *f = samples ? fopen(path, "ab") : NULL;
-        if (f) { fwrite(samples, 1, bytes, f); fclose(f); }
-    }
-    uint32_t us = (uint32_t)((uint64_t)g_ports[i].len * 1000000ull / g_ports[i].freq);
-    vita_sched_delay(us ? us : 1000);
-    r0 = 0;
-}
-void vita_hle_sceAudioOutReleasePort(void) { int i = (int)r0 - 1; if (i >= 0 && i < 8) g_ports[i].used = 0; r0 = 0; }
-void vita_hle_sceAudioOutSetVolume(void)   { r0 = 0; }
-void vita_hle_sceAudioOutSetConfig(void)   { int i = (int)r0 - 1; if (i >= 0 && i < 8 && g_ports[i].used) { if ((int)r1 > 0) g_ports[i].len = r1; if ((int)r2 > 0) g_ports[i].freq = r2; } r0 = 0; }
-void vita_hle_sceAudioOutGetRestSample(void) { r0 = 0; }
-void vita_hle_sceAudioOutGetAdopt(void)    { r0 = 1; }
+/* The audio output ports, SceAudio, are in hle_audio.c. */
 
 /* The audio synthesiser, SceNgs, is in hle_ngs.c. */
 
