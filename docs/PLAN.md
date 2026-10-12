@@ -400,21 +400,25 @@ that drew it, and does not pass through the title's memory on the way.
 It is switched on by `VITARECOMP_GXM_GPU=1` and is not yet the default.
 What is left:
 
-1. **A watch on the pages of a surface the card holds**, so that the
+1. **Compiled programs kept from one run to the next.** A program is
+   translated and compiled when a draw first uses it, and a level's
+   first frames wait half a minute in all for the system's compiler.
+   Kept in a file by what their text is, they are compiled once.
+2. **A watch on the pages of a surface the card holds**, so that the
    title's own code reading it is noticed. Today that is known only for
    surfaces of a few pixels, by sending those back always.
-2. **The rest of a frame.** Sixteen of the 23 ms are neither the card
+3. **The rest of a frame.** Sixteen of the 23 ms are neither the card
    nor its path: the title's code and the graphics library's handling
    of each draw as it is made. Not yet looked at.
-3. **Textures in their own form.** A compressed texture goes to the card
+4. **Textures in their own form.** A compressed texture goes to the card
    as four floats a texel; the card has the compressed forms. It costs
    memory and the first frame of a scene, not the frames after.
-4. **Drawing larger than the console did.** The card draws 960 by 544
+5. **Drawing larger than the console did.** The card draws 960 by 544
    because the title asks for that; a window three times the size shows
    each of those pixels nine times. Surfaces some whole number of times
    the size the title names, and the picture is the card's own.
-5. A second implementation of `src/gpu.h` for hosts without Direct3D.
-6. Making it the default where there is a card, with the processor's
+6. A second implementation of `src/gpu.h` for hosts without Direct3D.
+7. Making it the default where there is a card, with the processor's
    renderer for what a card's path leaves and for checking it.
 
 ## Milestone F: first title repo

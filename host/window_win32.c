@@ -36,6 +36,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <mmsystem.h>
 
 #include <math.h>
 #include <stdlib.h>
@@ -310,6 +311,9 @@ static void own_pixels(void) {
 int vita_window_open(const char *title, int width, int height) {
     if (W.thread) return 0;
     own_pixels();
+    /* a sleep ends when it was asked to, to the millisecond: without this the system rounds one up to its own tick,
+     * which is most of a sixtieth of a second */
+    timeBeginPeriod(1);
     InitializeCriticalSection(&W.lock);
     W.ww = width;
     W.wh = height;
@@ -395,6 +399,14 @@ int      vita_window_closed(void)  { return W.closed != 0; }
 
 void vita_window_title(const char *text) {
     if (W.hwnd && text) SetWindowTextA(W.hwnd, text);
+}
+
+uint32_t vita_window_pace_left(void) {
+    LARGE_INTEGER now;
+    if (!W.freq.QuadPart) return 0;
+    QueryPerformanceCounter(&now);
+    LONGLONG left = W.next.QuadPart + W.freq.QuadPart / 60 - now.QuadPart;
+    return left > 0 ? (uint32_t)(left * 1000000 / W.freq.QuadPart) : 0;
 }
 
 void vita_window_pace(void) {

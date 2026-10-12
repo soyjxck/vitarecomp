@@ -562,6 +562,19 @@ still cannot be interrupted. A cycle counter checked where blocks end is how
 emulators of single-core machines have always scheduled; this is that, with
 the block boundaries a recompiler has.
 
+A host that keeps the display's time has to wait the same way.
+`vita_host_vblank` is called by the thread that waits for the vertical
+blank, and that thread has the baton: a host that sleeps there until the
+next sixtieth of a second has put every thread of the program to sleep
+with it. `host/host.c` waits through the scheduler (`vita_sched_delay`),
+so the others run meanwhile, and sleeps out only the last two
+milliseconds itself, to be on time; with the clock virtual it sleeps as
+before, since a wait there takes no time and would move the clock. The
+first title loads on other threads while its main thread turns a coin
+thirty times a second, and it had been loading in the moments between
+two sleeps: a level that took a hundred seconds to arrive takes
+fifty-five, and what is left of that is not the title's (LESSONS.md).
+
 A loop that only waits should not burn its slice first, and the emitter can
 tell one exactly: loads, compares, and a conditional branch back to the top,
 with every register the loop reads either untouched by it or loaded earlier

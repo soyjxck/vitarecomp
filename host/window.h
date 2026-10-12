@@ -56,4 +56,8 @@ void vita_window_title(const char *text);
 /* Sleep until the next sixtieth of a second since the last call. */
 void vita_window_pace(void);
 
+/* How long that sleep would be if it began now, in microseconds: for a host
+ * that has something better to do with most of it. */
+uint32_t vita_window_pace_left(void);
+
 #endif /* VITARECOMP_HOST_WINDOW_H */

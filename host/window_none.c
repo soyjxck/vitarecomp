@@ -16,3 +16,4 @@ void     vita_window_sticks(uint8_t xy[4]) { xy[0] = xy[1] = xy[2] = xy[3] = 128
 int      vita_window_closed(void) { return 0; }
 void     vita_window_title(const char *text) { (void)text; }
 void     vita_window_pace(void) { }
+uint32_t vita_window_pace_left(void) { return 0; }

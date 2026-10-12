@@ -90,6 +90,7 @@ static struct {
     tilt        tilts[16];
     int         tilt_count;
     uint32_t    frame;
+    int         virtual_clock;   /* --virtual-clock */
     int         window;          /* --window: show frames and read the keyboard */
     int         window_w, window_h;      /* --window-size, or nothing */
     int         fullscreen;      /* --fullscreen */
@@ -217,9 +218,9 @@ static int parse_stick(const char *s) {
     return 0;
 }
 
-/* The window's turn at a vertical blank: the frame the program is showing,
- * a title that says how fast it is flipping, and the wait for the next
- * sixtieth of a second. Closing the window ends the run. */
+/* The window's turn at a vertical blank: the frame the program is showing
+ * and a title that says how fast it is flipping. Closing the window ends
+ * the run. */
 static void window_vblank(void) {
     vita_framebuf fb;
     uint32_t width, height;
@@ -239,11 +240,25 @@ static void window_vblank(void) {
         g.shown_flips = flips;
         vita_window_title(title);
     }
-    vita_window_pace();
     if (vita_window_closed()) {
         fprintf(stderr, "vita_host: window closed at vblank %u\n", g.frame);
         finish(0);
     }
+}
+
+/* And the wait for the next sixtieth of a second. One thread of the
+ * program runs at a time (sched.h), and the one that waits for the
+ * vertical blank is the one that is here: a host asleep here is every
+ * thread of the program asleep, and a title that loads on other threads
+ * while this one draws a turning coin loads in the moments between two
+ * sleeps. So the wait is one the scheduler knows of, in which the other
+ * threads run, all but its last two milliseconds; those are slept out
+ * here, to be on time. With the clock virtual a wait takes no time and
+ * would move the clock, so there the host sleeps as it always has. */
+static void window_wait(void) {
+    uint32_t left = vita_window_pace_left();
+    if (!g.virtual_clock && left > 3000) vita_sched_delay(left - 2000);
+    vita_window_pace();
 }
 
 void vita_host_vblank(void) {
@@ -268,6 +283,8 @@ void vita_host_vblank(void) {
         fprintf(stderr, "vita_host: frame limit %u reached\n", g.frames_max);
         finish(0);
     }
+    /* last, when everything this vertical blank asked for is done: another thread may come through here meanwhile */
+    if (g.window) window_wait();
 }
 
 uint32_t vita_host_buttons(void) {
@@ -372,6 +389,7 @@ int vita_host_main(int argc, char **argv) {
             vita_trace_fns = 1;
         } else if (strcmp(argv[i], "--virtual-clock") == 0) {
             vita_clock_virtual();
+            g.virtual_clock = 1;
         } else if (strcmp(argv[i], "--window") == 0) {
             g.window = 1;
         } else if (strcmp(argv[i], "--window-size") == 0 && i + 1 < argc) {

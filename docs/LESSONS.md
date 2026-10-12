@@ -1205,3 +1205,33 @@ was learnt was on either side of it.
    covers it, and those were compared with the frames the host wrote to
    files: at twice the size, every pixel of the window the colour of its
    block and the frame matched to the byte.
+
+## A sleep with the baton in hand (2026-10-12)
+
+Every measurement of the first title had been made on the virtual clock,
+where a wait takes no time. Run by the real one, in a window, it took a
+hundred seconds to load its first level, and its first hundred frames
+took a tenth of a second each.
+
+1. **The host slept, and the program slept with it.** One thread of the
+   program runs at a time. The one that waits for the vertical blank
+   calls the host, and the host slept there until the next sixtieth of a
+   second, baton in hand; the threads that load were given one slice of
+   twenty thousand branches after each sleep. On the console the kernel
+   sleeps that thread and the others have the processors. The host now
+   waits through the scheduler. A hundred seconds became fifty-five,
+   and the first frames 33 ms.
+2. **A sleep was as long as the system's tick.** A program that has not
+   asked otherwise has its sleeps rounded up to a tick of fifteen
+   milliseconds, most of a sixtieth of a second. The frame rate had
+   held all the same, because the host counts sixtieths from where it
+   started and a late one is followed by a short one; what did not hold
+   was the time of any one frame. The host asks for a millisecond.
+3. **What was left was not the title's either.** A sample of the host's
+   threads through the fifty-five seconds found four fifths of the time
+   that was not waiting inside the system's shader compiler: each
+   program of the title is translated and compiled when a draw first
+   uses it, and a level's first frames use a great many for the first
+   time: twenty-nine seconds in all. The virtual clock had hidden that
+   as well, a frame there being a frame however long it took. Kept from
+   one run to the next, a compiled program is compiled once (PLAN.md).
