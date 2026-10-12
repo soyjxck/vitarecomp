@@ -109,6 +109,7 @@ add_library(vitarecomp STATIC
     src/gxm_tex.c
     src/gxm_draw.c
     src/gxm_gpu.c
+    src/gpu_tween.c
     src/symbols.c
 )
 

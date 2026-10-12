@@ -11,6 +11,7 @@
 #include "vitarecomp/recomp_rt.h"
 #include "sched.h"
 #include "gxm_surfaces.h"
+#include "gpu_tween.h"
 
 #include <stdlib.h>
 
@@ -63,6 +64,7 @@ void vita_hle_sceDisplaySetFrameBuf(void) {
     g_set = 1;
     g_flips++;
     g_set_vcount = g_vcount;
+    gpu_tween_flip();               /* what was drawn up to here is a frame */
     r0 = 0;
 }
 

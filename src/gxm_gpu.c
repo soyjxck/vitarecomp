@@ -15,6 +15,8 @@
 
 #include "gxm_gpu.h"
 #include "gpu.h"
+#define GPU_TWEEN_CALLER                    /* what is asked of the card from here on is written down first (gpu_tween.h) */
+#include "gpu_tween.h"
 #include "gxp_hlsl.h"
 #include "vitarecomp/mem.h"
 
@@ -1071,7 +1073,8 @@ int gxm_gpu_show(void *window, const void *bytes, uint32_t width, uint32_t heigh
     static struct { const colour_record *record; uint32_t version; } last;
     static int no_way;
     const uint8_t *lo = (const uint8_t *)bytes, *hi = lo + (size_t)pitch * height * 4;
-    if (gxm_gpu_mode() != GXM_GPU_DRAW || no_way || !window) return 0;
+    /* with no window there is nothing to show, unless frames between are made: those are looked at as files */
+    if (gxm_gpu_mode() != GXM_GPU_DRAW || no_way || (!window && !gpu_tween_on())) return 0;
     uint64_t began = now_ns();
     gpu_surface *shown = NULL;
     int fresh = 0;
@@ -2189,6 +2192,7 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
         /* a program that writes the target itself is told which channels (gxp_hlsl.h) */
         if (call.reads_pixel == 2) { uint32_t keep = call.write_mask; memcpy(&c[1].viewport[10], &keep, 4); }
         call.count = aside || q->tally != 0;
+        gpu_tween_about(&vp->gxp, s->vertex_buffers, c[0].memory);
         counted[i] = gpu_draw(&call);
         g_ns[P_DRAW] += now_ns() - lap;
     }

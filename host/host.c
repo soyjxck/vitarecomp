@@ -276,6 +276,7 @@ static void window_wait(void) {
 void vita_host_vblank(void) {
     g.frame++;
     if (g.window) window_vblank();
+    else vita_display_show(NULL, NULL, NULL);       /* a card that makes frames between makes them with no window too */
     if (g.sample_to) vita_sampler_run(g.frame >= g.sample_from && g.frame < g.sample_to);
     if (g.ran_to && g.frame == g.ran_from) vita_trace_fns = 2;
     if (g.ran_to && g.frame == g.ran_to) {
