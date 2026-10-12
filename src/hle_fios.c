@@ -89,6 +89,7 @@ typedef struct {
     int64_t  requested;
     uint32_t buffer;       /* the guest buffer, for sceFiosOpGetBuffer          */
     uint32_t attr;
+    int      asked;        /* the program has asked once whether it is over     */
 } op_entry;
 
 static fh_entry g_fh[MAX_FHS];
@@ -116,6 +117,7 @@ static uint32_t op_done(int32_t error, int64_t actual, int64_t requested, uint32
         if (g_op[i].used) continue;
         g_op[i].used = 1; g_op[i].error = error; g_op[i].actual = actual;
         g_op[i].requested = requested; g_op[i].buffer = buffer; g_op[i].attr = attr;
+        g_op[i].asked = 0;
         return (uint32_t)i + 1;
     }
     vita_trap_unimpl(0, MAX_OPS, "sceFios: too many undeleted ops");
@@ -906,11 +908,23 @@ static int32_t do_dclose(uint32_t h) {
 void vita_hle_sceFiosDHCloseSync(void) { r0 = (uint32_t)do_dclose(r1); }
 void vita_hle_sceFiosDHClose(void)     { r0 = op_done(do_dclose(r1), 0, 0, 0, r0); }
 
-/* --- operations, every one already finished ----------------------------------- */
+/* --- operations ---------------------------------------------------------------
+ * The work of every one is done by the time its handle is returned. What
+ * the program is told is another matter: on the console an operation is the
+ * library's own thread's to finish, and a program that asks about it in
+ * the instant it started it hears "not yet". A title can lean on that. One
+ * here starts a sound by opening and reading its file a step at each turn
+ * of its sound thread, and tells a "stop" that was sent just before the
+ * "play" from one sent after by whether the sound is still loading when
+ * the stop comes round again: were the file read all at once, every sound
+ * started that way would be stopped at its first breath. So the first time
+ * a program asks whether an operation is over, it is not; from the second
+ * time it is, and a wait for it returns at once. */
 
 /* int sceFiosOpSyncWait(SceFiosOp op): the op's error */
 void vita_hle_sceFiosOpSyncWait(void) {
     op_entry *o = op_get(r0);
+    if (o) o->asked = 1;
     r0 = o ? (uint32_t)o->error : SCE_FIOS_ERROR_BAD_OP;
 }
 
@@ -918,6 +932,7 @@ void vita_hle_sceFiosOpSyncWait(void) {
 void vita_hle_sceFiosOpSyncWaitForIO(void) {
     op_entry *o = op_get(r0);
     if (!o) { ret64((int64_t)(int32_t)SCE_FIOS_ERROR_BAD_OP); return; }
+    o->asked = 1;
     ret64(o->error ? (int64_t)o->error : o->actual);
 }
 
@@ -925,7 +940,11 @@ void vita_hle_sceFiosOpSyncWaitForIO(void) {
 void vita_hle_sceFiosOpWait(void) { vita_hle_sceFiosOpSyncWait(); }
 
 /* SceBool sceFiosOpIsDone(SceFiosOp op) */
-void vita_hle_sceFiosOpIsDone(void) { r0 = op_get(r0) ? 1u : 0u; }
+void vita_hle_sceFiosOpIsDone(void) {
+    op_entry *o = op_get(r0);
+    r0 = o && o->asked ? 1u : 0u;
+    if (o) o->asked = 1;
+}
 
 /* SceBool sceFiosOpIsCancelled(SceFiosOp op) */
 void vita_hle_sceFiosOpIsCancelled(void) { r0 = 0; }
