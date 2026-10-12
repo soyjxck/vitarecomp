@@ -44,6 +44,23 @@ uint32_t vita_dispatch_floor(uint32_t addr) {
 uint32_t vita_dispatch_hits(void)   { return g_hits; }
 uint32_t vita_dispatch_misses(void) { return g_misses; }
 
+/* The host's own functions (dispatch.h), a word apart at the very top of
+ * the address space, where nothing of a program's is. They are few and are
+ * looked for only once the table has missed. */
+#define HOST_FIRST 0xFFFF0000u
+#define HOST_MOST  16u
+
+static vita_fn g_host[HOST_MOST];
+static uint32_t g_host_count;
+
+uint32_t vita_dispatch_host(vita_fn fn) {
+    for (uint32_t i = 0; i < g_host_count; i++)
+        if (g_host[i] == fn) return HOST_FIRST + 4 * i;
+    if (g_host_count == HOST_MOST) return 0;
+    g_host[g_host_count] = fn;
+    return HOST_FIRST + 4 * g_host_count++;
+}
+
 void vita_dispatch(uint32_t from, uint32_t addr) {
     /* Bit 0 marks the instruction set, not the address. Every pointer to Thumb
      * code carries it, so failing to mask means every lookup misses by one. */
@@ -58,6 +75,12 @@ void vita_dispatch(uint32_t from, uint32_t addr) {
             return;
         }
         if (g_table[mid].addr < key) lo = mid + 1; else hi = mid;
+    }
+
+    if (key >= HOST_FIRST && !(key & 3) && (key - HOST_FIRST) / 4 < g_host_count) {
+        g_hits++;
+        g_host[(key - HOST_FIRST) / 4]();
+        return;
     }
 
     g_misses++;

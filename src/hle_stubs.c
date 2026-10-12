@@ -335,38 +335,4 @@ void vita_hle_sceNpTrophyGetGameInfo(void) {
     r0 = 0;
 }
 
-/* --- the movie player --------------------------------------------------------------------
- *
- * SceAvPlayer plays a file a program names and hands back its frames and its
- * sound a piece at a time, for the program to draw and to play. There is no
- * decoder behind it yet, so a player is made and the source it is given is
- * refused as one it cannot play. That refusal matters: a program that is
- * told its source was taken waits for the player to say it is ready (an
- * event, through a callback the program passed in), and here nothing would
- * ever say so. Told no, it closes the player and goes on to what comes
- * after the movie. The rest answer for a player that is not playing. */
-#define SCE_AVPLAYER_ERROR_NOT_SUPPORTED 0x806A0004u
-
-void vita_hle_sceAvPlayerInit(void) {
-    vita_hle_trace("sceAvPlayerInit(0x%08X)", r0);
-    r0 = 0x41560001u;
-}
-void vita_hle_sceAvPlayerAddSource(void) {
-    const char *s = vita_mem_avail(r1) ? (const char *)vita_mem_ptr(r1, 1) : NULL;
-    vita_hle_trace("sceAvPlayerAddSource(\"%.200s\"): no movie is played", s ? s : "");
-    r0 = SCE_AVPLAYER_ERROR_NOT_SUPPORTED;
-}
-void vita_hle_sceAvPlayerStart(void)         { r0 = 0; }
-void vita_hle_sceAvPlayerStop(void)          { r0 = 0; }
-void vita_hle_sceAvPlayerPause(void)         { r0 = 0; }
-void vita_hle_sceAvPlayerResume(void)        { r0 = 0; }
-void vita_hle_sceAvPlayerClose(void)         { r0 = 0; }
-void vita_hle_sceAvPlayerIsActive(void)      { r0 = 0; }
-void vita_hle_sceAvPlayerStreamCount(void)   { r0 = 0; }
-void vita_hle_sceAvPlayerEnableStream(void)  { r0 = 0; }
-void vita_hle_sceAvPlayerDisableStream(void) { r0 = 0; }
-void vita_hle_sceAvPlayerGetStreamInfo(void) { r0 = 0x806A0001u; }   /* an invalid argument: there is no such stream */
-void vita_hle_sceAvPlayerGetVideoData(void)  { r0 = 0; }
-void vita_hle_sceAvPlayerGetAudioData(void)  { r0 = 0; }
-void vita_hle_sceAvPlayerSetLooping(void)    { r0 = 0; }
-void vita_hle_sceAvPlayerCurrentTime(void)   { r0 = 0; r1 = 0; }
+/* The movie player, SceAvPlayer, is in hle_avplayer.c. */

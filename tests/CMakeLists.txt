@@ -117,6 +117,10 @@ if(NOT MSVC)
 endif()
 add_test(NAME gxm_tex COMMAND test_gxm_tex)
 
+add_executable(test_mp4 test_mp4.c ${CMAKE_SOURCE_DIR}/src/mp4.c)
+target_compile_options(test_mp4 PRIVATE -UNDEBUG)
+add_test(NAME mp4 COMMAND test_mp4)
+
 add_executable(test_pool test_pool.c ${CMAKE_SOURCE_DIR}/src/pool.c)
 target_compile_options(test_pool PRIVATE -UNDEBUG)
 if(NOT WIN32)

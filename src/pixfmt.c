@@ -230,6 +230,38 @@ float pix_linear_to_srgb(float v) {
     return v <= 0.0031308f ? v * 12.92f : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f;
 }
 
+/* --- brightness and colour differences (pixfmt.h) ------------------------------------
+ * Brightness is a weighted sum of red, green and blue, the weights being
+ * what the standard says an eye gives each; a difference is a colour less
+ * the brightness, scaled to fill its range. Undone: red is brightness plus
+ * so much of the red difference, blue likewise, and green is what is left
+ * of the brightness once red and blue have had their shares. */
+
+static pix_yuv g_yuv[4];
+static int g_yuv_made;
+
+const pix_yuv *pix_yuv_for(unsigned profile) {
+    static const double RED[2] = { 0.299, 0.2126 }, BLUE[2] = { 0.114, 0.0722 };      /* BT.601's weights, BT.709's */
+    /* Safe from several threads at once, as the tables below are. */
+    if (!g_yuv_made) {
+        for (unsigned p = 0; p < 4; p++) {
+            const double kr = RED[p & 1], kb = BLUE[p & 1], kg = 1.0 - kr - kb;
+            const int whole = p >= 2;
+            const double per_y = whole ? 1.0 : 255.0 / 219.0, per_c = whole ? 1.0 : 255.0 / 224.0;
+            for (int i = 0; i < 256; i++) {
+                const double l = (double)(i - (whole ? 0 : 16)) * per_y, c = (double)(i - 128) * per_c;
+                g_yuv[p].y[i]  = (int32_t)lround(l * 65536.0) + 32768;
+                g_yuv[p].rv[i] = (int32_t)lround(c * 2.0 * (1.0 - kr) * 65536.0);
+                g_yuv[p].bu[i] = (int32_t)lround(c * 2.0 * (1.0 - kb) * 65536.0);
+                g_yuv[p].gv[i] = (int32_t)lround(-c * 2.0 * (1.0 - kr) * kr / kg * 65536.0);
+                g_yuv[p].gu[i] = (int32_t)lround(-c * 2.0 * (1.0 - kb) * kb / kg * 65536.0);
+            }
+        }
+        g_yuv_made = 1;
+    }
+    return &g_yuv[profile & 3];
+}
+
 /* --- converting -------------------------------------------------------------------- */
 
 static uint64_t field_mask(int bits) { return bits >= 64 ? ~0ull : (1ull << bits) - 1; }

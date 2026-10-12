@@ -25,9 +25,11 @@ enum {
     GXM_TEX_SWIZZLED_ARBITRARY = 5, GXM_TEX_LINEAR_STRIDED = 6, GXM_TEX_CUBE_ARBITRARY = 7
 };
 
-/* How the texels of a level are stored. */
+/* How the texels of a level are stored. The last is a movie's picture: a
+ * plane of brightness and, at half the size each way, the two colour
+ * differences, in a plane each or side by side in one (pixfmt.h). */
 enum { GXM_TEX_PLAIN = 0, GXM_TEX_BC1, GXM_TEX_BC2, GXM_TEX_BC3, GXM_TEX_BC4, GXM_TEX_BC5,
-       GXM_TEX_PALETTE4, GXM_TEX_PALETTE8, GXM_TEX_PVRTC, GXM_TEX_UNKNOWN };
+       GXM_TEX_PALETTE4, GXM_TEX_PALETTE8, GXM_TEX_PVRTC, GXM_TEX_UNKNOWN, GXM_TEX_YUV420 };
 
 typedef struct {
     /* read from the control words */
@@ -57,6 +59,14 @@ typedef struct {
      * through pixfmt_decode. */
     uint8_t  quick;
     struct { uint8_t shift, how; uint32_t mask; const float *table; float scale; } q[4];
+    /* For a picture in planes: how many bytes a row of brightness is, where
+     * the colour differences begin, how far the second difference of a
+     * block lies from the first (one byte when they are side by side, a
+     * plane when each has its own), whether the blue one is the first, and
+     * the arithmetic that makes a colour of the three. */
+    uint8_t  yuv_blue_first;
+    uint32_t yuv_row, yuv_at, yuv_step;
+    const pix_yuv *yuv;
     uint32_t level_w[GXM_TEX_LEVELS], level_h[GXM_TEX_LEVELS];      /* texels */
     uint32_t store_w[GXM_TEX_LEVELS], store_h[GXM_TEX_LEVELS];      /* units, as laid out */
     uint32_t level_at[GXM_TEX_LEVELS];      /* bytes from the start of a face */
@@ -93,6 +103,12 @@ extern int gxm_tex_plain_paths;
  * differ between them is everything else. */
 extern int gxm_tex_one_level;
 
+/* The two conversions a picture in planes can name ("CSC0", "CSC1"): each
+ * one of pixfmt.h's four, a title's to change (sceGxmSetYuvProfile). As the
+ * console starts, the first is BT.601 and the second BT.709, both over the
+ * studio's range. */
+extern uint8_t gxm_tex_yuv_profile[2];
+
 /* Forget what a cache holds: before it is used for another texture, or
  * when the texture's bytes may have changed. */
 void gxm_tex_cache_reset(gxm_tex_cache *c);
@@ -101,13 +117,15 @@ void gxm_tex_cache_reset(gxm_tex_cache *c);
  * (a zero size); the texture is otherwise ready for `base` to be set. */
 int gxm_tex_decode(gxm_tex *t, const uint32_t words[4]);
 
-/* Whether the format is one gxm_tex_unpack decodes: blocks of some kind. */
+/* Whether the format is one gxm_tex_unpack decodes: blocks of some kind, or
+ * a picture in planes. */
 int gxm_tex_is_packed(const gxm_tex *t);
 
 /* Decode rows of blocks row0 <= row < row1 of one face of one level into
  * `out`, which holds that face of the level whole: level_w by level_h
- * words, row by row. The rows of blocks of a level are store_h[level].
- * Different rows may be decoded by different threads. */
+ * words, row by row. The rows of blocks of a level are store_h[level]; of
+ * a picture in planes they are its rows of texels. Different rows may be
+ * decoded by different threads. */
 void gxm_tex_unpack(const gxm_tex *t, unsigned face, unsigned level, uint32_t row0, uint32_t row1, uint32_t *out);
 
 /* One texel, unfiltered, in the channel order the format's swizzle gives.

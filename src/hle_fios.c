@@ -22,6 +22,7 @@
 #include "vitarecomp/hle.h"
 #include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
+#include "hle_fios.h"
 #include "hle_vfs.h"
 #include "psarc.h"
 
@@ -531,6 +532,46 @@ void vita_hle_sceFiosFHStatSync(void) {
     if (!e) { r0 = SCE_FIOS_ERROR_BAD_FH; return; }
     if (e->af) { r0 = write_stat_packed(r2, psarc_file_size(e->af), 0) ? SCE_FIOS_OK : SCE_FIOS_ERROR_BAD_ARG; return; }
     r0 = write_stat(r2, e->path) ? SCE_FIOS_OK : SCE_FIOS_ERROR_BAD_ARG;
+}
+
+/* --- the same files, for the runtime's own reading (hle_fios.h) ---------------------- */
+
+struct vita_fios_file {
+    FILE       *f;          /* a file of the host's, or */
+    psarc_file *af;         /* one inside an archive */
+    uint64_t    size;
+};
+
+vita_fios_file *vita_fios_open(const char *guest_path) {
+    where w;
+    if (!locate(guest_path, &w, 0) || w.kind == 3) return NULL;
+    vita_fios_file *file = (vita_fios_file *)calloc(1, sizeof *file);
+    if (!file) return NULL;
+    if (w.kind == 2) {
+        file->af = psarc_file_open(w.arc, w.index);
+        if (file->af) file->size = psarc_file_size(file->af);
+    } else {
+        file->f = fopen(w.host, "rb");
+        if (file->f && !fios_seek(file->f, 0, SEEK_END)) file->size = (uint64_t)fios_tell(file->f);
+    }
+    if (!file->af && !file->f) { free(file); return NULL; }
+    return file;
+}
+
+void vita_fios_close(vita_fios_file *file) {
+    if (!file) return;
+    if (file->f) fclose(file->f);
+    psarc_file_close(file->af);
+    free(file);
+}
+
+uint64_t vita_fios_size(const vita_fios_file *file) { return file->size; }
+
+int64_t vita_fios_read(vita_fios_file *file, uint64_t offset, void *dst, uint32_t length) {
+    if (file->af) return psarc_file_read(file->af, offset, dst, length);
+    if (offset >= file->size) return 0;
+    if (fios_seek(file->f, (int64_t)offset, SEEK_SET)) return -1;
+    return (int64_t)fread(dst, 1, length, file->f);
 }
 
 /* --- paths ------------------------------------------------------------------------ */

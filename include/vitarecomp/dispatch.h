@@ -38,6 +38,14 @@ void vita_dispatch_init(const vita_dispatch_entry *table, uint32_t count);
  * only question a miss ever raises. */
 void vita_dispatch(uint32_t from, uint32_t addr);
 
+/* A function of the host's at a guest address of its own, for what the
+ * runtime gives a program to call or starts a thread of its own at (the
+ * movie player's, which runs a title's callbacks): a transfer to the
+ * address calls `fn`. The address is one no module is loaded at, and the
+ * same function asked for again has the same one. 0 when there is no room
+ * for another. */
+uint32_t vita_dispatch_host(vita_fn fn);
+
 /* How many distinct addresses were dispatched to, and how many missed. Useful
  * for telling "the table is incomplete" from "the program went somewhere it
  * should not have". */

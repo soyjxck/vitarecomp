@@ -18,6 +18,7 @@ static float g_unorm8[256], g_srgb8[256], g_zero8[256], g_one8[256];
 
 int gxm_tex_plain_paths;
 int gxm_tex_one_level;
+uint8_t gxm_tex_yuv_profile[2] = { PIX_YUV_BT601, PIX_YUV_BT709 };
 
 static void tables(void) {
     static int made;
@@ -178,6 +179,24 @@ int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
         break;
     case 0x94000000u: t->kind = GXM_TEX_PALETTE4; t->unit_bytes = 1; pixfmt_texture(0x0C000000u | swizzle, &t->pf); break;
     case 0x95000000u: t->kind = GXM_TEX_PALETTE8; t->unit_bytes = 1; pixfmt_texture(0x0C000000u | swizzle, &t->pf); break;
+    case 0x90000000u:
+    case 0x91000000u:
+        /* A picture in planes, which is rows and one level or nothing this
+         * reads. What a texel decodes to is four bytes with red lowest. The
+         * format's other three bits are not an order of channels: one picks
+         * the conversion, and one says which colour difference is first.
+         * The names run the other way from what is in memory where the two
+         * share a plane, as the names of channels do: "YVU" there is the
+         * blue difference first, which is what a decoder leaves ("NV12");
+         * with a plane each, "YUV" is the blue one's plane first. */
+        t->kind = t->type == GXM_TEX_LINEAR ? GXM_TEX_YUV420 : GXM_TEX_UNKNOWN;
+        t->unit_bytes = 1;
+        levels = 1;
+        pixfmt_texture(0x0C000000u, &t->pf);
+        t->yuv_step = (t->format & 0x01000000u) ? 0 : 1;        /* a plane each: its size is known below */
+        t->yuv_blue_first = (uint8_t)((((swizzle >> 12) & 1) != 0) == (t->yuv_step != 0));
+        t->yuv = pix_yuv_for(gxm_tex_yuv_profile[(swizzle >> 13) & 1]);
+        break;
     default:
         if (pixfmt_texture(t->format, &t->pf)) { t->kind = GXM_TEX_PLAIN; t->unit_bytes = t->pf.bytes; }
         else { t->kind = GXM_TEX_UNKNOWN; t->unit_bytes = 1; levels = 1; }
@@ -231,6 +250,17 @@ int gxm_tex_decode(gxm_tex *t, const uint32_t w[4]) {
     }
     t->bytes = offset;
     if (t->type == GXM_TEX_LINEAR_STRIDED) t->bytes = t->stride * t->height;
+    if (t->kind == GXM_TEX_YUV420) {
+        /* The level laid out above is the plane of brightness. The colour
+         * differences follow the room it takes: half as many rows, of the
+         * same length when a row is pairs of them, of half when each
+         * difference has a plane of its own. */
+        uint32_t rows = (layout_h + 1) / 2;
+        t->yuv_row = t->store_w[0];
+        t->yuv_at = offset;
+        if (!t->yuv_step) t->yuv_step = t->yuv_row / 2 * rows;
+        t->bytes = offset + t->yuv_row * rows;
+    }
     if (t->cube) {
         uint32_t bits = (uint32_t)t->unit_bytes * 8 / unit_texels;
         int block = unit_texels > 1;
@@ -255,6 +285,18 @@ static void decode_block(const gxm_tex *t, const uint8_t *block, uint32_t out[16
     }
 }
 
+/* One texel of a picture in planes, as a word of four bytes with red
+ * lowest: its own brightness, and the colour differences of the two-by-two
+ * block it lies in. Nothing, where its bytes are not all there. */
+static uint32_t yuv_texel(const gxm_tex *t, uint32_t x, uint32_t y) {
+    uint64_t bright = (uint64_t)y * t->yuv_row + x, first, second;
+    if (t->yuv_step == 1) first = t->yuv_at + (uint64_t)(y / 2) * t->yuv_row + (x & ~1u);
+    else first = t->yuv_at + (uint64_t)(y / 2) * (t->yuv_row / 2) + x / 2;
+    second = first + t->yuv_step;
+    if (bright >= t->avail || second >= t->avail) return 0;
+    return pix_yuv_word(t->yuv, t->base[bright], t->base[t->yuv_blue_first ? first : second], t->base[t->yuv_blue_first ? second : first]);
+}
+
 void gxm_tex_texel(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsigned level, int x, int y, float rgba[4]) {
     uint32_t scratch[32], *block = scratch;
     rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0.0f;
@@ -264,6 +306,11 @@ void gxm_tex_texel(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsign
     if (t->plain[level]) {
         size_t w = t->level_w[level], h = t->level_h[level];
         bytes_texel(t, t->plain[level][((size_t)face * h + (size_t)y) * w + (size_t)x], rgba);
+        return;
+    }
+    if (t->kind == GXM_TEX_YUV420) {
+        uint32_t word = yuv_texel(t, (uint32_t)x, (uint32_t)y);
+        if (word) bytes_texel(t, word, rgba);
         return;
     }
 
@@ -342,7 +389,29 @@ void gxm_tex_texel(const gxm_tex *t, gxm_tex_cache *cache, unsigned face, unsign
 }
 
 int gxm_tex_is_packed(const gxm_tex *t) {
-    return (t->kind >= GXM_TEX_BC1 && t->kind <= GXM_TEX_BC5) || t->kind == GXM_TEX_PVRTC;
+    return (t->kind >= GXM_TEX_BC1 && t->kind <= GXM_TEX_BC5) || t->kind == GXM_TEX_PVRTC || t->kind == GXM_TEX_YUV420;
+}
+
+/* Rows of a picture in planes as words: what yuv_texel gives each texel,
+ * without asking of each where its bytes are when the whole picture is
+ * known to be there. */
+static void yuv_rows(const gxm_tex *t, uint32_t row0, uint32_t row1, uint32_t *out) {
+    const uint32_t w = t->level_w[0], pairs = t->yuv_step == 1;
+    const int whole = t->bytes <= t->avail;
+    for (uint32_t y = row0; y < row1; y++) {
+        uint32_t *to = out + (size_t)y * w;
+        if (!whole) {
+            for (uint32_t x = 0; x < w; x++) to[x] = yuv_texel(t, x, y);
+            continue;
+        }
+        const uint8_t *bright = t->base + (size_t)y * t->yuv_row;
+        const uint8_t *first = t->base + t->yuv_at + (size_t)(y / 2) * (pairs ? t->yuv_row : t->yuv_row / 2);
+        const uint8_t *u = t->yuv_blue_first ? first : first + t->yuv_step, *v = t->yuv_blue_first ? first + t->yuv_step : first;
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t c = pairs ? x & ~1u : x / 2;
+            to[x] = pix_yuv_word(t->yuv, bright[x], u[c], v[c]);
+        }
+    }
 }
 
 void gxm_tex_unpack(const gxm_tex *t, unsigned face, unsigned level, uint32_t row0, uint32_t row1, uint32_t *out) {
@@ -351,6 +420,7 @@ void gxm_tex_unpack(const gxm_tex *t, unsigned face, unsigned level, uint32_t ro
     uint32_t block[32];
     if (!gxm_tex_is_packed(t) || !t->base || level >= t->levels) return;
     if (row1 > ny) row1 = ny;
+    if (t->kind == GXM_TEX_YUV420) { yuv_rows(t, row0, row1, out); return; }
     int whole = at + (uint64_t)nx * ny * t->unit_bytes <= t->avail;        /* PVRTC reads around each block */
     for (uint32_t by = row0; by < row1; by++)
         for (uint32_t bx = 0; bx < nx; bx++) {

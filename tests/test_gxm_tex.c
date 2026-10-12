@@ -444,10 +444,127 @@ static void test_fast_ways(void) {
     printf("  the fast ways and the general  ok\n");
 }
 
+/* --- a movie's picture: brightness in a plane, the colour differences at half the size -------- */
+
+/* A texel as the word of four bytes it was made from, red lowest. */
+static uint32_t texel_word(int x, int y) {
+    float c[4];
+    uint32_t word = 0;
+    gxm_tex_texel(&t, &cache, 0, 0, x, y, c);
+    for (int k = 0; k < 4; k++) word |= (uint32_t)(c[k] * 255.0f + 0.5f) << (8 * k);
+    return word;
+}
+
+static void test_planes(void) {
+    static uint32_t unpacked[64 * 64];
+    uint32_t w[4];
+    float c[4];
+    const pix_yuv *sd = pix_yuv_for(PIX_YUV_BT601), *hd = pix_yuv_for(PIX_YUV_BT709);
+
+    /* Two planes, as a decoder leaves a picture and the console's player
+     * hands it on, 12 by 6 and declared without a chain: a row is the width
+     * rounded up to eight, and the differences begin where the six rows end. */
+    memset(store, 0, sizeof(store));
+    words(w, GXM_TEX_LINEAR, 0x90003000u, 12, 6, 16, 0, 2);                    /* "YVU", the second conversion */
+    open_texture(w);
+    assert(t.kind == GXM_TEX_YUV420 && t.levels == 1 && gxm_tex_is_packed(&t));
+    assert(t.yuv_row == 16 && t.yuv_at == 16 * 6 && t.yuv_step == 1 && t.bytes == 16 * 6 + 16 * 3);
+    /* texel (5, 3) has its own brightness and the differences of block (2, 1), the blue one first: BT.709's red */
+    store[3 * 16 + 5] = 63;
+    store[96 + 1 * 16 + 4] = 102;
+    store[96 + 1 * 16 + 5] = 240;
+    assert(texel_word(5, 3) == pix_yuv_word(hd, 63, 102, 240));
+    gxm_tex_texel(&t, &cache, 0, 0, 5, 3, c);
+    assert(c[0] > 0.99f && c[1] < 0.01f && c[2] < 0.01f && c[3] == 1.0f);
+    /* the other three of the block share the differences and have their own brightness; the next block has its own of both */
+    assert(texel_word(4, 3) == pix_yuv_word(hd, 0, 102, 240) && texel_word(5, 2) == pix_yuv_word(hd, 0, 102, 240));
+    assert(texel_word(6, 3) == pix_yuv_word(hd, 0, 0, 0) && texel_word(5, 4) == pix_yuv_word(hd, 0, 0, 0));
+    /* named the other way round, the same bytes are the red difference first: BT.709's blue, nearly */
+    words(w, GXM_TEX_LINEAR, 0x90002000u, 12, 6, 16, 0, 2);                    /* "YUV" */
+    open_texture(w);
+    assert(texel_word(5, 3) == pix_yuv_word(hd, 63, 240, 102));
+    /* and by the first conversion, BT.601, the same numbers are another colour */
+    words(w, GXM_TEX_LINEAR, 0x90001000u, 12, 6, 16, 0, 2);
+    open_texture(w);
+    assert(texel_word(5, 3) == pix_yuv_word(sd, 63, 102, 240) && texel_word(5, 3) != pix_yuv_word(hd, 63, 102, 240));
+    /* which a title may point elsewhere: the whole range, where 255 is white and 63 a dark grey */
+    gxm_tex_yuv_profile[0] = PIX_YUV_BT601_FULL;
+    open_texture(w);
+    store[0] = 255; store[1] = 63; store[96] = store[97] = 128;
+    assert(texel_word(0, 0) == 0xFFFFFFFFu && texel_word(1, 0) == 0xFF3F3F3Fu);
+    gxm_tex_yuv_profile[0] = PIX_YUV_BT601;
+
+    /* Three planes: the blue differences in a plane of half-length rows, then the red, or named the other way the red first */
+    memset(store, 0, sizeof(store));
+    words(w, GXM_TEX_LINEAR, 0x91002000u, 12, 6, 16, 0, 2);                    /* "YUV", three planes */
+    open_texture(w);
+    assert(t.kind == GXM_TEX_YUV420 && t.yuv_row == 16 && t.yuv_at == 96 && t.yuv_step == 8 * 3 && t.bytes == 96 + 2 * 24);
+    store[3 * 16 + 5] = 63;
+    store[96 + 1 * 8 + 2] = 102;
+    store[96 + 24 + 1 * 8 + 2] = 240;
+    assert(texel_word(5, 3) == pix_yuv_word(hd, 63, 102, 240) && texel_word(4, 2) == pix_yuv_word(hd, 0, 102, 240));
+    words(w, GXM_TEX_LINEAR, 0x91003000u, 12, 6, 16, 0, 2);                    /* "YVU" */
+    open_texture(w);
+    assert(texel_word(5, 3) == pix_yuv_word(hd, 63, 240, 102));
+
+    /* declared with a chain, the planes are as far apart as the sides rounded up to powers of two make them */
+    words(w, GXM_TEX_LINEAR, 0x90003000u, 12, 6, 1, 0, 2);
+    open_texture(w);
+    assert(t.levels == 1 && t.yuv_row == 16 && t.yuv_at == 16 * 8 && t.bytes == 16 * 8 + 16 * 4);
+    /* and in any layout but rows it is nothing this reads */
+    words(w, GXM_TEX_SWIZZLED, 0x90003000u, 16, 8, 1, 0, 2);
+    open_texture(w);
+    assert(t.kind == GXM_TEX_UNKNOWN);
+
+    /* A whole picture of noise, 37 by 21: decoded in rows it is what the
+     * texels are one at a time, a filtered sample is the blend of four of
+     * them, and cut short it is nothing past the cut. */
+    for (size_t i = 0; i < sizeof(store); i++) store[i] = (uint8_t)rnd();
+    for (uint32_t format = 0x90000000u; format <= 0x91003000u; format += format == 0x90003000u ? 0x00FFD000u : 0x1000u) {
+        const int two = !(format & 0x01000000u), blue_first = two == (int)((format >> 12) & 1);
+        const pix_yuv *m = pix_yuv_for(gxm_tex_yuv_profile[(format >> 13) & 1]);
+        words(w, GXM_TEX_LINEAR, format, 37, 21, 16, 1, 2);
+        open_texture(w);
+        assert(t.kind == GXM_TEX_YUV420 && t.yuv_row == 40 && t.bytes == 40 * 21 + 40 * 11);
+        gxm_tex_unpack(&t, 0, 0, 0, 11, unpacked);
+        gxm_tex_unpack(&t, 0, 0, 11, 21, unpacked);
+        for (int y = 0; y < 21; y++)
+            for (int x = 0; x < 37; x++) {
+                uint32_t first = two ? 840u + (uint32_t)(y / 2) * 40 + ((uint32_t)x & ~1u) : 840u + (uint32_t)(y / 2) * 20 + (uint32_t)x / 2;
+                uint32_t second = first + (two ? 1u : 220u);
+                uint32_t want = pix_yuv_word(m, store[y * 40 + x], store[blue_first ? first : second], store[blue_first ? second : first]);
+                assert(texel_word(x, y) == want && unpacked[y * 37 + x] == want);
+            }
+        float uv[2] = { 10.0f / 37.0f, 10.0f / 21.0f }, blend[4], corner[4][4];
+        gxm_tex_sample(&t, &cache, uv, 0.0f, blend);                    /* on the corner where four texels meet */
+        gxm_tex_texel(&t, &cache, 0, 0, 9, 9, corner[0]);
+        gxm_tex_texel(&t, &cache, 0, 0, 10, 9, corner[1]);
+        gxm_tex_texel(&t, &cache, 0, 0, 9, 10, corner[2]);
+        gxm_tex_texel(&t, &cache, 0, 0, 10, 10, corner[3]);
+        for (int k = 0; k < 4; k++)
+            assert(fabsf(blend[k] - (corner[0][k] + corner[1][k] + corner[2][k] + corner[3][k]) / 4.0f) < 1e-3f);
+        /* with the decoded rows attached, as a renderer keeps them, the answers are the same */
+        float direct[4], kept[4];
+        gxm_tex_sample(&t, &cache, uv, 0.0f, direct);
+        t.plain[0] = unpacked;
+        gxm_tex_sample(&t, &cache, uv, 0.0f, kept);
+        assert(!memcmp(direct, kept, sizeof(direct)));
+        t.plain[0] = NULL;
+        t.avail = two ? 840 + 40 * 5 : 840 + 220 + 20 * 5;              /* the differences of the first ten rows and no more */
+        assert(texel_word(3, 9) != 0 && texel_word(3, 10) == 0);
+        memset(unpacked, 0xAA, sizeof(unpacked));
+        gxm_tex_unpack(&t, 0, 0, 0, 21, unpacked);
+        assert(unpacked[9 * 37 + 3] == texel_word(3, 9) && unpacked[10 * 37 + 3] == 0);
+    }
+    memset(&t, 0, sizeof(t));
+    printf("  a picture in planes            ok\n");
+}
+
 int main(void) {
     printf("gxm_tex:\n");
     test_layouts();
     test_blocks_and_palettes();
+    test_planes();
     test_samples();
     test_cube();
     test_fast_ways();

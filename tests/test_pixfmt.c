@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef NDEBUG
@@ -198,6 +199,54 @@ static void test_halves(void) {
     printf("  four halves by lookup          ok\n");
 }
 
+/* A picture's pixel from its brightness and two colour differences, by the
+ * two standards and over the two ranges. */
+static int within(uint32_t word, int r, int g, int b, int by) {
+    int dr = (int)(word & 255) - r, dg = (int)((word >> 8) & 255) - g, db = (int)((word >> 16) & 255) - b;
+    return abs(dr) <= by && abs(dg) <= by && abs(db) <= by && (word >> 24) == 255;
+}
+
+static void test_yuv(void) {
+    /* the studio's white and black, and what lies beyond them, by either set of weights */
+    for (unsigned p = PIX_YUV_BT601; p <= PIX_YUV_BT709; p++) {
+        const pix_yuv *t = pix_yuv_for(p);
+        assert(pix_yuv_word(t, 235, 128, 128) == 0xFFFFFFFFu && pix_yuv_word(t, 255, 128, 128) == 0xFFFFFFFFu);
+        assert(pix_yuv_word(t, 16, 128, 128) == 0xFF000000u && pix_yuv_word(t, 0, 128, 128) == 0xFF000000u);
+        assert(within(pix_yuv_word(t, 126, 128, 128), 128, 128, 128, 0));          /* half way up is half grey */
+    }
+    /* over the whole range a byte of brightness is the byte of grey */
+    for (unsigned p = PIX_YUV_BT601_FULL; p <= PIX_YUV_BT709_FULL; p++) {
+        const pix_yuv *t = pix_yuv_for(p);
+        for (unsigned y = 0; y < 256; y++) assert(within(pix_yuv_word(t, y, 128, 128), (int)y, (int)y, (int)y, 0));
+    }
+    /* the primaries as each standard's colour bars code them */
+    const pix_yuv *sd = pix_yuv_for(PIX_YUV_BT601), *hd = pix_yuv_for(PIX_YUV_BT709);
+    assert(within(pix_yuv_word(sd, 81, 90, 240), 255, 0, 0, 2) && within(pix_yuv_word(hd, 63, 102, 240), 255, 0, 0, 2));
+    assert(within(pix_yuv_word(sd, 145, 54, 34), 0, 255, 0, 2) && within(pix_yuv_word(hd, 173, 42, 26), 0, 255, 0, 2));
+    assert(within(pix_yuv_word(sd, 41, 240, 110), 0, 0, 255, 2) && within(pix_yuv_word(hd, 32, 240, 118), 0, 0, 255, 2));
+    /* and one standard's red read by the other's weights is not red: too little of it, and green in it */
+    assert(!within(pix_yuv_word(hd, 81, 90, 240), 255, 0, 0, 8) && !within(pix_yuv_word(sd, 63, 102, 240), 255, 0, 0, 8));
+
+    /* every profile against the arithmetic written out, on a grid of all three bytes */
+    static const double RED[2] = { 0.299, 0.2126 }, BLUE[2] = { 0.114, 0.0722 };
+    for (unsigned p = 0; p < 4; p++) {
+        const pix_yuv *t = pix_yuv_for(p);
+        const double kr = RED[p & 1], kb = BLUE[p & 1], kg = 1.0 - kr - kb;
+        for (unsigned y = 0; y < 256; y += 5)
+            for (unsigned u = 0; u < 256; u += 15)
+                for (unsigned v = 0; v < 256; v += 17) {
+                    double l = p >= 2 ? (double)y : ((double)y - 16.0) * 255.0 / 219.0;
+                    double cb = ((double)u - 128.0) * (p >= 2 ? 1.0 : 255.0 / 224.0), cr = ((double)v - 128.0) * (p >= 2 ? 1.0 : 255.0 / 224.0);
+                    /* red and blue are the brightness and their difference; green is what the brightness has left */
+                    double r = l + 2.0 * (1.0 - kr) * cr, b = l + 2.0 * (1.0 - kb) * cb, g = l - (kr * (r - l) + kb * (b - l)) / kg;
+                    int want[3] = { (int)floor(r + 0.5), (int)floor(g + 0.5), (int)floor(b + 0.5) };
+                    for (int k = 0; k < 3; k++) want[k] = want[k] < 0 ? 0 : want[k] > 255 ? 255 : want[k];
+                    assert(within(pix_yuv_word(t, y, u, v), want[0], want[1], want[2], 1));
+                }
+    }
+    printf("  brightness and differences     ok\n");
+}
+
 int main(void) {
     printf("pixfmt:\n");
     test_bytes();
@@ -205,6 +254,7 @@ int main(void) {
     test_floats();
     test_colour();
     test_halves();
+    test_yuv();
     printf("all pixfmt tests passed\n");
     return 0;
 }

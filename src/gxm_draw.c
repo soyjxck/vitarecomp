@@ -156,8 +156,12 @@ static uint64_t stamp(const gxm_tex *t) {
     uint32_t n = t->bytes < t->avail ? t->bytes : t->avail;
     uint64_t h = 1469598103934665603ull ^ n, word;
     if (n < 16) return h;
-    /* all of a small one; of a large one, 256 places spread over it */
-    uint32_t places = n <= 4096 ? n / 8 : 256, step = n <= 4096 ? 8 : (n - 8) / 255;
+    /* All of a small one; of a large one, 256 places spread over it. And
+     * all of a movie's picture: the player hands a title the same few
+     * buffers round and round, and one picture of a still scene differs
+     * from the last to be in its buffer in a few places that 256 can miss. */
+    int all = n <= 4096 || t->kind == GXM_TEX_YUV420;
+    uint32_t places = all ? n / 8 : 256, step = all ? 8 : (n - 8) / 255;
     for (uint32_t i = 0; i < places; i++) {
         memcpy(&word, t->base + (size_t)i * step, 8);
         h = (h ^ word) * 1099511628211ull;

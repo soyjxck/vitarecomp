@@ -1231,7 +1231,13 @@ void vita_hle_sceGxmSetFrontLineFillLastPixelEnable(void) { }
 void vita_hle_sceGxmSetBackLineFillLastPixelEnable(void) { }
 void vita_hle_sceGxmSetFrontFragmentProgramEnable(void) { g_state.face[0].program_off = (r1 & 0x00200000u) != 0; }
 void vita_hle_sceGxmSetBackFragmentProgramEnable(void)  { g_state.face[1].program_off = (r1 & 0x00200000u) != 0; }
-void vita_hle_sceGxmSetYuvProfile(void) { r0 = 0; }
+/* int sceGxmSetYuvProfile(context, unsigned int index, SceGxmYuvProfile profile):
+ * which arithmetic the first or the second of a movie texture's two
+ * conversions is (gxm_tex.h) */
+void vita_hle_sceGxmSetYuvProfile(void) {
+    if (r1 < 2 && r2 < 4) gxm_tex_yuv_profile[r1] = (uint8_t)r2;
+    r0 = 0;
+}
 
 /* The visibility buffer is counters, one slice of them per GPU core: the
  * pixels that passed the tests while a test was enabled, or just whether

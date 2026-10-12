@@ -114,4 +114,37 @@ static inline void pixfmt_halves_store(const pixfmt_halves *t, uint8_t *pixel, c
 float pix_srgb_to_linear(float v);
 float pix_linear_to_srgb(float v);
 
+/* --- a picture as brightness and two colour differences -----------------------------------
+ * A movie's picture is not kept as red, green and blue but as how bright
+ * each pixel is ("Y") and, more coarsely, which way its colour leans:
+ * towards blue (the first difference, "U" or Cb) and towards red (the
+ * second, "V" or Cr), each 128 for neither. Which arithmetic makes a colour
+ * of the three is a matter of standards: two sets of weights (BT.601, of
+ * standard definition, and BT.709, of high) over two ranges, the studio's,
+ * where brightness runs from 16 to 235 and a difference from 16 to 240, and
+ * the whole 0 to 255. The four are numbered as the console numbers them
+ * (SceGxmYuvProfile). */
+enum { PIX_YUV_BT601 = 0, PIX_YUV_BT709, PIX_YUV_BT601_FULL, PIX_YUV_BT709_FULL };
+
+/* A conversion as what each byte adds to each channel, in sixteen bits of
+ * fraction: brightness to all three (with the half that rounds the sum),
+ * the red difference to red and green, the blue to green and blue. */
+typedef struct { int32_t y[256], rv[256], gu[256], gv[256], bu[256]; } pix_yuv;
+
+/* The tables of a profile. They are made the first time any is asked for. */
+const pix_yuv *pix_yuv_for(unsigned profile);
+
+/* One pixel as a word of four bytes: red in the lowest, green, blue, and
+ * an alpha of all ones. */
+static inline uint32_t pix_yuv_word(const pix_yuv *t, unsigned y, unsigned u, unsigned v) {
+    int32_t l = t->y[y], r = l + t->rv[v], g = l + t->gu[u] + t->gv[v], b = l + t->bu[u];
+    r = r < 0 ? 0 : r >> 16;
+    g = g < 0 ? 0 : g >> 16;
+    b = b < 0 ? 0 : b >> 16;
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (b > 255) b = 255;
+    return (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | 0xFF000000u;
+}
+
 #endif /* VITARECOMP_PIXFMT_H */

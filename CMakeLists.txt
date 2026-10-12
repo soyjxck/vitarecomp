@@ -91,6 +91,8 @@ add_library(vitarecomp STATIC
     src/hle_stubs.c
     src/hle_touch.c
     src/hle_movie.c
+    src/hle_avplayer.c
+    src/mp4.c
     src/hle_near.c
     src/hle_vars.c
     src/hle_scanf.c
@@ -139,6 +141,17 @@ elseif(WIN32)
     target_link_libraries(vitarecomp PUBLIC d3d11 d3dcompiler dxguid)
 else()
     target_sources(vitarecomp PRIVATE src/gpu_none.c)
+endif()
+
+# A movie's pictures and sound (src/movie.h): on Windows the system's own
+# H.264 and AAC decoders, which like its graphics library add nothing to
+# ship. Elsewhere there is no decoder yet, no movie opens, and a title goes
+# on to what follows its movie.
+if(WIN32)
+    target_sources(vitarecomp PRIVATE src/movie_mf.c)
+    target_link_libraries(vitarecomp PUBLIC mfplat mfuuid ole32)
+else()
+    target_sources(vitarecomp PRIVATE src/movie_none.c)
 endif()
 
 # Debug information for the runtime, and for the host when one is built: what
