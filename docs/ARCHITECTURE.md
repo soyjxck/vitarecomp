@@ -1000,7 +1000,13 @@ frame from the same bytes.
   counting, for memory allocated for it), and bytes on pages not
   written since they were last read are not looked at. Where nothing
   keeps count the answer is "perhaps", and the bytes are hashed as
-  before.
+  before. The system is asked about the pages somebody asks about,
+  when they ask, and about a page once a list: asked about all of the
+  program's memory at the start of every list it took half a
+  millisecond each time, because every page it reports is made ready
+  to be caught again and a program's stack and heap are written all
+  the time. Five hundred small askings a frame find six pages written
+  and take half a millisecond between them.
 
 And the frame itself does not come back to be looked at. A host with a
 window asks for the display's frame to be shown in it
@@ -1081,7 +1087,9 @@ telling a fault in the keeping from a fault in the drawing.
 `VITARECOMP_GXM_GPU_LOG=1` says each surface filled from memory and each
 sent back, and the stage profile (`VITARECOMP_GXM_PROFILE`) has a line
 for the card: what a frame spent looking over textures' bytes, making
-textures, on targets, on vertices, in draws, waiting, showing.
+textures, on targets, on vertices, in draws, waiting, showing, making
+programs ready, and how often the system was asked which pages were
+written and how many it named.
 
 A frame of play takes 23 ms so (2026-10-11, Direct3D 11, GeForce RTX
 4090, nothing else at work on the machine), against 85 for the

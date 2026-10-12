@@ -419,9 +419,12 @@ default. What is left:
 2. **A watch on the pages of a surface the card holds**, so that the
    title's own code reading it is noticed. Today that is known only for
    surfaces of a few pixels, by sending those back always.
-3. **The rest of a frame.** Sixteen of the 23 ms are neither the card
-   nor its path: the title's code and the graphics library's handling
-   of each draw as it is made. Not yet looked at.
+3. **The rest of a frame.** Sixteen of the 23 ms were neither the card
+   nor its path. Some of that was the path's after all, asking the
+   system which pages had been written, and is gone (LESSONS.md); what
+   is left is the title's code and the graphics library's handling of
+   each draw as it is made, and has still to be measured on a quiet
+   machine.
 4. **Textures in their own form.** A compressed texture goes to the card
    as four floats a texel; the card has the compressed forms. It costs
    memory and the first frame of a scene, not the frames after.

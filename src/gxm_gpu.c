@@ -50,7 +50,8 @@ static uint32_t g_now;                      /* the moment the list in hand began
 
 /* What the path costs, for the stage profile (VITARECOMP_GXM_PROFILE):
  * nanoseconds since the last report, by what was being done. */
-enum { P_HASH = 0, P_TEXTURE, P_IN, P_VERTICES, P_DRAW, P_BACK, P_OUT, P_SHOW, P_PROGRAM, P_STAGES };
+enum { P_HASH = 0, P_TEXTURE, P_IN, P_VERTICES, P_DRAW, P_BACK, P_OUT, P_SHOW, P_PROGRAM, P_WRITTEN, P_STAGES };
+extern uint64_t vita_mem_counts, vita_mem_counted;          /* mem.c */
 static uint64_t g_ns[P_STAGES], g_hashed, g_made, g_lists, g_draws, g_backs, g_puts, g_views, g_programs;
 static uint64_t g_mesh_hits, g_mesh_made, g_mesh_passed;
 static int g_timed = -1;
@@ -66,8 +67,10 @@ static uint64_t now_ns(void) {
 void gxm_gpu_profile(uint32_t frames) {
     static const char *const NAME[P_STAGES] = { "textures' bytes looked over", "textures made from memory", "targets and textures made ready",
                                                 "vertices made ready", "draws handed over", "the card waited for and surfaces read back",
-                                                "surfaces put back in memory", "the picture shown", "programs made ready" };
+                                                "surfaces put back in memory", "the picture shown", "programs made ready",
+                                                "asking which pages were written" };
     static unsigned compiled;
+    static uint64_t counts, counted;
     unsigned compiled_now = gpu_shaders_compiled();
     double per = frames ? 1e-6 / (double)frames : 0.0;
     if (!g_lists) return;
@@ -76,12 +79,15 @@ void gxm_gpu_profile(uint32_t frames) {
     fprintf(stderr, "; %.1f lists and %.0f draws a frame, %.1f MB of textures looked over, %.1f textures made from memory and %.1f from "
                     "surfaces on the card, %.1f surfaces filled from memory and %.1f sent back to it; of the draws' geometry %.0f was "
                     "kept from before, %.0f made and kept, %.0f made for the once; %u programs made ready in all, %u of them compiled "
-                    "and the rest found compiled\n",
+                    "and the rest found compiled; which pages were written asked %.1f times a frame, %.0f pages a frame found\n",
             (double)g_lists / (double)frames, (double)g_draws / (double)frames, (double)g_hashed / (double)frames / 1048576.0,
             (double)g_made / (double)frames, (double)g_views / (double)frames, (double)g_puts / (double)frames, (double)g_backs / (double)frames,
             (double)g_mesh_hits / (double)frames, (double)g_mesh_made / (double)frames, (double)g_mesh_passed / (double)frames,
-            (unsigned)g_programs, compiled_now - compiled);
+            (unsigned)g_programs, compiled_now - compiled, (double)(vita_mem_counts - counts) / (double)frames,
+            (double)(vita_mem_counted - counted) / (double)frames);
     compiled = compiled_now;
+    counts = vita_mem_counts;
+    counted = vita_mem_counted;
     memset(g_ns, 0, sizeof(g_ns));
     g_hashed = g_made = g_lists = g_draws = g_backs = g_puts = g_views = g_programs = 0;
     g_mesh_hits = g_mesh_made = g_mesh_passed = 0;
@@ -1886,7 +1892,11 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
     static uint32_t shaders_cap;
     g_aside.held = 0;
     g_list++;
-    g_now = vita_mem_moment();
+    {
+        uint64_t began = now_ns();
+        g_now = vita_mem_moment();
+        g_ns[P_WRITTEN] += now_ns() - began;
+    }
     retired_go();
 
     /* --- is it a list the card's path draws as the processor's would? --- */

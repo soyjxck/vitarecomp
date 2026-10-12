@@ -55,43 +55,72 @@ static void bad(uint32_t addr, uint32_t len) {
 
 /* --- which pages have been written --------------------------------------------------------------
  * Windows keeps count for memory that asks for it when it is allocated:
- * the pages written since the count was last taken. Each taking is a
- * moment, and a page remembers the last moment it was found written at. */
+ * the pages written since they were last asked about. A moment is a number
+ * that grows, and a page remembers the last moment it was found written
+ * at.
+ *
+ * The system is asked about the pages somebody asks about, when they ask,
+ * and about a page once a moment. Asking about all of the program's memory
+ * at every moment was half a millisecond each time, twenty times a frame:
+ * the cost is in the pages found written, each of which the system makes
+ * ready to be caught again, and a program's stack and heap are written
+ * all the time by nobody who is ever asked about. A page found written
+ * is given the moment it was found at, which is not before it was
+ * written: a reader who read it after the writing and before the asking
+ * is told once that it changed, and reads what it had. */
 
 #define PAGE 4096u
 
 static uint32_t *g_page_moment;             /* a page: the last moment it was found written at; NULL where nothing keeps count */
+static uint32_t *g_page_asked;              /* a page: the moment the system was last asked about it */
 static uint32_t  g_moment = 1;
+
+/* What the counting has come to, for whoever profiles: how many times the
+ * system was asked and how many pages it said were written. */
+uint64_t vita_mem_counts, vita_mem_counted;
 
 #ifdef _WIN32
 static uint8_t *region_make(size_t size) {
     uint8_t *p = (uint8_t *)VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE);
-    if (p) g_page_moment = (uint32_t *)calloc(size / PAGE + 1, sizeof(uint32_t));
+    if (p) {
+        g_page_moment = (uint32_t *)calloc(size / PAGE + 1, sizeof(uint32_t));
+        g_page_asked = (uint32_t *)calloc(size / PAGE + 1, sizeof(uint32_t));
+        if (!g_page_moment || !g_page_asked) { free(g_page_moment); free(g_page_asked); g_page_moment = g_page_asked = NULL; }
+    }
     return p;
 }
 static void region_free(uint8_t *p) { if (p) VirtualFree(p, 0, MEM_RELEASE); }
 
-uint32_t vita_mem_moment(void) {
-    static void *written[16384];
-    if (!g_mem || !g_page_moment) return g_moment;
-    g_moment++;
+/* Ask the system about `pages` pages from page `first`, none of them asked
+ * about at this moment yet. */
+static void pages_ask(size_t first, size_t pages) {
+    static void *written[4096];
     for (;;) {
         ULONG_PTR count = sizeof(written) / sizeof(written[0]);
         DWORD granularity = 0;
-        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, g_mem, g_size, written, &count, &granularity)) {
+        vita_mem_counts++;
+        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, g_mem + first * PAGE, pages * PAGE, written, &count, &granularity)) {
             /* the count cannot be had: nothing is known, and everything may have been written */
             free(g_page_moment);
-            g_page_moment = NULL;
-            break;
+            free(g_page_asked);
+            g_page_moment = g_page_asked = NULL;
+            return;
         }
         for (ULONG_PTR i = 0; i < count; i++) g_page_moment[(size_t)((uint8_t *)written[i] - g_mem) / PAGE] = g_moment;
+        vita_mem_counted += count;
         if (count < sizeof(written) / sizeof(written[0])) break;
     }
+    for (size_t i = 0; i < pages; i++) g_page_asked[first + i] = g_moment;
+}
+
+uint32_t vita_mem_moment(void) {
+    if (g_mem && g_page_moment) g_moment++;
     return g_moment;
 }
 #else
 static uint8_t *region_make(size_t size) { return (uint8_t *)calloc(size, 1); }
 static void region_free(uint8_t *p) { free(p); }
+static void pages_ask(size_t first, size_t pages) { (void)first; (void)pages; }
 uint32_t vita_mem_moment(void) { return g_moment; }
 #endif
 
@@ -100,6 +129,15 @@ int vita_mem_written(const void *bytes, size_t count, uint32_t since) {
     if (!g_page_moment || !p || p < g_mem || p + count > g_mem + g_size) return 1;
     if (!count) return 0;
     size_t first = (size_t)(p - g_mem) / PAGE, last = (size_t)(p - g_mem + count - 1) / PAGE;
+    /* what is known of these pages is brought up to this moment, a run of them not yet asked about at a time */
+    for (size_t i = first; i <= last && g_page_moment;) {
+        size_t run = i;
+        if (g_page_asked[i] == g_moment) { i++; continue; }
+        while (run <= last && g_page_asked[run] != g_moment) run++;
+        pages_ask(i, run - i);
+        i = run;
+    }
+    if (!g_page_moment) return 1;
     for (size_t i = first; i <= last; i++) if (g_page_moment[i] > since) return 1;
     return 0;
 }
@@ -120,7 +158,8 @@ int vita_mem_init(uint32_t base, size_t size) {
 void vita_mem_free(void) {
     region_free(g_mem);
     free(g_page_moment);
-    g_page_moment = NULL;
+    free(g_page_asked);
+    g_page_moment = g_page_asked = NULL;
     g_mem = NULL;
     g_base = 0;
     g_size = 0;

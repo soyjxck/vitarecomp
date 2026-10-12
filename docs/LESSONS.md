@@ -1311,3 +1311,35 @@ right shapes and the wrong colours, in stripes one pixel wide.
    list that read a surface was left to the processor, and the picture
    at the title's own size differed from the reference, which is what
    gave it away before the larger one was looked at.
+
+## The count that cost more than the counting it saved (2026-10-12)
+
+"The rest of a frame", sixteen milliseconds that were neither the card
+nor its path, had been put down to the title and the graphics library.
+A sample of the host's threads over five hundred frames of play put a
+fifth of the time that was not waiting in one call of the system's: the
+one that says which pages have been written.
+
+1. **A cost outside every timer is somebody else's.** The call was made
+   once at the start of each list, before the first of the path's
+   timers started, so the path's own account came to three milliseconds
+   and the remainder was the title's by subtraction. Timed, it was nine
+   and a half milliseconds of a frame on a busy machine: more than the
+   three milliseconds of hashing it had been brought in to save.
+2. **What it costs is what it finds, not what it looks through.** The
+   call was asked about all of the program's memory and found forty
+   pages written each time, the stack and the heap, which nobody asks
+   about; each page it names it makes ready to be caught again. Asked
+   only about the pages a texture or a draw's vertices lie on, when one
+   of those is about to be looked at, it is asked five hundred times a
+   frame, finds six pages, and takes half a millisecond in all. The
+   card's path went from fifteen milliseconds of a frame to six, and
+   the frames of a run through the front end and into play are the
+   same bytes, all hundred and seven of them.
+3. **A page found written is found later than it was written.** With
+   the asking put off until somebody asks, a reader who read a page
+   after it was written and before anybody asked is told, the next
+   time, that it changed. It reads it once more and finds what it had.
+   The other order would be the fault: told nothing of a change that
+   happened. A page is given the moment it was found at, and a moment
+   is never before the writing.
