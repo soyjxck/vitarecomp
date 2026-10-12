@@ -93,19 +93,16 @@ void vita_hle_sceRtcGetTickResolution(void) { r0 = 1000000u; }
 /* int sceRtcGetTime64_t(const SceDateTime *time, SceUInt64 *out): seconds since 1970 */
 void vita_hle_sceRtcGetTime64_t(void) {
     if (!vita_mem_ptr(r0, 16) || !vita_mem_ptr(r1, 8)) { r0 = SCE_RTC_ERROR_INVALID_POINTER; return; }
-    struct tm t;
-    memset(&t, 0, sizeof(t));
-    t.tm_year = vita_read16(r0) - 1900;
-    t.tm_mon  = vita_read16(r0 + 2) - 1;
-    t.tm_mday = vita_read16(r0 + 4);
-    t.tm_hour = vita_read16(r0 + 6);
-    t.tm_min  = vita_read16(r0 + 8);
-    t.tm_sec  = vita_read16(r0 + 10);
-#ifdef _WIN32
-    uint64_t secs = (uint64_t)_mkgmtime(&t);
-#else
-    uint64_t secs = (uint64_t)timegm(&t);
-#endif
+    /* the calendar worked out here: the C library's own way from a broken-down
+     * time in UTC to seconds has a different name on every system, or none */
+    int y = vita_read16(r0), m = vita_read16(r0 + 2), d = vita_read16(r0 + 4);
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const int yoe = y - era * 400;
+    const int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const int64_t days = (int64_t)era * 146097 + doe - 719468;      /* since 1970-01-01 */
+    uint64_t secs = (uint64_t)(days * 86400 + vita_read16(r0 + 6) * 3600 + vita_read16(r0 + 8) * 60 + vita_read16(r0 + 10));
     vita_write32(r1, (uint32_t)secs);
     vita_write32(r1 + 4, (uint32_t)(secs >> 32));
     r0 = 0;
