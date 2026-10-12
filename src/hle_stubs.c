@@ -24,6 +24,7 @@
 #include "hle_vfs.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -93,6 +94,19 @@ void vita_hle_sceAudioOutOpenPort(void) {
 void vita_hle_sceAudioOutOutput(void) {
     int i = (int)r0 - 1;
     if (i < 0 || i >= 8 || !g_ports[i].used) { r0 = 0x80260002u; return; }
+    /* VITARECOMP_AUDIO_DUMP=<folder>: what each port is given, as it is given
+     * (sixteen bits, the port's rate, one channel or two), a file a port */
+    static const char *dump;
+    static int asked;
+    if (!asked) { dump = getenv("VITARECOMP_AUDIO_DUMP"); asked = 1; }
+    if (dump && *dump) {
+        const uint32_t channels = g_ports[i].mode ? 2 : 1, bytes = g_ports[i].len * channels * 2;
+        const void *samples = vita_mem_ptr(r1, bytes);
+        char path[1024];
+        snprintf(path, sizeof path, "%s/port%d-%uHz-%uch.pcm", dump, i + 1, g_ports[i].freq, channels);
+        FILE *f = samples ? fopen(path, "ab") : NULL;
+        if (f) { fwrite(samples, 1, bytes, f); fclose(f); }
+    }
     uint32_t us = (uint32_t)((uint64_t)g_ports[i].len * 1000000ull / g_ports[i].freq);
     vita_sched_delay(us ? us : 1000);
     r0 = 0;
@@ -368,10 +382,14 @@ void vita_hle_sceNpTrophyGetGameInfo(void) {
  *
  * SceAvPlayer plays a file a program names and hands back its frames and its
  * sound a piece at a time, for the program to draw and to play. There is no
- * decoder behind it yet: a player is made, a source is taken, and the movie
- * is over as soon as it is asked after (never active, no picture, no
- * sound), which a program takes as a movie that has finished and goes on to
- * what comes after it. */
+ * decoder behind it yet, so a player is made and the source it is given is
+ * refused as one it cannot play. That refusal matters: a program that is
+ * told its source was taken waits for the player to say it is ready (an
+ * event, through a callback the program passed in), and here nothing would
+ * ever say so. Told no, it closes the player and goes on to what comes
+ * after the movie. The rest answer for a player that is not playing. */
+#define SCE_AVPLAYER_ERROR_NOT_SUPPORTED 0x806A0004u
+
 void vita_hle_sceAvPlayerInit(void) {
     vita_hle_trace("sceAvPlayerInit(0x%08X)", r0);
     r0 = 0x41560001u;
@@ -379,7 +397,7 @@ void vita_hle_sceAvPlayerInit(void) {
 void vita_hle_sceAvPlayerAddSource(void) {
     const char *s = vita_mem_avail(r1) ? (const char *)vita_mem_ptr(r1, 1) : NULL;
     vita_hle_trace("sceAvPlayerAddSource(\"%.200s\"): no movie is played", s ? s : "");
-    r0 = 0;
+    r0 = SCE_AVPLAYER_ERROR_NOT_SUPPORTED;
 }
 void vita_hle_sceAvPlayerStart(void)         { r0 = 0; }
 void vita_hle_sceAvPlayerStop(void)          { r0 = 0; }
