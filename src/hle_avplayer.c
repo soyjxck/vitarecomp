@@ -398,8 +398,13 @@ void vita_hle_sceAvPlayerAddSource(void) {
         return;
     }
 
+    /* VITARECOMP_MOVIES=0: no movie is played, as on a host with no decoder.
+     * A run that is to be held against runs on other machines is then the
+     * same on all of them, whichever of them can decode. */
+    const char *wanted = getenv("VITARECOMP_MOVIES");
     movie_reader reader = { p, 0, read_movie };
-    if (!open_file(p, path_addr, path)) snprintf(why, sizeof why, "no such file");
+    if (wanted && wanted[0] == '0') snprintf(why, sizeof why, "VITARECOMP_MOVIES says none is");
+    else if (!open_file(p, path_addr, path)) snprintf(why, sizeof why, "no such file");
     reader.size = p->file_bytes;
     if (!why[0]) p->film = movie_open(&reader, why, sizeof why);
     if (!p->film) {
