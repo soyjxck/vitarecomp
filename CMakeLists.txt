@@ -80,6 +80,7 @@ add_library(vitarecomp STATIC
     src/hle_clib.c
     src/hle_mspace.c
     src/hle_fios.c
+    src/psarc.c
     src/hle_libm.c
     src/hle_ult.c
     src/hle_gxm.c
@@ -113,6 +114,10 @@ if(NOT WIN32)
 endif()
 
 target_link_libraries(vitarecomp PUBLIC vitashader)
+
+# An archive's blocks are deflated (src/psarc.c), and the inflate that undoes
+# it is the one the container reader has (tools/armrecomp/inflate.c).
+target_link_libraries(vitarecomp PUBLIC vitacontainer)
 
 # A scene's draws on the host's graphics card (src/gxm_gpu.h): Direct3D 11
 # where there is one, which is part of the system and adds nothing to ship.
