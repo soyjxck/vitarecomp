@@ -11,7 +11,7 @@
  * scripted buttons and the mouse to the scripted touches (window.h).
  *
  *   vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]]
- *                          [--press BUTTON@FROM[-TO]]... [--touch X,Y@FROM[-TO]]...
+ *                          [--press BUTTON@FROM[-TO[/EVERY]]]... [--touch X,Y@FROM[-TO]]...
  *                          [--window] [--window-size WxH] [--fullscreen] [--title TEXT]
  *
  *   --frames N      stop after N vertical blanks (0: run until the program exits)
@@ -73,7 +73,10 @@ extern const uint32_t vita_module_tls_addr, vita_module_tls_filesz, vita_module_
 
 /* --- the script ------------------------------------------------------------- */
 
-typedef struct { uint32_t mask, from, to; } press;
+/* A button held from one blank to another; with `every`, for the first
+ * eight blanks of each `every` in that stretch: a button tapped again
+ * and again, which is how a script gets through a conversation. */
+typedef struct { uint32_t mask, from, to, every; } press;
 typedef struct { int x, y; uint32_t from, to; } touch;
 typedef struct { int right; uint8_t x, y; uint32_t from, to; } tilt;
 
@@ -84,7 +87,7 @@ static struct {
     uint32_t    dump_frame;      /* 0: at exit */
     const char *dump_dir;        /* --dump-dir: a frame every so many vertical blanks */
     uint32_t    dump_every;
-    press       presses[16];
+    press       presses[64];
     int         press_count;
     touch       touches[16];
     int         touch_count;
@@ -113,21 +116,23 @@ static const struct { const char *name; uint32_t bit; } BUTTONS[] = {
 
 static int parse_press(const char *s) {
     char name[16];
-    unsigned from, to;
+    unsigned from, to, every = 0;
     const char *at = strchr(s, '@');
     if (!at || (size_t)(at - s) >= sizeof(name)) return 1;
     memcpy(name, s, (size_t)(at - s));
     name[at - s] = '\0';
-    if (sscanf(at + 1, "%u-%u", &from, &to) == 2) {}
+    if (sscanf(at + 1, "%u-%u/%u", &from, &to, &every) == 3 && every > 8) {}
+    else if (sscanf(at + 1, "%u-%u", &from, &to) == 2) every = 0;
     else if (sscanf(at + 1, "%u", &from) == 1) to = from + 1;
     else return 1;
 
     for (size_t i = 0; i < sizeof(BUTTONS) / sizeof(BUTTONS[0]); i++) {
         if (strcmp(BUTTONS[i].name, name) == 0) {
-            if (g.press_count == 16) return 1;
+            if (g.press_count == 64) return 1;
             g.presses[g.press_count].mask = BUTTONS[i].bit;
             g.presses[g.press_count].from = from;
             g.presses[g.press_count].to   = to;
+            g.presses[g.press_count].every = every;
             g.press_count++;
             return 0;
         }
@@ -297,7 +302,8 @@ void vita_host_vblank(void) {
 uint32_t vita_host_buttons(void) {
     uint32_t m = 0;
     for (int i = 0; i < g.press_count; i++)
-        if (g.frame >= g.presses[i].from && g.frame < g.presses[i].to) m |= g.presses[i].mask;
+        if (g.frame >= g.presses[i].from && g.frame < g.presses[i].to &&
+            (!g.presses[i].every || (g.frame - g.presses[i].from) % g.presses[i].every < 8)) m |= g.presses[i].mask;
     if (g.window) m |= vita_window_buttons();
     return m;
 }
@@ -331,7 +337,7 @@ void vita_host_exit(int status) {
 
 static int usage(void) {
     fputs("usage: vita_host <module.elf> [--frames N] [--dump out.ppm[@FRAME]] [--dump-dir DIR[@EVERY]]\n"
-          "                 [--press BUTTON@FROM[-TO]]... [--touch X,Y@FROM[-TO]]... [--virtual-clock]\n"
+          "                 [--press BUTTON@FROM[-TO[/EVERY]]]... [--touch X,Y@FROM[-TO]]... [--virtual-clock]\n"
           "                 [--stick L|R,X,Y@FROM[-TO]]...\n"
           "                 [--syms module.sym] [--trace-fns]\n"
           "                 [--window] [--window-size WxH] [--fullscreen] [--title TEXT]\n"
