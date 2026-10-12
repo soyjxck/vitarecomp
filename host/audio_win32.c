@@ -19,6 +19,7 @@
 #include <mmsystem.h>
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,6 +31,7 @@ static HANDLE   g_thread, g_event;
 static volatile LONG g_stop;
 static WAVEHDR  g_header[BUFFERS];
 static int16_t  g_samples[BUFFERS][FRAMES * 2];
+static int      g_quiet;        /* VITARECOMP_AUDIO=quiet: the device is fed silence, at the pace it takes sound */
 
 static DWORD WINAPI feed(void *unused) {
     (void)unused;
@@ -38,6 +40,7 @@ static DWORD WINAPI feed(void *unused) {
             WAVEHDR *h = &g_header[i];
             if (h->dwFlags & WHDR_INQUEUE) continue;
             vita_audio_pull(g_samples[i], FRAMES);
+            if (g_quiet) memset(g_samples[i], 0, sizeof g_samples[i]);
             waveOutWrite(g_out, h, sizeof *h);
         }
         WaitForSingleObject(g_event, 20);
@@ -64,9 +67,20 @@ int vita_host_audio_start(void) {
         return 1;
     }
     /* VITARECOMP_AUDIO=quiet: the device is fed as ever and nothing is heard,
-     * for a run that is to be measured and not listened to */
+     * for a run that is to be measured and not listened to. What it is fed
+     * is silence. It was once the device's volume turned to nothing, and
+     * the system keeps a program's volume from one run to the next: every
+     * later run of the same program was silent too, to whoever listened.
+     * So a volume found at nothing is put back to full. (A player who
+     * wants the program silent uses the system's mute, which is another
+     * switch and is left alone.) */
     const char *how = getenv("VITARECOMP_AUDIO");
-    if (how && !strcmp(how, "quiet")) waveOutSetVolume(g_out, 0);
+    DWORD volume = 0;
+    g_quiet = how && !strcmp(how, "quiet");
+    if (waveOutGetVolume(g_out, &volume) == MMSYSERR_NOERROR && volume == 0) {
+        waveOutSetVolume(g_out, 0xFFFFFFFFu);
+        fprintf(stderr, "vita_host: the system had this program's sound at nothing; it is put back to full\n");
+    }
     for (int i = 0; i < BUFFERS; i++) {
         memset(&g_header[i], 0, sizeof g_header[i]);
         g_header[i].lpData = (LPSTR)g_samples[i];
