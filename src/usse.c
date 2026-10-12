@@ -1343,7 +1343,10 @@ static void modifiers(value *v, uint8_t flags) {
 }
 
 /* An operand that is a number in the instruction, or a register this
- * interpreter has nothing behind: the same for every component. */
+ * interpreter has nothing behind: the same for every component, except a
+ * component whose swizzle names one of the four constants, which is that
+ * constant as it is for any operand. A vertex program writes a position's
+ * (0, 1) this way: nothing, swizzled "01". */
 static value load_immediate(const usse_operand *op, uint8_t mask) {
     value out;
     memset(&out, 0, sizeof(out));
@@ -1351,7 +1354,9 @@ static value load_immediate(const usse_operand *op, uint8_t mask) {
     uint32_t imm = op->bank == USSE_IMMEDIATE ? op->num : 0;
     for (int i = 0; i < 4; i++) {
         if (!((mask >> i) & 1)) continue;
-        if (out.kind == V_FLOAT) out.v.f[out.n] = (float)imm; else out.v.u[out.n] = imm;
+        const uint8_t ch = op->sw[i];
+        if (out.kind == V_FLOAT) out.v.f[out.n] = ch >= USSE_ZERO && ch <= USSE_HALF ? CHANNEL_CONSTANT[ch - USSE_ZERO] : (float)imm;
+        else out.v.u[out.n] = imm;
         out.n++;
     }
     return out;

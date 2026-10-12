@@ -237,8 +237,19 @@ static val load_immediate(gen *g, const usse_operand *op, uint8_t mask) {
     if (out.kind == K_FLOAT) float_literal(e, sizeof(e), bits_of_float((float)imm));
     else if (out.kind == K_SINT) snprintf(e, sizeof(e), "int(%uu)", imm);
     else snprintf(e, sizeof(e), "%uu", imm);
-    for (int i = 0; i < 4; i++)
-        if ((mask >> i) & 1) local(g, &out, e);
+    for (int i = 0; i < 4; i++) {
+        if (!((mask >> i) & 1)) continue;
+        /* a component swizzled to one of the four constants is that constant, as for any operand */
+        const uint8_t ch = op->sw[i];
+        if (out.kind == K_FLOAT && ch >= USSE_ZERO && ch <= USSE_HALF) {
+            static const float CONSTANT[4] = { 0.0f, 1.0f, 2.0f, 0.5f };
+            char c[32];
+            float_literal(c, sizeof(c), bits_of_float(CONSTANT[ch - USSE_ZERO]));
+            local(g, &out, c);
+        } else {
+            local(g, &out, e);
+        }
+    }
     return out;
 }
 
