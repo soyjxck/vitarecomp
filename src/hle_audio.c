@@ -121,19 +121,23 @@ void vita_audio_pull(int16_t *out, uint32_t frames) {
      * two channels, the host's rate. And <file>.gaps, a line for each time
      * the device asked and less was queued than it took: how many frames it
      * had taken until then, and how many were wanting. A program's own
-     * silence is queued like any sound, and is not a gap. */
+     * silence is queued like any sound, and is not a gap.
+     * VITARECOMP_AUDIO_GAPS=<file> writes those lines alone, which is all
+     * a long run needs. */
     static FILE *heard, *gaps;
     static int asked;
     int16_t *const first = out;
     const uint32_t all = frames;
     if (!asked) {
-        const char *path = getenv("VITARECOMP_AUDIO_HEARD");
+        const char *path = getenv("VITARECOMP_AUDIO_HEARD"), *only = getenv("VITARECOMP_AUDIO_GAPS");
         asked = 1;
         if (path && *path) {
             char beside[1024];
             heard = fopen(path, "wb");
             snprintf(beside, sizeof beside, "%s.gaps", path);
             gaps = fopen(beside, "w");
+        } else if (only && *only) {
+            gaps = fopen(only, "w");
         }
     }
     while (frames) {
