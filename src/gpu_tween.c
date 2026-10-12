@@ -643,6 +643,17 @@ static int vertices_alike(const drawn *now, const drawn *was) {
            now->call.vertex_stride == was->call.vertex_stride && now->call.vertices && was->call.vertices;
 }
 
+/* Whether a vertex is the vertex it was: everything of it but its place is
+ * what it was, its texture coordinates and its colour to the bit. A row of
+ * letters that gains a letter keeps its count of vertices and hands each
+ * place on to the next letter: such a vertex is another one, and is drawn
+ * where the later frame has it. */
+static int same_vertex(const uint32_t *was, const uint32_t *now, const uint8_t *place, uint32_t place_words, uint32_t stride) {
+    for (uint32_t k = 0; k < stride; k++)
+        if (!(k < place_words && place[k]) && was[k] != now[k]) return 0;
+    return 1;
+}
+
 #define FAR_ENOUGH 0.25f                    /* further than this in a thirtieth of a second is a jump, not a move */
 
 /* How far a draw is from one of the frame before. */
@@ -666,6 +677,7 @@ static float apart(const drawn *now, const drawn *was) {
         uint32_t stride = now->call.vertex_stride / 4, look = m->pa_words < stride ? m->pa_words : stride;
         const uint32_t *a = was->call.vertices, *b = now->call.vertices;
         for (uint32_t v = 0; v < now->call.vertex_count && most <= FAR_ENOUGH; v++) {
+            if (!same_vertex(a + (size_t)v * stride, b + (size_t)v * stride, m->pa, look, stride)) continue;
             d = went(a + (size_t)v * stride, b + (size_t)v * stride, m->pa, look);
             if (d > most) most = d;
         }
@@ -780,7 +792,9 @@ static void draw_between(const frame *b, const drawn *d) {
             uint32_t *v = spare(2, call.vertices, (size_t)call.vertex_count * call.vertex_stride);
             if (v) {
                 const uint32_t *a = w->call.vertices;
-                for (uint32_t i = 0; i < call.vertex_count; i++) changed += halved(v + (size_t)i * stride, a + (size_t)i * stride, m->pa, look);
+                for (uint32_t i = 0; i < call.vertex_count; i++)
+                    if (same_vertex(a + (size_t)i * stride, v + (size_t)i * stride, m->pa, look, stride))
+                        changed += halved(v + (size_t)i * stride, a + (size_t)i * stride, m->pa, look);
                 call.vertices = v;
             }
         }
