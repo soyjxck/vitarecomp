@@ -416,6 +416,10 @@ static int context_window(void *window) {
     if (P.shown == window) return 1;
     if (P.refused == window || P.shown) return 0;
     P.refused = window;
+    /* In its dock the console shows 1920 by 1080, and makes that of whatever smaller it is given; in the hand its
+     * screen is 1280 by 720, which is what a window is unless told. Docked when the screen is taken, the window is
+     * made the size that is shown as it is. */
+    if (appletGetOperationMode() == AppletOperationMode_Console) nwindowSetDimensions((NWindow *)window, 1920, 1080);
     EGLSurface screen = eglCreateWindowSurface(P.display, P.config, (EGLNativeWindowType)window, NULL);
     if (screen == EGL_NO_SURFACE) return 0;
     if (!eglMakeCurrent(P.display, screen, screen, P.context)) {
