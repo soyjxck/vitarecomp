@@ -25,7 +25,7 @@
 #define MAX_BLOCKS 256
 #define UID_FIRST  0x40010000u      /* positive, and unlike any pointer */
 
-typedef struct { uint32_t base, size; int used; } block;
+typedef struct { uint32_t base, size, type; int used; } block;
 
 static block    g_blocks[MAX_BLOCKS];
 static uint32_t g_base, g_size, g_next;
@@ -79,6 +79,7 @@ void vita_hle_sceKernelAllocMemBlock(void) {
 
     g_blocks[i].base = start;
     g_blocks[i].size = size;
+    g_blocks[i].type = type;
     g_blocks[i].used = 1;
     g_next = start + size;
     r0 = UID_FIRST + (uint32_t)i;
@@ -122,3 +123,35 @@ uint32_t vita_sysmem_reserve(uint32_t size) {
     g_next = start + size;
     return start;
 }
+
+/* SceUID sceKernelFindMemBlockByAddr(const void *addr, SceSize size): the
+ * block the range lies in */
+void vita_hle_sceKernelFindMemBlockByAddr(void) {
+    for (int i = 0; i < MAX_BLOCKS; i++) {
+        if (!g_blocks[i].used) continue;
+        if (r0 >= g_blocks[i].base && r0 - g_blocks[i].base < g_blocks[i].size) { r0 = UID_FIRST + (uint32_t)i; return; }
+    }
+    r0 = SCE_KERNEL_ERROR_INVALID_ARGUMENT;
+}
+
+/* int sceKernelGetMemBlockInfoByAddr(void *base, SceKernelMemBlockInfo *info)
+ *
+ * SceKernelMemBlockInfo: { SceSize size; void *mappedBase; SceSize mappedSize;
+ * int memoryType; SceUInt32 access; SceKernelMemBlockType type } = 24 bytes.
+ * The access is read and write, as every block here is. */
+void vita_hle_sceKernelGetMemBlockInfoByAddr(void) {
+    const uint32_t addr = r0, out = r1;
+    if (!vita_mem_ptr(out, 24)) { r0 = SCE_KERNEL_ERROR_INVALID_ARGUMENT; return; }
+    for (int i = 0; i < MAX_BLOCKS; i++) {
+        if (!g_blocks[i].used || addr < g_blocks[i].base || addr - g_blocks[i].base >= g_blocks[i].size) continue;
+        vita_write32(out + 4, g_blocks[i].base);
+        vita_write32(out + 8, g_blocks[i].size);
+        vita_write32(out + 12, (g_blocks[i].type >> 24) == 0x09 ? 1u : 0u);
+        vita_write32(out + 16, 6);
+        vita_write32(out + 20, g_blocks[i].type);
+        r0 = 0;
+        return;
+    }
+    r0 = SCE_KERNEL_ERROR_INVALID_ARGUMENT;
+}
+void vita_hle_sceKernelGetMemBlockInfoByRange(void) { vita_hle_sceKernelGetMemBlockInfoByAddr(); }

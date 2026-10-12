@@ -21,7 +21,11 @@
 #include "hle_sysmem.h"
 #include "sched.h"
 
+#include "hle_vfs.h"
+
+#include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static void zero(uint32_t addr, uint32_t size) {
     if (!vita_mem_ptr(addr, size)) return;
@@ -286,3 +290,108 @@ void vita_hle_sceJpegGetOutputInfo(void)      { r0 = SCE_JPEG_ERROR_UNSUPPORT_IM
 void vita_hle_sceJpegDecodeMJpeg(void)        { vita_hle_trace("sceJpegDecodeMJpeg: no decoder"); r0 = SCE_JPEG_ERROR_UNSUPPORT_IMAGE; }
 void vita_hle_sceJpegDecodeMJpegYCbCr(void)   { vita_hle_trace("sceJpegDecodeMJpegYCbCr: no decoder"); r0 = SCE_JPEG_ERROR_UNSUPPORT_IMAGE; }
 void vita_hle_sceJpegMJpegCsc(void)           { r0 = 0; }
+
+/* --- gestures -----------------------------------------------------------------------
+ *
+ * SceSystemGesture turns the touch panel's contacts into taps, drags and
+ * pinches: a program makes a recogniser for each kind over a rectangle,
+ * feeds the library the panel's state every frame, and asks each recogniser
+ * what it saw. Here nobody ever gestures: every recogniser is made and
+ * every one has seen nothing, which is what a program is told on a console
+ * nobody is touching. */
+#define SCE_SYSTEM_GESTURE_ERROR_INDEX_OUT_OF_ARRAY 0x80920004u
+#define SCE_SYSTEM_GESTURE_ERROR_EVENT_DATA_NOT_FOUND 0x80920005u
+
+void vita_hle_sceSystemGestureInitializePrimitiveTouchRecognizer(void) { r0 = 0; }
+void vita_hle_sceSystemGestureFinalizePrimitiveTouchRecognizer(void)   { r0 = 0; }
+void vita_hle_sceSystemGestureResetPrimitiveTouchRecognizer(void)      { r0 = 0; }
+void vita_hle_sceSystemGestureUpdatePrimitiveTouchRecognizer(void)     { r0 = 0; }
+void vita_hle_sceSystemGestureGetPrimitiveTouchEvents(void) {
+    if (r2 && vita_mem_ptr(r2, 4)) vita_write32(r2, 0);
+    r0 = 0;
+}
+void vita_hle_sceSystemGestureGetPrimitiveTouchEventsCount(void)       { r0 = 0; }
+void vita_hle_sceSystemGestureCreateTouchRecognizer(void)              { r0 = 0; }
+void vita_hle_sceSystemGestureResetTouchRecognizer(void)               { r0 = 0; }
+void vita_hle_sceSystemGestureUpdateTouchRecognizer(void)              { r0 = 0; }
+void vita_hle_sceSystemGestureUpdateTouchRecognizerRectangle(void)     { r0 = 0; }
+void vita_hle_sceSystemGestureGetTouchEventsCount(void)                { r0 = 0; }
+void vita_hle_sceSystemGestureGetTouchEvents(void) {
+    if (r3 && vita_mem_ptr(r3, 4)) vita_write32(r3, 0);
+    r0 = 0;
+}
+void vita_hle_sceSystemGestureGetTouchEventByIndex(void)   { r0 = SCE_SYSTEM_GESTURE_ERROR_INDEX_OUT_OF_ARRAY; }
+void vita_hle_sceSystemGestureGetTouchEventByEventID(void) { r0 = SCE_SYSTEM_GESTURE_ERROR_EVENT_DATA_NOT_FOUND; }
+
+/* --- the debug lamps and switches ------------------------------------------------------
+ * A development kit has eight of each; a program reads the switches to turn
+ * its own debugging on. All off. */
+void vita_hle_sceKernelGetGPI(void) { r0 = 0; }
+void vita_hle_sceKernelSetGPO(void) { r0 = 0; }
+
+/* --- add-on content --------------------------------------------------------------------
+ *
+ * int sceAppUtilDrmOpen(const SceAppUtilDrmAddcontId *dirName, const SceAppUtilMountPoint *mountPoint)
+ *
+ * A program asks for each add-on it knows by its folder's name (sixteen
+ * letters); the console checks the licence and makes the folder readable
+ * under addcont0:. Here an add-on is there when its folder is: the host
+ * mounts addcont0 where the player's add-ons are kept, and a name with no
+ * folder is one the player does not own. */
+#define SCE_APPUTIL_ERROR_DRM_NO_ENTITLEMENT 0x80100660u
+
+static int is_dir(const char *host) {
+    struct stat st;
+    return stat(host, &st) == 0 && (st.st_mode & S_IFDIR) != 0;
+}
+
+void vita_hle_sceAppUtilDrmOpen(void) {
+    char name[20] = "", guest[64], host[1024];
+    const char *s = vita_mem_ptr(r0, 17) ? (const char *)vita_mem_ptr(r0, 17) : NULL;
+    for (int i = 0; s && i < 16 && s[i]; i++) { name[i] = s[i]; name[i + 1] = '\0'; }
+    snprintf(guest, sizeof guest, "addcont0:%s", name);
+    const int there = name[0] && vita_io_resolve(guest, host, sizeof host) && is_dir(host);
+    vita_hle_trace("sceAppUtilDrmOpen(\"%s\") -> %s", name, there ? "there" : "not owned");
+    r0 = there ? 0 : SCE_APPUTIL_ERROR_DRM_NO_ENTITLEMENT;
+}
+void vita_hle_sceAppUtilDrmClose(void) { r0 = 0; }
+
+/* int sceNpTrophyGetGameInfo(context, handle, SceNpTrophyGameDetails *details,
+ * SceNpTrophyGameData *data): nothing unlocked, of a set whose size is not known. */
+void vita_hle_sceNpTrophyGetGameInfo(void) {
+    if (r2 && vita_mem_ptr(r2, 4)) { const uint32_t size = vita_read32(r2); if (size >= 8 && size <= 0x1000 && vita_mem_ptr(r2, size)) { zero(r2 + 4, size - 4); } }
+    if (r3 && vita_mem_ptr(r3, 4)) { const uint32_t size = vita_read32(r3); if (size >= 8 && size <= 0x1000 && vita_mem_ptr(r3, size)) { zero(r3 + 4, size - 4); } }
+    r0 = 0;
+}
+
+/* --- the movie player --------------------------------------------------------------------
+ *
+ * SceAvPlayer plays a file a program names and hands back its frames and its
+ * sound a piece at a time, for the program to draw and to play. There is no
+ * decoder behind it yet: a player is made, a source is taken, and the movie
+ * is over as soon as it is asked after (never active, no picture, no
+ * sound), which a program takes as a movie that has finished and goes on to
+ * what comes after it. */
+void vita_hle_sceAvPlayerInit(void) {
+    vita_hle_trace("sceAvPlayerInit(0x%08X)", r0);
+    r0 = 0x41560001u;
+}
+void vita_hle_sceAvPlayerAddSource(void) {
+    const char *s = vita_mem_avail(r1) ? (const char *)vita_mem_ptr(r1, 1) : NULL;
+    vita_hle_trace("sceAvPlayerAddSource(\"%.200s\"): no movie is played", s ? s : "");
+    r0 = 0;
+}
+void vita_hle_sceAvPlayerStart(void)         { r0 = 0; }
+void vita_hle_sceAvPlayerStop(void)          { r0 = 0; }
+void vita_hle_sceAvPlayerPause(void)         { r0 = 0; }
+void vita_hle_sceAvPlayerResume(void)        { r0 = 0; }
+void vita_hle_sceAvPlayerClose(void)         { r0 = 0; }
+void vita_hle_sceAvPlayerIsActive(void)      { r0 = 0; }
+void vita_hle_sceAvPlayerStreamCount(void)   { r0 = 0; }
+void vita_hle_sceAvPlayerEnableStream(void)  { r0 = 0; }
+void vita_hle_sceAvPlayerDisableStream(void) { r0 = 0; }
+void vita_hle_sceAvPlayerGetStreamInfo(void) { r0 = 0x806A0001u; }   /* an invalid argument: there is no such stream */
+void vita_hle_sceAvPlayerGetVideoData(void)  { r0 = 0; }
+void vita_hle_sceAvPlayerGetAudioData(void)  { r0 = 0; }
+void vita_hle_sceAvPlayerSetLooping(void)    { r0 = 0; }
+void vita_hle_sceAvPlayerCurrentTime(void)   { r0 = 0; r1 = 0; }
