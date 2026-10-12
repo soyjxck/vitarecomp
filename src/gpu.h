@@ -14,8 +14,11 @@
  * is drawn between gpu_begin and gpu_end, to a colour surface, or none,
  * and a depth surface.
  *
- * One implementation: gpu_d3d11.c (Direct3D 11, Windows). gpu_none.c is
- * what is linked elsewhere: there is no card, and gpu_open says so.
+ * Two implementations: gpu_d3d11.c (Direct3D 11, Windows) and gpu_gl.c
+ * (OpenGL 4.3: Windows when it is asked for, and the Nintendo Switch, whose
+ * card is reached no other way). gpu_none.c is what is linked elsewhere:
+ * there is no card, and gpu_open says so. They do not read the same
+ * shading language, and each says which it reads (gpu_language).
  */
 
 #ifndef VITARECOMP_GPU_H
@@ -46,6 +49,16 @@ int gpu_open(void);
 
 /* What is being drawn with, for the log. */
 const char *gpu_name(void);
+
+/* The language this card's programs are written in: what gpu_shader_make
+ * is to be given, the title's programs (gxp_hlsl.h writes either) and
+ * gpu_convert's alike. Wherever a text is described below in HLSL's terms,
+ * a register, a `main`, the GLSL is the same thing in gxp_hlsl.h's terms
+ * for that language: `tN` is the sampler at binding N, a fragment
+ * program's `b0` the uniform block at binding 1, and the text begins with
+ * no version line. */
+enum { GPU_HLSL = 0, GPU_GLSL };
+int gpu_language(void);
 
 /* Compile a program (gxp_hlsl.h). A vertex program says how many words of
  * primary attributes a vertex has. NULL with the compiler's complaint in
@@ -168,7 +181,12 @@ gpu_texture *gpu_texture_blank(unsigned width, unsigned height);
  * its stencil at t1, a whole number in the second place. `constants`, at
  * most 64 bytes, are its b0. This is how a surface one scene drew is read
  * by the next in another form than it was drawn in without leaving the
- * card. 0 when it was done. */
+ * card. 0 when it was done.
+ *
+ * In GLSL the program is a whole fragment program, its `main` taking and
+ * returning nothing: the texel's place is gl_FragCoord, counted from the
+ * top row as the other language counts it, and its four floats leave by
+ * an output at location 0. */
 int gpu_convert(gpu_texture *into, gpu_surface *from, gpu_shader *program, const void *constants, uint32_t constants_bytes);
 
 /* Whether a fragment program can be handed a target of this form to read

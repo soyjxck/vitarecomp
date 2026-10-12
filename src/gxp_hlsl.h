@@ -43,6 +43,45 @@
  * interpreter has and this does not: a branch backward, and a sample with
  * explicit gradients. A program with one is refused, with the reason, and
  * drawn by the interpreter.
+ *
+ * The same program is written in GLSL for a card that is reached through
+ * OpenGL (gxp_text). It is the same text: the statements of an instruction
+ * are spelt once, in HLSL's words, and the GLSL begins by saying what those
+ * words are in its own (gxp_glsl_names). What differs is what goes round
+ * the statements, where the two languages have different things and not
+ * different names: how a texture is declared and sampled, how a program is
+ * given its inputs and hands on its results, and that GLSL's variables
+ * begin holding nothing in particular where HLSL's begin at nothing. The
+ * GLSL expects, of the back end that compiles it:
+ *
+ *   a first line of its own               `#version 430 core` or later; the
+ *                                         text has none. After it the back
+ *                                         end may define CLIP_AS_GL (below)
+ *   uniform block `draw`, std140          the same three arrays, at binding
+ *                                         0 for a vertex program and 1 for
+ *                                         a fragment program: the two share
+ *                                         one set of numbers
+ *   usamplerBuffer MEM                    at binding 16 for a fragment
+ *                                         program, 34 for a vertex program
+ *   sampler2D or sampler2DArray TEXn      at binding n for a fragment
+ *                                         program, 18 + n for a vertex
+ *                                         program: a texture and how it is
+ *                                         sampled are one thing here, and a
+ *                                         cube is an array of six
+ *   sampler2D or usampler2D NOW           at binding 17
+ *
+ * A vertex program's inputs are `uvec4`s at locations 0 upward, and what it
+ * hands on is a `vec4` at the location of its slot, which is where a
+ * fragment program looks for it; each is a program by itself, linked alone
+ * (a separable program), and so declares the position it writes. A
+ * fragment program's result is location 0, four floats or four words. The
+ * position is left as it is for Direct3D: up is up, depth runs from nothing
+ * to the fourth number, and the first row of a target is its top. A back
+ * end whose card can be told to read it so (glClipControl) tells it; one
+ * whose card cannot defines CLIP_AS_GL, and the program turns the position
+ * over and stretches its depth as it leaves, the target's rows still top
+ * first. A pixel's place is given to a fragment program counted from the
+ * top row either way.
  */
 
 #ifndef VITARECOMP_GXP_HLSL_H
@@ -103,5 +142,15 @@ typedef struct {
 /* The program as HLSL, in memory the caller frees. NULL when it cannot be
  * translated, with the reason in `why`. */
 char *gxp_hlsl(const gxp_program *p, const gxp_hlsl_bind *bind, char *why, size_t why_size);
+
+/* The same in the language asked for. A program refused in one is refused
+ * in the other, for the same reason. */
+enum { GXP_HLSL = 0, GXP_GLSL };
+char *gxp_text(const gxp_program *p, const gxp_hlsl_bind *bind, int language, char *why, size_t why_size);
+
+/* What a GLSL text written in HLSL's words begins with: those words, as
+ * names GLSL has for the same things. For whoever else writes such a text
+ * (gxm_gpu.c's readings of a surface). */
+extern const char gxp_glsl_names[];
 
 #endif /* VITARECOMP_GXP_HLSL_H */

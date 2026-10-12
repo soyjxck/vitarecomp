@@ -89,6 +89,16 @@ void vita_sched_yield(void);
 /* Sleep for the given microseconds; other threads run meanwhile. */
 void vita_sched_delay(uint32_t us);
 
+/* Something a host thread holds that the next thread to run may want and
+ * cannot take from it: under OpenGL a graphics card's context belongs to
+ * the thread it was made current on until that thread lets it go
+ * (gpu_gl.c). `leave` is called on the running thread each time it is
+ * about to hand the baton to another or to end, while the baton is still
+ * its own; what it lets go of, the next thread to want it takes up for
+ * itself. One such thing at a time: a second call replaces the first, and
+ * NULL is none. */
+void vita_sched_on_handover(void (*leave)(void));
+
 /* The thread holding the baton, for a sampler on another host thread: its
  * uid and name, or 0 and "(idle)" while every guest thread waits. */
 uint32_t vita_sched_running(char *name, uint32_t cap);

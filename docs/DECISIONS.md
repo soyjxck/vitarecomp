@@ -66,6 +66,13 @@ must find an equal for is one thing: a fragment program reading and
 writing the target in the order its triangles come (ARCHITECTURE.md,
 "The same draws on a graphics card").
 
+The second came sooner than either and was neither: OpenGL
+(`src/gpu_gl.c`), for the Nintendo Switch, whose card a homebrew program
+reaches through Mesa and no other way. The dialect was a matter of
+spelling, as said, and of four things that are not names. For the one
+thing it found no equal: the console's card has none, and a program that
+blends for itself reads the target as it stood before its draw.
+
 ## 4. NID database handling (open)
 
 Upstream loads vita-headers from a directory at run time and does not

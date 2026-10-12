@@ -1368,3 +1368,39 @@ milliseconds; play is 33.3 ms from one frame to the next.
    waits for it. A level that had settled took 8 ms a frame at every
    size, which said nothing about the sizes. What a size costs is to
    be measured where the frame is shown.
+
+## A second card (2026-10-12)
+
+`gpu.h` was written a second time, on OpenGL, for a console whose card
+is reached no other way, and held against the processor on Windows by
+the check the first one had been held against. It came to the same
+count, no list of 896 differing, and to the other card's frames byte
+for byte. Four things stood between the first build and that, and none
+of them was arithmetic.
+
+1. **A buffer begun again takes its earlier pieces with it.** A draw's
+   constants are added to the end of a buffer, a block for each of its
+   two programs, and when the buffer is full it is let go of and begun
+   again. A draw whose first block was the last to fit had its second
+   in the new buffer, and its first bound to a place in the new buffer
+   too, where nothing had been written. That draw drew nothing. With a
+   list to a draw (`VITARECOMP_GXM_AT_ONCE`) the lists that differed
+   were 819 apart, every time: a megabyte over a block. A draw's pieces
+   are all asked room for before the first is written.
+2. **A macro's parameter is a word like any other.** The GLSL names
+   HLSL's words by macros, and `f16tof32(x)` ended in `.x`, the first
+   of a pair. Handed a variable called `m`, it asked for `.m`.
+3. **The console's card cannot divide.** Whole numbers, that is. Its
+   compiler calls a routine of its own for `/` and `%`, which an
+   emulator of the console did not follow, and said so ten times in its
+   log while showing nothing wrong: a texel's place wrapped into its
+   texture was the remainder of nothing. The GLSL divides by floating
+   point and puts the answer right, which is also thirty-two turns of a
+   loop saved on the console itself.
+4. **A program that runs to its end has not been seen.** The first run
+   on the console's emulator took sixty seconds, drew every list and
+   ended well, and its window showed the emulator's own loading card
+   throughout. The library, asked how large its surface was, said
+   nothing, and a window of no size is one there is nothing to show in.
+   The console itself is asked now. The log was all good news; the
+   picture was the test.

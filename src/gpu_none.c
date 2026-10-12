@@ -5,6 +5,7 @@
 
 int gpu_open(void) { return -1; }
 const char *gpu_name(void) { return "nothing"; }
+int gpu_language(void) { return GPU_HLSL; }
 
 gpu_shader *gpu_shader_make(int fragment, const char *hlsl, unsigned pa_words, char *log, size_t log_size) {
     (void)fragment; (void)hlsl; (void)pa_words;

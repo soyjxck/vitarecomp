@@ -830,7 +830,8 @@ The renderer above is the definition, and a frame of play takes it a
 twelfth of a second. `VITARECOMP_GXM_GPU=1` hands each scene's list of
 draws to the host's graphics card instead; `VITARECOMP_GXM_GPU=check`
 draws every list both ways and says where the two results differ. Unset,
-none of it runs. The card is Direct3D 11 for now, which is Windows:
+none of it runs. The card is reached through Direct3D 11 on Windows and
+through OpenGL on the Nintendo Switch ("The same on OpenGL", below);
 elsewhere the switch finds no card and every list stays the processor's.
 
 Three files, each knowing less of the console than the one before.
@@ -847,12 +848,16 @@ Three files, each knowing less of the console than the one before.
   interpreter's steps as text, a block to an instruction, the registers
   still banks of 32-bit words, so that what a program does to its bits
   it does there too. `armrecomp hlsl <file.gxp>` prints the translation
-  of a dumped program.
+  of a dumped program. The same file writes the program as GLSL
+  (`armrecomp glsl`): the statements of an instruction are spelt once,
+  in HLSL's words, and the GLSL begins by saying what those words are in
+  its own.
 - `src/gpu.h` is a card as far as the rest needs one: shaders as text,
   textures as rows of texels, surfaces it draws to and keeps, a draw as
-  buffers and state.
-  `src/gpu_d3d11.c` is the one implementation, `src/gpu_none.c` what is
-  linked where there is none.
+  buffers and state; and which of the two languages its shaders are
+  written in.
+  `src/gpu_d3d11.c` and `src/gpu_gl.c` are the two implementations,
+  `src/gpu_none.c` what is linked where there is none.
 
 A card left to itself does several things another way than the
 interpreter, and wherever the check found one the translation now does
@@ -914,15 +919,60 @@ through the first title's front end and its first minute of play.
 | Their numbers | `VITARECOMP_GXM_GPU_DUMP_RAW=1`, with the dump | both results as the card holds them, the first draw's textures as floats, its secondary attributes: for working a pixel out by hand |
 | A program part-way | `VITARECOMP_GXM_PROBE=<name>:<count>:<from>:<to>` | the program of that name runs only its first `count` instructions and then moves the register `from` (a half of it with `.x` to `.w`) into `to`: with `to` its result register, the check compares what `from` held there, and so finds the first instruction two renderers part at |
 | One level | `VITARECOMP_GXM_ONE_LEVEL=1` | every texture read from its first level, in both renderers |
-| The shaders | `VITARECOMP_GXM_GPU_SHADERS=<dir>` | each program's HLSL as it was compiled |
+| The shaders | `VITARECOMP_GXM_GPU_SHADERS=<dir>` | each program's text as it was compiled, HLSL or GLSL as the card reads |
 | What travels | `VITARECOMP_GXM_GPU_LOG=1` | each texture made from memory: size, levels, format, filters; each surface filled from memory or sent back to it |
 | The long way round | `VITARECOMP_GXM_GPU_KEEP=0` | every surface back in memory after every list |
-| Another card | `VITARECOMP_GPU_WARP=1`, `VITARECOMP_GPU_DEBUG=1` | the system's own rasteriser in place of the card; Direct3D's checking layer |
+| Another card | `VITARECOMP_GPU_WARP=1`, `VITARECOMP_GPU_DEBUG=1` | the system's own rasteriser in place of the card; Direct3D's checking layer. Under OpenGL the second is the library's own complaints as they are made and, at the end, how often the card's context changed threads and how long that took |
 | Programs kept | `VITARECOMP_GPU_CACHE=<dir>` | compiled programs kept in that directory from one run to the next; with the log, each program compiled and how long it took |
 | A larger picture | `VITARECOMP_GXM_GPU_SCALE=<n>` | every surface the card keeps `n` times as wide and as high as the title made it, `n` from 2 to 8 |
 
 `VITARECOMP_GXM_AT_ONCE=1` makes a list of every draw, which is how a
 difference in a scene of two hundred draws is brought down to one.
+
+#### The same on OpenGL
+
+`src/gpu_gl.c` is `gpu.h` again, for a host whose card is reached no
+other way: the Nintendo Switch, through Mesa and EGL. It builds on
+Windows too (`-DVITARECOMP_GPU_OPENGL=ON`, in place of Direct3D 11), which
+is where it is worked on and where the check above is run against it: the
+same lists, the same count of them differing, the same frames byte for
+byte as the other card's.
+
+- **Which OpenGL.** The desktop's, 4.3 core, though the console's library
+  offers the one for small devices as well. That one has no count of the
+  pixels a draw passed, no plane of a program's own to cut by, no depth
+  held to the near plane, and a language that converts nothing by itself,
+  which the translator's text leans on.
+- **Rows.** OpenGL counts a picture's rows from the bottom; everything
+  above `gpu.h` counts from the top. A texture's first row is the top row
+  here, the card is told to read clip space as Direct3D does
+  (`glClipControl`), and only the window is turned over as it is shown.
+- **The language.** `gxp_hlsl.c` writes either. What an instruction
+  becomes is spelt once; what differs is what goes round it, where the
+  languages have different things and not different names: how a texture
+  is declared and sampled, how a program is given its inputs, and that
+  GLSL's variables begin holding nothing in particular. Each of a draw's
+  two programs is linked alone and a pipeline names the pair.
+- **No divide.** The console's card has no instruction that divides whole
+  numbers; its compiler calls a routine for `/` and `%`, and an emulator
+  of the console does not follow the call. Where the HLSL divides, the
+  GLSL asks a function that does it by floating point and puts the answer
+  right (`over`, `left_of`).
+- **Threads.** A context belongs to one thread, and the title's threads
+  take turns (`sched.h`). The context goes with the baton: the thread
+  that holds it lets it go when it gives way (`vita_sched_on_handover`)
+  and the next call takes it up. On the console a program is compiled on
+  a thread of its own with a large stack, the context lent to it: the
+  compiler is deep and the title's threads have 128 KiB.
+- **The screen.** The console's window is the card's or the host's own
+  frame buffer's and never both (`host/window_switch.c`): the frame
+  buffer is made when the first frame is drawn into it, and the card
+  takes the screen when it first shows one.
+- **What it has not.** A target read and written in the order the
+  triangles come (`gpu_ordered` says no, and a program that blends for
+  itself reads the target as it stood before its draw). And on the
+  console's Mesa a compiled program cannot be handed back to be kept, so
+  `VITARECOMP_GPU_CACHE` keeps nothing there and each run compiles again.
 
 #### Surfaces stay on the card
 

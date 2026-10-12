@@ -131,8 +131,9 @@ static void tables(const gxp_program *p) {
 /* The program as the HLSL the toolkit writes for it (src/gxp_hlsl.h), for
  * what would most often be bound: every texture it names a texture of four
  * bytes, every interpolated quantity carried, the colour as four floats.
- * `raw` words of the result leave as they are when it is not 0. */
-int cmd_hlsl(const char *path, int raw) {
+ * `raw` words of the result leave as they are when it is not 0. With `glsl`
+ * set, the same in the other language the toolkit writes. */
+int cmd_hlsl(const char *path, int raw, int glsl) {
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "armrecomp: cannot read %s\n", path); return 1; }
     fseek(f, 0, SEEK_END);
@@ -171,7 +172,7 @@ int cmd_hlsl(const char *path, int raw) {
         bind.pa_words = (p.pa_count + 3u) & ~3u;
         if (bind.pa_words > 64) bind.pa_words = 64;
     }
-    char *text = gxp_hlsl(&p, &bind, why, sizeof(why));
+    char *text = gxp_text(&p, &bind, glsl ? GXP_GLSL : GXP_HLSL, why, sizeof(why));
     if (!text) fprintf(stderr, "armrecomp: %s is not translated: it has %s\n", path, why);
     else fputs(text, stdout);
     int ok = text != NULL;

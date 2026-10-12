@@ -124,7 +124,17 @@ target_link_libraries(vitarecomp PUBLIC vitacontainer)
 # A scene's draws on the host's graphics card (src/gxm_gpu.h): Direct3D 11
 # where there is one, which is part of the system and adds nothing to ship.
 # Elsewhere there is no card yet and every scene is drawn on the processor.
-if(WIN32)
+#
+# -DVITARECOMP_GPU_OPENGL=ON builds the OpenGL implementation in its place
+# (src/gpu_gl.c), on Windows: the one a host with no Direct3D draws with (the
+# Nintendo Switch, whose build is a script of a game's own and not this
+# file), here so that it can be worked on and held against the other on one
+# machine. It needs nothing but the system's own OpenGL library.
+option(VITARECOMP_GPU_OPENGL "Draw with OpenGL 4.3 in place of Direct3D 11 (Windows)" OFF)
+if(WIN32 AND VITARECOMP_GPU_OPENGL)
+    target_sources(vitarecomp PRIVATE src/gpu_gl.c)
+    target_link_libraries(vitarecomp PUBLIC opengl32 gdi32 user32)
+elseif(WIN32)
     target_sources(vitarecomp PRIVATE src/gpu_d3d11.c)
     target_link_libraries(vitarecomp PUBLIC d3d11 d3dcompiler dxguid)
 else()

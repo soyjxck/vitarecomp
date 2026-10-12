@@ -42,6 +42,7 @@ static const char *USAGE =
     "  armrecomp gxp     <file.gxp> [--listing]  a compiled shader: its tables and its code\n"
     "  armrecomp hlsl    <file.gxp> [words]  the same shader as HLSL for a host GPU; with a\n"
     "                                    number, so many words of the result leave as they are\n"
+    "  armrecomp glsl    <file.gxp> [words]  and as GLSL, for a host reached through OpenGL\n"
     "\n"
     "Accepts a SELF (eboot.bin, *.suprx) or a plain ELF/velf. A PFS-encrypted\n"
     "NoNpDrm dump is reported as such rather than parsed as garbage.\n";
@@ -79,7 +80,7 @@ static const char *flags_str(uint32_t f, char *tmp) {
 }
 
 int cmd_gxp(const char *path, int listing_only);      /* shader.c */
-int cmd_hlsl(const char *path, int raw);
+int cmd_hlsl(const char *path, int raw, int glsl);
 
 static int cmd_info(const char *path) {
     size_t size = 0;
@@ -935,8 +936,8 @@ int main(int argc, char **argv) {
 
     if (strcmp(argv[1], "gxp") == 0 && argc >= 3)
         return cmd_gxp(argv[2], argc >= 4 && strcmp(argv[3], "--listing") == 0);
-    if (strcmp(argv[1], "hlsl") == 0 && argc >= 3)
-        return cmd_hlsl(argv[2], argc >= 4 ? atoi(argv[3]) : 0);
+    if ((strcmp(argv[1], "hlsl") == 0 || strcmp(argv[1], "glsl") == 0) && argc >= 3)
+        return cmd_hlsl(argv[2], argc >= 4 ? atoi(argv[3]) : 0, argv[1][0] == 'g');
 
     fputs(USAGE, stderr);
     return 2;

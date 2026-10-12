@@ -214,6 +214,8 @@ int gpu_ordered(unsigned format) {
 
 const char *gpu_name(void) { return G.ok ? G.name : "nothing"; }
 
+int gpu_language(void) { return GPU_HLSL; }
+
 /* --- programs compiled before ---------------------------------------------------------------
  *
  * What the compiler makes of a program depends on the text, on which kind

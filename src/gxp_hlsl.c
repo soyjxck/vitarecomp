@@ -46,6 +46,7 @@ typedef struct {
     text body;                      /* the statements of main, before what goes round them is known */
     usse_state st;                  /* only its repeat increments are used */
     int fragment, serial, failed;
+    int glsl;                       /* written for OpenGL: what goes round the statements is that language's */
     int sa_written;                 /* the primary part stores to a secondary attribute: they are copied first */
     int top[5];                     /* one past the highest word named of T, P, O, S, I */
     int uses_mem, uses_index, dynamic;
@@ -614,6 +615,19 @@ static int sampler_unit(const gxp_program *p, uint32_t sa_register) {
     return -1;
 }
 
+/* A sample of a unit's texture by the card's own sampler, at the place
+ * `at`: from the level `lod` names, or with none named from the level the
+ * card works out. The one thing an instruction's statements spell
+ * differently in the two languages: there a texture and its sampler are
+ * two things and sampling is the texture's, here they are one. */
+static const char *sampled(const gen *g, unsigned unit, const char *at, const char *lod, char *out, size_t cap) {
+    if (g->glsl && lod) snprintf(out, cap, "textureLod(TEX%u, %s, %s)", unit, at, lod);
+    else if (g->glsl) snprintf(out, cap, "texture(TEX%u, %s)", unit, at);
+    else if (lod) snprintf(out, cap, "TEX%u.SampleLevel(SMP%u, %s, %s)", unit, unit, at, lod);
+    else snprintf(out, cap, "TEX%u.Sample(SMP%u, %s)", unit, unit, at);
+    return out;
+}
+
 /* --- one instruction ----------------------------------------------------------------------- */
 
 #define OFF(operand, r) usse_repeat_offset(&g->st, in, operand, r)
@@ -986,8 +1000,9 @@ static void emit(gen *g, const usse_insn *in) {
         if (!bound) {
             put(o, "        float4 s%d = float4(0.0, 0.0, 0.0, 0.0);\n", n);
         } else if (g->b->tex_cube[unit]) {
-            put(o, "        float4 s%d = TEX%d.SampleLevel(SMP%d, cube_at(float3(%s, %s, %s)), %s);\n", n, unit, unit,
-                c.n > 0 ? c.e[0] : "0.0", c.n > 1 ? c.e[1] : "0.0", c.n > 2 ? c.e[2] : "0.0", lod);
+            char at[160], sample[320];
+            snprintf(at, sizeof(at), "cube_at(float3(%s, %s, %s))", c.n > 0 ? c.e[0] : "0.0", c.n > 1 ? c.e[1] : "0.0", c.n > 2 ? c.e[2] : "0.0");
+            put(o, "        float4 s%d = %s;\n", n, sampled(g, (unsigned)unit, at, lod, sample, sizeof(sample)));
         } else if (g->b->tex_point[unit] && g->b->larger > 1 && g->b->tex_locked[unit] && g->fragment) {
             put(o, "        float4 s%d = texel_locked(TEX%d, float2(%s, %s), i.pos.xy, %d, ((asuint(VP[2].w) >> %d) & 1u) != 0u, %d, %d);\n", n, unit,
                 c.n > 0 ? c.e[0] : "0.0", c.n > 1 ? c.e[1] : "0.0", g->b->larger, unit, g->b->tex_wrap[unit] & 15, g->b->tex_wrap[unit] >> 4);
@@ -995,8 +1010,9 @@ static void emit(gen *g, const usse_insn *in) {
             put(o, "        float4 s%d = texel_at(TEX%d, float2(%s, %s), %d, %d);\n", n, unit, c.n > 0 ? c.e[0] : "0.0",
                 c.n > 1 ? c.e[1] : "0.0", g->b->tex_wrap[unit] & 15, g->b->tex_wrap[unit] >> 4);
         } else {
-            put(o, "        float4 s%d = TEX%d.SampleLevel(SMP%d, float2(%s, %s), %s);\n", n, unit, unit,
-                c.n > 0 ? c.e[0] : "0.0", c.n > 1 ? c.e[1] : "0.0", lod);
+            char at[160], sample[320];
+            snprintf(at, sizeof(at), "float2(%s, %s)", c.n > 0 ? c.e[0] : "0.0", c.n > 1 ? c.e[1] : "0.0");
+            put(o, "        float4 s%d = %s;\n", n, sampled(g, (unsigned)unit, at, lod, sample, sizeof(sample)));
         }
         val out = new_val(g, K_FLOAT);
         for (int i = 0; i < comps; i++) { snprintf(e, sizeof(e), "s%d.%c", n, "xyzw"[i]); local(g, &out, e); }
@@ -1028,10 +1044,66 @@ static void emit(gen *g, const usse_insn *in) {
 
 /* --- what goes round the instructions -------------------------------------------------------- */
 
-static const char PRELUDE[] =
-    "// Written by the toolkit from a program of the title's: the interpreter's steps, as text.\n"
-    "cbuffer draw : register(b0) { uint4 SAv[66]; float4 VP[3]; uint4 MEMR[8]; };\n"
-    "Buffer<uint> MEM : register(t16);\n"
+/* What a program begins with, before anything of its own: what it is given
+ * and the arithmetic the instructions lean on. One text for both languages,
+ * in pieces, because in a few places the two have different things and not
+ * different names for one thing. Those places are left open here (each a
+ * %s) and `prelude` below fills them: how the constants and the words of
+ * memory are declared, how a word of that memory and a texel of a texture
+ * are fetched by number, what a texture is called when it is handed to a
+ * function and how its size is asked; and a remainder that may be asked of
+ * a number below nothing, which HLSL answers as C does and GLSL does not
+ * answer at all. */
+
+const char gxp_glsl_names[] =
+    "// The words used below are another shading language's. What each is in this one:\n"
+    "#extension GL_ARB_derivative_control : enable\n"
+    "#define float2 vec2\n"
+    "#define float3 vec3\n"
+    "#define float4 vec4\n"
+    "#define int2 ivec2\n"
+    "#define int3 ivec3\n"
+    "#define int4 ivec4\n"
+    "#define uint2 uvec2\n"
+    "#define uint3 uvec3\n"
+    "#define uint4 uvec4\n"
+    /* a number's bits as another kind of number: there one name whatever the bits were, a word or a whole number.
+     * (What is put in is called `of_`, a name nothing else has: a macro's own `.x` is not to be taken for it.) */
+    "#define asfloat(of_) uintBitsToFloat(uint(of_))\n"
+    "#define asuint(of_) floatBitsToUint(of_)\n"
+    "#define asint(of_) floatBitsToInt(of_)\n"
+    /* a half in the low sixteen bits of a word */
+    "#define f16tof32(of_) (unpackHalf2x16(uint(of_) & 0xFFFFu).x)\n"
+    "#define f32tof16(of_) (packHalf2x16(vec2(of_, 0.0)) & 0xFFFFu)\n"
+    "#define saturate(of_) clamp(of_, 0.0, 1.0)\n"
+    /* to the nearest whole number, and to the even one of two as near: the other language's `round` is that */
+    "#define round roundEven\n"
+    /* how fast a number changes from this pixel to the next, measured at this pixel and not shared with its neighbour */
+    "#ifdef GL_ARB_derivative_control\n"
+    "#define ddx_fine dFdxFine\n"
+    "#define ddy_fine dFdyFine\n"
+    "#else\n"
+    "#define ddx_fine dFdx\n"
+    "#define ddy_fine dFdy\n"
+    "#endif\n"
+    /* And one thing that is not a name. A whole number divided by another, neither below nothing: how many times
+     * the second goes into the first. The card this language is mostly written for here, the Nintendo Switch's, has
+     * no instruction that divides whole numbers; its compiler calls a routine of its own for `/` and `%`, a loop of
+     * thirty-two turns, and an emulator of the console may not follow the call at all. So where the text divides,
+     * the GLSL asks this: the answer by floating point, which is out by one at the most, put right by what is left. */
+    "int over(int a, int b) { int q = int(float(a) / float(b)), r = a - q * b; return r < 0 ? q - 1 : r >= b ? q + 1 : q; }\n"
+    "ivec2 over(ivec2 a, int b) { return ivec2(over(a.x, b), over(a.y, b)); }\n";
+
+static const char PRELUDE_SAID[] =
+    "// Written by the toolkit from a program of the title's: the interpreter's steps, as text.\n";
+
+/* Two places: what the block of constants is declared as, and the words of memory. */
+static const char PRELUDE_GIVEN[] =
+    "%s { uint4 SAv[66]; float4 VP[3]; uint4 MEMR[8]; };\n"
+    "%s\n";
+
+/* One place: a word of the memory by its number. */
+static const char PRELUDE_MEMORY[] =
     "uint sa_at(int i) { uint u = uint(clamp(i, 0, 263)); return SAv[u >> 2][u & 3u]; }\n"
     /* The first of the eight runs that holds the address, looked for from the last so that the first is what is
      * left, and one load at the end. Written as a loop that returns from its middle, the same thing took the
@@ -1043,8 +1115,11 @@ static const char PRELUDE[] =
     "        if (at < MEMR[k].y) word = int(MEMR[k].z + (at >> 2));\n"
     "    }\n"
     "    if (word < 0) return 0u;\n"
-    "    return MEM.Load(word);\n"
-    "}\n"
+    "    return %s;\n"
+    "}\n";
+
+/* No place: the same in both. */
+static const char PRELUDE_HALVES[] =
     /* A float as a half, to the nearest and to the even one of two as near:
      * what the interpreter does. The card's own conversion cuts the bits
      * off, which over a program's worth of halves is a different picture:
@@ -1065,36 +1140,66 @@ static const char PRELUDE[] =
     "    best = a >= 65520.0 ? 0x7C00u : best;\n"
     "    best = m >= 0x7C00u ? m : best;\n"
     "    return (h & 0x8000u) | best;\n"
-    "}\n"
-    /* A flat texture's texel by number, wrapped as the console's mode says,
-     * and where a point lies among the texels: on 256 steps to a texel, as
-     * gxm_tex.c has it. One texel with no filter, or the four a bilinear
-     * filter would blend with how far the point lies among them. */
+    "}\n";
+
+/* A flat texture's texel by number, wrapped as the console's mode says,
+ * and where a point lies among the texels: on 256 steps to a texel, as
+ * gxm_tex.c has it. One texel with no filter, or the four a bilinear
+ * filter would blend with how far the point lies among them.
+ *
+ * The wrapping is written twice. A texel left of the first has a number
+ * below nothing, and what is left when such a number is divided is, in
+ * HLSL, what C leaves, which the first form puts right afterwards; GLSL
+ * says only that it is not defined, and its cards may have no divide for
+ * whole numbers at all (gxp_glsl_names). The second form never asks. What
+ * is left of i over n, counted up from the multiple of n below it, is
+ * found by floating point: once, which for a texel far outside the texture
+ * is out by a few whole n's, and again of what the first left, which is
+ * small and so exact. */
+static const char PRELUDE_WRAPPED[] =
     "int wrapped(int i, int n, int mode) {\n"
     "    if (mode == 0 || mode == 4) { i %= n; return i < 0 ? i + n : i; }\n"
     "    if (mode == 1) { i %= 2 * n; if (i < 0) i += 2 * n; return i < n ? i : 2 * n - 1 - i; }\n"
     "    if (mode == 3) { if (i < 0) i = -1 - i; return i >= n ? n - 1 : i; }\n"
     "    return i < 0 ? 0 : i >= n ? n - 1 : i;\n"
+    "}\n";
+
+static const char PRELUDE_WRAPPED_GLSL[] =
+    "int left_of(int i, int n) {\n"
+    "    int r = i - int(floor(float(i) / float(n))) * n;\n"
+    "    r -= int(floor(float(r) / float(n))) * n;\n"
+    "    return r < 0 ? r + n : r >= n ? r - n : r;\n"
     "}\n"
-    "float4 texel_at(Texture2D t, float2 uv, int across, int down) {\n"
-    "    uint w, h;\n"
-    "    t.GetDimensions(w, h);\n"
+    "int wrapped(int i, int n, int mode) {\n"
+    "    if (mode == 0 || mode == 4) return left_of(i, n);\n"
+    "    if (mode == 1) { i = left_of(i, 2 * n); return i < n ? i : 2 * n - 1 - i; }\n"
+    "    if (mode == 3) { if (i < 0) i = -1 - i; return i >= n ? n - 1 : i; }\n"
+    "    return i < 0 ? 0 : i >= n ? n - 1 : i;\n"
+    "}\n";
+
+/* Fourteen places: for each of the two functions what a texture is called
+ * and how its size is asked, and round each texel's place what fetches it. */
+static const char PRELUDE_TEXELS[] =
+    "float4 texel_at(%s t, float2 uv, int across, int down) {\n"
+    "%s"
     "    if (uv.x != uv.x || uv.y != uv.y) return float4(0.0, 0.0, 0.0, 0.0);\n"
     "    if (abs(uv.x) > 32768.0) uv.x = 0.0;\n"
     "    if (abs(uv.y) > 32768.0) uv.y = 0.0;\n"
     "    float2 p = floor(floor(uv * float2(float(w), float(h)) * 256.0 + 0.5) / 256.0);\n"
-    "    return t.Load(int3(wrapped(int(p.x), int(w), across), wrapped(int(p.y), int(h), down), 0));\n"
+    "    return %swrapped(int(p.x), int(w), across), wrapped(int(p.y), int(h), down)%s;\n"
     "}\n"
-    "float4 gather_at(Texture2D t, float2 uv, int across, int down, out float2 among) {\n"
-    "    uint w, h;\n"
-    "    t.GetDimensions(w, h);\n"
+    "float4 gather_at(%s t, float2 uv, int across, int down, out float2 among) {\n"
+    "%s"
     "    if (uv.x != uv.x || uv.y != uv.y || abs(uv.x) > 32768.0 || abs(uv.y) > 32768.0) uv = float2(0.0, 0.0);\n"
     "    float2 p = floor((uv * float2(float(w), float(h)) - 0.5) * 256.0 + 0.5) / 256.0, first = floor(p);\n"
     "    int x0 = wrapped(int(first.x), int(w), across), x1 = wrapped(int(first.x) + 1, int(w), across);\n"
     "    int y0 = wrapped(int(first.y), int(h), down), y1 = wrapped(int(first.y) + 1, int(h), down);\n"
     "    among = p - first;\n"
-    "    return float4(t.Load(int3(x0, y1, 0)).x, t.Load(int3(x1, y1, 0)).x, t.Load(int3(x1, y0, 0)).x, t.Load(int3(x0, y0, 0)).x);\n"
-    "}\n"
+    "    return float4(%sx0, y1%s.x, %sx1, y1%s.x, %sx1, y0%s.x, %sx0, y0%s.x);\n"
+    "}\n";
+
+/* No place. */
+static const char PRELUDE_REST[] =
     /* The face of a cube a direction points at and where on it, as
      * gxm_tex.c's cube_face has it: a cube is six flat faces, and a sample
      * near the edge of one is of that face's texels and no other's. A card
@@ -1125,6 +1230,54 @@ static const char PRELUDE[] =
     "    return f != f ? 0 : i;\n"
     "}\n";
 
+/* A texture that is read as parts of a surface's pixels, on a target
+ * larger than the title made it (gxp_hlsl.h). Six places: the two of a
+ * texture, the two round its texel, and two whole-number divisions. */
+static const char PRELUDE_LOCKED[] =
+    "float4 texel_locked(%s t, float2 uv, float2 pos, int n, bool kept, int across, int down) {\n"
+    "%s"
+    "    int2 part = %s, size = %s;\n"
+    "    float2 back = float2(n - 1, n - 1) * 0.5 - float2(part);\n"
+    "    uv += ddx_fine(uv) * back.x + ddy_fine(uv) * back.y;\n"
+    "    bool none = uv.x != uv.x || uv.y != uv.y;\n"
+    "    uv.x = abs(uv.x) > 32768.0 ? 0.0 : uv.x;\n"
+    "    uv.y = abs(uv.y) > 32768.0 ? 0.0 : uv.y;\n"
+    "    float2 p = floor(floor(uv * float2(size) * 256.0 + 0.5) / 256.0);\n"
+    "    int2 texel = int2(wrapped(int(p.x), size.x, across), wrapped(int(p.y), size.y, down));\n"
+    "    float4 found = %skept ? texel * n + part : texel%s;\n"
+    "    return none ? float4(0.0, 0.0, 0.0, 0.0) : found;\n"
+    "}\n";
+static const char LOCKED_PART[] = "int2(pos) % n", LOCKED_PART_GLSL[] = "int2(pos) - over(int2(pos), n) * n";
+static const char LOCKED_SIZE[] = "int2(w, h) / (kept ? n : 1)", LOCKED_SIZE_GLSL[] = "over(int2(w, h), kept ? n : 1)";
+
+/* The places, filled. The numbers a GLSL program finds things at are
+ * gxp_hlsl.h's: a vertex program's are after a fragment program's. */
+#define GLSL_VERTEX_UNITS 18
+
+static void prelude(text *out, const gen *g, int locked) {
+    /* what a flat texture is called when a function is handed one, how its size is asked, and what goes before and
+     * after a texel's place, two whole numbers, to fetch it */
+    const char *flat = g->glsl ? "sampler2D" : "Texture2D";
+    const char *size = g->glsl ? "    uint w = uint(textureSize(t, 0).x), h = uint(textureSize(t, 0).y);\n"
+                               : "    uint w, h;\n    t.GetDimensions(w, h);\n";
+    const char *fetch = g->glsl ? "texelFetch(t, int2(" : "t.Load(int3(", *fetched = g->glsl ? "), 0)" : ", 0))";
+    put(out, "%s", PRELUDE_SAID);
+    if (g->glsl) {
+        char block[96], memory[96];
+        snprintf(block, sizeof(block), "layout(std140, binding = %d) uniform draw", g->fragment ? 1 : 0);
+        snprintf(memory, sizeof(memory), "layout(binding = %d) uniform usamplerBuffer MEM;", (g->fragment ? 0 : GLSL_VERTEX_UNITS) + 16);
+        put(out, "%s", gxp_glsl_names);
+        put(out, PRELUDE_GIVEN, block, memory);
+    } else {
+        put(out, PRELUDE_GIVEN, "cbuffer draw : register(b0)", "Buffer<uint> MEM : register(t16);");
+    }
+    put(out, PRELUDE_MEMORY, g->glsl ? "texelFetch(MEM, word).x" : "MEM.Load(word)");
+    put(out, "%s%s", PRELUDE_HALVES, g->glsl ? PRELUDE_WRAPPED_GLSL : PRELUDE_WRAPPED);
+    put(out, PRELUDE_TEXELS, flat, size, fetch, fetched, flat, size, fetch, fetched, fetch, fetched, fetch, fetched, fetch, fetched);
+    put(out, "%s", PRELUDE_REST);
+    if (locked) put(out, PRELUDE_LOCKED, flat, size, g->glsl ? LOCKED_PART_GLSL : LOCKED_PART, g->glsl ? LOCKED_SIZE_GLSL : LOCKED_SIZE, fetch, fetched);
+}
+
 /* A float into the registers as its type packs it: for the inputs. */
 static void pack_line(text *o, const char *bank, int reg, unsigned type, unsigned k, const char *value) {
     switch (type) {
@@ -1144,9 +1297,23 @@ static void pack_line(text *o, const char *bank, int reg, unsigned type, unsigne
     }
 }
 
-static void varyings(text *o, uint32_t slots) {
+/* The interpolated quantities as members of what a program is handed or
+ * hands on. HLSL says there which of the card's quantities each is; GLSL
+ * says it of variables of their own (`linked`). */
+static void varyings(text *o, uint32_t slots, int glsl) {
+    for (unsigned slot = 0; slot < GXP_SLOT_POSITION; slot++) {
+        if (!((slots >> slot) & 1)) continue;
+        if (glsl) put(o, "    float4 s%u;\n", slot);
+        else put(o, "    float4 s%u : TEXCOORD%u;\n", slot, slot);
+    }
+}
+
+/* GLSL's own variables for those quantities, `way` in or out, each at the
+ * location of its slot: that is how a vertex program's and a fragment
+ * program's are known for the same thing when each is linked alone. */
+static void linked(text *o, uint32_t slots, const char *way) {
     for (unsigned slot = 0; slot < GXP_SLOT_POSITION; slot++)
-        if ((slots >> slot) & 1) put(o, "    float4 s%u : TEXCOORD%u;\n", slot, slot);
+        if ((slots >> slot) & 1) put(o, "layout(location = %u) %s vec4 %s_s%u;\n", slot, way, way, slot);
 }
 
 /* The four floats of an interpolated quantity, as the fragment program's
@@ -1159,6 +1326,10 @@ static const char *slot_text(const gen *g, unsigned slot, char *out, size_t cap)
 }
 
 char *gxp_hlsl(const gxp_program *p, const gxp_hlsl_bind *bind, char *why, size_t why_size) {
+    return gxp_text(p, bind, GXP_HLSL, why, why_size);
+}
+
+char *gxp_text(const gxp_program *p, const gxp_hlsl_bind *bind, int language, char *why, size_t why_size) {
     gen g;
     text out;
     memset(&g, 0, sizeof(g));
@@ -1166,12 +1337,15 @@ char *gxp_hlsl(const gxp_program *p, const gxp_hlsl_bind *bind, char *why, size_
     g.p = p;
     g.b = bind;
     g.fragment = (p->flags & GXP_FLAG_FRAGMENT) != 0;
+    g.glsl = language == GXP_GLSL;
     usse_reset(&g.st);
     if (why && why_size) why[0] = '\0';
 
     int reads_pixel = g.fragment && (p->flags & GXP_FLAG_FRAGCOLOR) && bind->now;
     if (p->undecoded) fail(&g, "%u instructions that could not be read", p->undecoded);
     if (g.fragment && (p->flags & GXP_FLAG_DEPTH)) fail(&g, "a program that replaces the depth");
+    /* asked only of a card that says it has the means (gpu.h's gpu_ordered), and none reached through this language does */
+    if (g.glsl && reads_pixel && bind->ordered) fail(&g, "a target read and written in the order the triangles come, in a language with no word for it");
 
     /* a store to a secondary attribute makes them all locals */
     for (uint32_t i = 0; i < p->primary_count; i++) {
@@ -1252,53 +1426,74 @@ char *gxp_hlsl(const gxp_program *p, const gxp_hlsl_bind *bind, char *why, size_
     }
     for (int k = 0; k < 3; k++) if (g.top[k] > USSE_WORDS) g.top[k] = USSE_WORDS;
 
-    put(&out, "%s", PRELUDE);
     int locked = 0;
     if (g.fragment && bind->larger > 1)
         for (unsigned unit = 0; unit < GXP_TEXTURE_UNITS; unit++) locked |= bind->tex_locked[unit] && bind->tex_point[unit];
-    if (locked)
-        put(&out, "float4 texel_locked(Texture2D t, float2 uv, float2 pos, int n, bool kept, int across, int down) {\n"
-                  "    uint w, h;\n"
-                  "    t.GetDimensions(w, h);\n"
-                  "    int2 part = int2(pos) %% n, size = int2(w, h) / (kept ? n : 1);\n"
-                  "    float2 back = float2(n - 1, n - 1) * 0.5 - float2(part);\n"
-                  "    uv += ddx_fine(uv) * back.x + ddy_fine(uv) * back.y;\n"
-                  "    bool none = uv.x != uv.x || uv.y != uv.y;\n"
-                  "    uv.x = abs(uv.x) > 32768.0 ? 0.0 : uv.x;\n"
-                  "    uv.y = abs(uv.y) > 32768.0 ? 0.0 : uv.y;\n"
-                  "    float2 p = floor(floor(uv * float2(size) * 256.0 + 0.5) / 256.0);\n"
-                  "    int2 texel = int2(wrapped(int(p.x), size.x, across), wrapped(int(p.y), size.y, down));\n"
-                  "    float4 found = t.Load(int3(kept ? texel * n + part : texel, 0));\n"
-                  "    return none ? float4(0.0, 0.0, 0.0, 0.0) : found;\n"
-                  "}\n");
+    prelude(&out, &g, locked);
     for (unsigned unit = 0; unit < GXP_TEXTURE_UNITS; unit++) {
         if (!bind->tex_components[unit] || !((p->textures_used >> unit) & 1)) continue;
-        put(&out, "%s TEX%u : register(t%u);\nSamplerState SMP%u : register(s%u);\n", bind->tex_cube[unit] ? "Texture2DArray" : "Texture2D",
-            unit, unit, unit, unit);
+        if (g.glsl)
+            put(&out, "layout(binding = %u) uniform %s TEX%u;\n", unit + (g.fragment ? 0 : GLSL_VERTEX_UNITS),
+                bind->tex_cube[unit] ? "sampler2DArray" : "sampler2D", unit);
+        else
+            put(&out, "%s TEX%u : register(t%u);\nSamplerState SMP%u : register(s%u);\n", bind->tex_cube[unit] ? "Texture2DArray" : "Texture2D",
+                unit, unit, unit, unit);
     }
     int ordered = reads_pixel && bind->ordered && bind->now == 1 && !bind->result_words;
     if (ordered) put(&out, "RasterizerOrderedTexture2D<float4> NOW : register(u0);\n");
+    else if (reads_pixel && g.glsl) put(&out, "layout(binding = 17) uniform %s NOW;\n", bind->now == 2 ? "usampler2D" : "sampler2D");
     else if (reads_pixel) put(&out, "%s NOW : register(t17);\n", bind->now == 2 ? "Texture2D<uint4>" : "Texture2D<float4>");
+    /* The registers. HLSL's begin at nothing, which a program that packs a half into a word it has not yet written
+     * leans on; GLSL's begin as whatever was there, and are made nothing first thing (`blank` below). */
     static const char *const NAME[5] = { "T", "P", "O", "S", "I" };
-    for (int k = 0; k < 3; k++) if (g.top[k]) put(&out, "static uint %s[%d];\n", NAME[k], g.top[k]);
-    if (g.sa_written) put(&out, "static uint S[%d];\n", USSE_WORDS);
-    if (g.top[4]) put(&out, "static uint I[16];\n");
-    put(&out, "static bool PR0, PR1, PR2, PR3;\n");
-    if (g.uses_index) put(&out, "static int IX0, IX1;\n");
+    const char *kept = g.glsl ? "" : "static ";
+    for (int k = 0; k < 3; k++) if (g.top[k]) put(&out, "%suint %s[%d];\n", kept, NAME[k], g.top[k]);
+    if (g.sa_written) put(&out, "%suint S[%d];\n", kept, USSE_WORDS);
+    if (g.top[4]) put(&out, "%suint I[16];\n", kept);
+    if (g.glsl) put(&out, "bool PR0 = false, PR1 = false, PR2 = false, PR3 = false;\n");
+    else put(&out, "static bool PR0, PR1, PR2, PR3;\n");
+    if (g.uses_index) put(&out, g.glsl ? "int IX0 = 0, IX1 = 0;\n" : "static int IX0, IX1;\n");
+    text blank;
+    memset(&blank, 0, sizeof(blank));
+    if (g.glsl) {
+        for (int k = 0; k < 3; k++) if (g.top[k]) put(&blank, "    for (int q = 0; q < %d; q++) %s[q] = 0u;\n", g.top[k], NAME[k]);
+        if (g.top[4]) put(&blank, "    for (int q = 0; q < 16; q++) I[q] = 0u;\n");
+    }
 
-    if (!g.fragment) {
+    /* What a program is handed and what it hands on are the members of two structures in both languages. In HLSL
+     * each member says which of the card's quantities it is and the program is `main`; in GLSL the members are
+     * plain, the program is a function called `program`, and a `main` written after it (below) carries the card's
+     * quantities in and out. */
+    if (!g.fragment && g.glsl) {
+        put(&out, "struct VIN {\n");
+        for (uint32_t k = 0; k < bind->pa_words / 4; k++) put(&out, "    uint4 pa%u;\n", k);
+        if (!bind->pa_words) put(&out, "    uint nothing;\n");
+        put(&out, "};\nstruct VOUT {\n    float4 pos;\n");
+        varyings(&out, bind->slots, 1);
+        put(&out, "    float beyond;\n};\n");
+        for (uint32_t k = 0; k < bind->pa_words / 4; k++) put(&out, "layout(location = %u) in uvec4 in_pa%u;\n", k, k);
+        linked(&out, bind->slots, "out");
+        put(&out, "out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[1]; };\n\nVOUT program(VIN i) {\n%s", blank.s ? blank.s : "");
+        for (uint32_t k = 0; k < bind->pa_words; k++) put(&out, "    P[%u] = i.pa%u.%c;\n", k, k / 4, "xyzw"[k & 3]);
+    } else if (!g.fragment) {
         put(&out, "struct VIN {\n");
         for (uint32_t k = 0; k < bind->pa_words / 4; k++) put(&out, "    uint4 pa%u : PA%u;\n", k, k);
         if (!bind->pa_words) put(&out, "    uint nothing : PA0;\n");
         put(&out, "};\nstruct VOUT {\n    float4 pos : SV_Position;\n");
-        varyings(&out, bind->slots);
+        varyings(&out, bind->slots, 0);
         put(&out, "    float beyond : SV_ClipDistance0;\n};\n\nVOUT main(VIN i) {\n");
         for (uint32_t k = 0; k < bind->pa_words; k++) put(&out, "    P[%u] = i.pa%u.%c;\n", k, k / 4, "xyzw"[k & 3]);
     } else {
-        put(&out, "struct PIN {\n    float4 pos : SV_Position;\n");
-        varyings(&out, bind->slots);
+        put(&out, g.glsl ? "struct PIN {\n    float4 pos;\n" : "struct PIN {\n    float4 pos : SV_Position;\n");
+        varyings(&out, bind->slots, g.glsl);
+        if (g.glsl) {
+            put(&out, "};\n");
+            linked(&out, bind->slots, "in");
+            put(&out, "layout(location = 0) out %s result;\n\n%s program(PIN i) {\n%s", bind->result_words ? "uvec4" : "vec4",
+                bind->result_words ? "uint4" : "float4", blank.s ? blank.s : "");
+        }
         /* a program that writes the target itself is not run for a pixel the tests turn away */
-        if (ordered) put(&out, "};\n\n[earlydepthstencil]\nvoid main(PIN i) {\n    float4 was = NOW[int2(i.pos.xy)];\n");
+        else if (ordered) put(&out, "};\n\n[earlydepthstencil]\nvoid main(PIN i) {\n    float4 was = NOW[int2(i.pos.xy)];\n");
         else put(&out, "};\n\n%s main(PIN i) : SV_Target {\n", bind->result_words ? "uint4" : "float4");
 
         /* the primary attributes, from the program's input list */
@@ -1331,13 +1526,14 @@ char *gxp_hlsl(const gxp_program *p, const gxp_hlsl_bind *bind, char *why, size_
                     if (in->projection && !bind->tex_cube[unit]) snprintf(at, sizeof(at), "v.xy / v.%c", in->projection == 1 ? 'w' : 'z');
                     else snprintf(at, sizeof(at), "v.xy");
                     /* a cube is read from its first level unless the code names another: gxm_draw.c's sample_input */
-                    if (bind->tex_cube[unit]) put(&out, "        float4 s = TEX%u.SampleLevel(SMP%u, cube_at(v.xyz), 0.0);\n", unit, unit);
+                    char sample[96];
+                    if (bind->tex_cube[unit]) put(&out, "        float4 s = %s;\n", sampled(&g, unit, "cube_at(v.xyz)", "0.0", sample, sizeof(sample)));
                     else if (bind->tex_point[unit] && bind->larger > 1 && bind->tex_locked[unit])
                         put(&out, "        float4 s = texel_locked(TEX%u, %s, i.pos.xy, %d, ((asuint(VP[2].w) >> %u) & 1u) != 0u, %d, %d);\n", unit, at,
                             bind->larger, unit, bind->tex_wrap[unit] & 15, bind->tex_wrap[unit] >> 4);
                     else if (bind->tex_point[unit])
                         put(&out, "        float4 s = texel_at(TEX%u, %s, %d, %d);\n", unit, at, bind->tex_wrap[unit] & 15, bind->tex_wrap[unit] >> 4);
-                    else put(&out, "        float4 s = TEX%u.Sample(SMP%u, %s);\n", unit, unit, at);
+                    else put(&out, "        float4 s = %s;\n", sampled(&g, unit, at, NULL, sample, sizeof(sample)));
                 }
                 /* into the registers in the form the program was compiled to find there */
                 if (in->result == 3) {
@@ -1374,15 +1570,17 @@ char *gxp_hlsl(const gxp_program *p, const gxp_hlsl_bind *bind, char *why, size_
     if (reads_pixel) {
         /* A program that blends for itself is given the pixel as it stands,
          * in the registers its own result will be left in. */
+        const char *pixel = g.glsl ? "texelFetch(NOW, int2(i.pos.xy), 0)" : "NOW.Load(int3(int2(i.pos.xy), 0))";
         if (bind->now == 2) {
-            put(&out, "    {\n        uint4 now = NOW.Load(int3(int2(i.pos.xy), 0));\n");
+            put(&out, "    {\n        uint4 now = %s;\n", pixel);
             for (int k = 0; k < 4; k++) {
                 if (k < bind->now_words) put(&out, "        O[%d] = now.%c;\n", k, "xyzw"[k]);
                 else put(&out, "        O[%d] = 0u;\n", k);
             }
             put(&out, "    }\n");
         } else {
-            put(&out, ordered ? "    {\n        float4 now = was;\n" : "    {\n        float4 now = NOW.Load(int3(int2(i.pos.xy), 0));\n");
+            if (ordered) put(&out, "    {\n        float4 now = was;\n");
+            else put(&out, "    {\n        float4 now = %s;\n", pixel);
             if (p->result_type == GXP_F16) {
                 put(&out, "        O[0] = h16(now.x) | (h16(now.y) << 16);\n"
                           "        O[1] = h16(now.z) | (h16(now.w) << 16);\n");
@@ -1455,6 +1653,31 @@ char *gxp_hlsl(const gxp_program *p, const gxp_hlsl_bind *bind, char *why, size_
                       "                                 (keep & 4u) != 0u ? colour.z : was.z, (keep & 8u) != 0u ? colour.w : was.w);\n}\n");
         else put(&out, "    return colour;\n}\n");
     }
+
+    /* GLSL's `main`: the card's quantities into the structure the program is handed, and what it hands on out of the
+     * other. A pixel's place has its fourth number the other way up from the other language's. */
+    if (g.glsl && !g.fragment) {
+        put(&out, "\nvoid main() {\n    VIN i;\n");
+        for (uint32_t k = 0; k < bind->pa_words / 4; k++) put(&out, "    i.pa%u = in_pa%u;\n", k, k);
+        if (!bind->pa_words) put(&out, "    i.nothing = 0u;\n");
+        put(&out, "    VOUT o = program(i);\n"
+                  "#ifdef CLIP_AS_GL\n"
+                  "    gl_Position = vec4(o.pos.x, -o.pos.y, 2.0 * o.pos.z - o.pos.w, o.pos.w);\n"
+                  "#else\n"
+                  "    gl_Position = o.pos;\n"
+                  "#endif\n"
+                  "    gl_ClipDistance[0] = o.beyond;\n");
+        for (unsigned slot = 0; slot < GXP_SLOT_POSITION; slot++)
+            if ((bind->slots >> slot) & 1) put(&out, "    out_s%u = o.s%u;\n", slot, slot);
+        put(&out, "}\n");
+    } else if (g.glsl) {
+        put(&out, "\nvoid main() {\n    PIN i;\n    i.pos = vec4(gl_FragCoord.xyz, 1.0 / gl_FragCoord.w);\n");
+        for (unsigned slot = 0; slot < GXP_SLOT_POSITION; slot++)
+            if ((bind->slots >> slot) & 1) put(&out, "    i.s%u = in_s%u;\n", slot, slot);
+        put(&out, "    result = program(i);\n}\n");
+    }
+    if (blank.bad) out.bad = 1;
+    free(blank.s);
 
     if (out.bad) {
         if (why && why_size) snprintf(why, why_size, "out of memory");

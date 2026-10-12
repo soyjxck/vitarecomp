@@ -61,6 +61,9 @@ static vthread  g_t[MAX_THREADS];
 static mtx_t    g_mtx;
 static vthread *g_cur;
 static int      g_init;
+static void   (*g_leave)(void);     /* what the running thread does before the baton leaves it (sched.h) */
+
+void vita_sched_on_handover(void (*leave)(void)) { g_leave = leave; }
 
 int32_t vita_slice = VITA_SLICE;
 
@@ -218,6 +221,7 @@ static vthread *pick_next(vthread *cur) {
  * back. Called with the mutex held; returns with it held. */
 static void switch_to(vthread *cur, vthread *next) {
     if (next == cur) { cur->state = T_RUNNING; return; }
+    if (g_leave) g_leave();
     save_regs(cur);
     load_regs(next);
     next->state = T_RUNNING;
@@ -328,6 +332,7 @@ void vita_thread_exit(int status) {
         mtx_unlock(&g_mtx);
         vita_host_exit(status);
     }
+    if (g_leave) g_leave();
     load_regs(next);
     next->state = T_RUNNING;
     g_cur = next;

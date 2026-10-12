@@ -157,7 +157,9 @@ static gpu_shader *shader_for(const gxm_program *program, const gxp_hlsl_bind *b
         char why[200], log[1024];
         int fragment = (program->gxp.flags & GXP_FLAG_FRAGMENT) != 0;
         uint64_t began = now_ns();
-        char *text = gxp_hlsl(&program->gxp, bind, why, sizeof(why));
+        /* in the language the card reads */
+        int glsl = gpu_language() == GPU_GLSL;
+        char *text = gxp_text(&program->gxp, bind, glsl ? GXP_GLSL : GXP_HLSL, why, sizeof(why));
         s->used = 1;
         s->name = program->name;
         s->bind = *bind;
@@ -177,7 +179,8 @@ static gpu_shader *shader_for(const gxm_program *program, const gxp_hlsl_bind *b
         const char *dump = getenv("VITARECOMP_GXM_GPU_SHADERS");
         if (dump && *dump) {                        /* the text, for reading: a file a program and binding */
             char path[1024];
-            snprintf(path, sizeof(path), "%s/%c_%016llx_%08x.hlsl", dump, fragment ? 'f' : 'v', (unsigned long long)program->name, (unsigned)h);
+            snprintf(path, sizeof(path), "%s/%c_%016llx_%08x.%s", dump, fragment ? 'f' : 'v', (unsigned long long)program->name, (unsigned)h,
+                     glsl ? "glsl" : "hlsl");
             FILE *f = fopen(path, "wb");
             if (f) { fputs(text, f); fclose(f); }
         }
@@ -1459,12 +1462,25 @@ static int say_kept(words *w, const pixfmt *f, int channel) {
     }
 }
 
-static const char VIEW_PRELUDE[] =
-    "// Written by the toolkit: a surface on the card, read as the texture a title makes of its memory.\n"
-    "cbuffer view : register(b0) { int4 A; int4 B; };   // A: the texture's first byte in the surface, bytes a row of it, bytes a texel,\n"
+/* These programs are written once, in HLSL's words, for either language
+ * the card may read (gpu.h's gpu_language): a GLSL text begins by saying
+ * what those words are in its own (gxp_hlsl.h's gxp_glsl_names). Where the
+ * two have different things and not different names, the text is left open
+ * (a %s) and view_text fills it: how the constants and the surface are
+ * declared, how a pixel of the surface is fetched by its place, and what
+ * the program is called and handed. */
+static const char VIEW_SAID[] =
+    "// Written by the toolkit: a surface on the card, read as the texture a title makes of its memory.\n";
+
+/* Three places: what the constants are declared as; what a variable of the program's own that it keeps is; and what
+ * that variable begins as, where the language does not make it nothing by itself. */
+static const char VIEW_GIVEN[] =
+    "%s { int4 A; int4 B; };   // A: the texture's first byte in the surface, bytes a row of it, bytes a texel,\n"
     "                                                    // bytes a row of the surface; B: bytes a pixel of it, its width, its height,\n"
     "                                                    // and how many of the card's pixels across and down are one of those\n"
-    "static int2 SUB;                                    // which of them, of the texel being made\n"
+    "%sint2 SUB%s;                                    // which of them, of the texel being made\n";
+
+static const char VIEW_PRELUDE[] =
     "float small(uint x, uint mb) {\n"
     "    uint e = x >> mb, m = x & ((1u << mb) - 1u);\n"
     "    if (e == 0u) return float(m) * asfloat((113u - mb) << 23);\n"
@@ -1497,18 +1513,43 @@ static const char VIEW_PRELUDE[] =
  * have kept it. NULL when there is no such program. */
 enum { BY_BYTES = 0, BY_PIXEL, AS_KEPT };
 
+/* What a program finds the surface as, declared in the card's language:
+ * `of` is what a texel of it is there, in HLSL's words. */
+static void say_source(words *w, int glsl, const char *of, const char *name, int unit) {
+    if (glsl) say(w, "layout(binding = %d) uniform %ssampler2D %s;\n", unit, of[0] == 'u' ? "u" : "", name);
+    else say(w, "Texture2D<%s> %s : register(t%d);\n", of, name, unit);
+}
+
 static char *view_text(unsigned format, const pixfmt *tf, unsigned texture_gamma, int how, const pixfmt *kept, unsigned surface_gamma) {
     words w = { 0 };
+    int glsl = gpu_language() == GPU_GLSL;
+    /* the program, and what it is handed: in GLSL a function, with a `main` after it that hands it the texel's place */
+    const char *head = glsl ? "float4 program(float4 pos) {\n" : "float4 main(float4 pos : SV_Position) : SV_Target {\n";
+    /* a pixel of the surface by its column and row; its stencil's; and its depth, which is one number: there the
+     * whole of what is fetched, here the first of four */
+    const char *px = glsl ? "texelFetch(SRC, int2(col * B.w + SUB.x, row * B.w + SUB.y), 0)" : "SRC.Load(int3(col * B.w + SUB.x, row * B.w + SUB.y, 0))";
+    const char *px2 = glsl ? "texelFetch(SRC2, int2(col * B.w + SUB.x, row * B.w + SUB.y), 0)" : "SRC2.Load(int3(col * B.w + SUB.x, row * B.w + SUB.y, 0))";
+    const char *deep = glsl ? "texelFetch(SRC, int2(col * B.w + SUB.x, row * B.w + SUB.y), 0).x" : px;
+    /* whole numbers divided, none of them below nothing: there the language's own `/` and `%`, here a function
+     * that asks no divide of the card (gxp_hlsl.h's gxp_glsl_names says why). In turn: which part of a pixel the
+     * texel is and which pixel; the row and the column the texture begins at; the row and the column of a byte. */
+    const char *sub = glsl ? "whole - over(whole, B.w) * B.w" : "whole % B.w", *each = glsl ? "over(whole, B.w)" : "whole / B.w";
+    const char *row0 = glsl ? "over(A.x, A.w)" : "A.x / A.w", *col0 = glsl ? "over(A.x - row * A.w, B.x)" : "(A.x - row * A.w) / B.x";
+    const char *row_of = glsl ? "over(byte, A.w)" : "byte / A.w", *col_of = glsl ? "over(rest, B.x)" : "rest / B.x";
+    say(&w, "%s", VIEW_SAID);
+    if (glsl) say(&w, "%s", gxp_glsl_names);
+    say(&w, VIEW_GIVEN, glsl ? "layout(std140, binding = 1) uniform view" : "cbuffer view : register(b0)", glsl ? "" : "static ",
+        glsl ? " = int2(0, 0)" : "");
     say(&w, "%s", VIEW_PRELUDE);
     if (how == AS_KEPT) {
-        say(&w, "Texture2D<float4> SRC : register(t0);\n"
-                "float4 main(float4 pos : SV_Position) : SV_Target {\n"
+        say_source(&w, glsl, "float4", "SRC", 0);
+        say(&w, "%s"
                 "    int2 whole = int2(pos.xy);\n"
-                "    SUB = whole %% B.w;\n"
-                "    int row = A.x / A.w, col = (A.x - row * A.w) / B.x;\n"
-                "    int2 at = whole / B.w + int2(col, row);\n"
+                "    SUB = %s;\n"
+                "    int row = %s, col = %s;\n"
+                "    int2 at = %s + int2(col, row);\n"
                 "    if (at.x >= B.y || at.y >= B.z) return float4(0.0, 0.0, 0.0, 0.0);\n"
-                "    float4 c = SRC.Load(int3(at * B.w + SUB, 0));\n");
+                "    float4 c = %s;\n", head, sub, row0, col0, each, glsl ? "texelFetch(SRC, at * B.w + SUB, 0)" : "SRC.Load(int3(at * B.w + SUB, 0))");
         /* the card holds light; the surface's bytes would hold it on the display's curve if the surface is on it */
         if (surface_gamma) say(&w, "    c.xyz = float3(on_curve(c.x), on_curve(c.y), on_curve(c.z));\n");
         for (int k = 0; k < 4; k++) if (!say_kept(&w, kept, k)) { free(w.s); return NULL; }
@@ -1525,61 +1566,63 @@ static char *view_text(unsigned format, const pixfmt *tf, unsigned texture_gamma
     } else {
         switch (format) {
         case GPU_RG32UI:
-            say(&w, "Texture2D<uint4> SRC : register(t0);\n"
-                    "uint unit_at(int col, int row, int k) { uint4 p = SRC.Load(int3(col * B.w + SUB.x, row * B.w + SUB.y, 0)); return k == 0 ? p.x : p.y; }\n");
+            say_source(&w, glsl, "uint4", "SRC", 0);
+            say(&w, "uint unit_at(int col, int row, int k) { uint4 p = %s; return k == 0 ? p.x : p.y; }\n", px);
             break;
         case GPU_RGBA8: case GPU_RGBA8_SRGB:
-            say(&w, "Texture2D<float4> SRC : register(t0);\n"
-                    "uint unit_at(int col, int row, int k) { uint4 b = uint4(SRC.Load(int3(col * B.w + SUB.x, row * B.w + SUB.y, 0)) * 255.0 + 0.5); return b.x | (b.y << 8) | (b.z << 16) | (b.w << 24); }\n");
+            say_source(&w, glsl, "float4", "SRC", 0);
+            say(&w, "uint unit_at(int col, int row, int k) { uint4 b = uint4(%s * 255.0 + 0.5); return b.x | (b.y << 8) | (b.z << 16) | (b.w << 24); }\n", px);
             break;
         case GPU_BGRA8: case GPU_BGRA8_SRGB:
-            say(&w, "Texture2D<float4> SRC : register(t0);\n"
-                    "uint unit_at(int col, int row, int k) { uint4 b = uint4(SRC.Load(int3(col * B.w + SUB.x, row * B.w + SUB.y, 0)) * 255.0 + 0.5); return b.z | (b.y << 8) | (b.x << 16) | (b.w << 24); }\n");
+            say_source(&w, glsl, "float4", "SRC", 0);
+            say(&w, "uint unit_at(int col, int row, int k) { uint4 b = uint4(%s * 255.0 + 0.5); return b.z | (b.y << 8) | (b.x << 16) | (b.w << 24); }\n", px);
             break;
         case GPU_RGBA16F:
-            say(&w, "Texture2D<float4> SRC : register(t0);\n"
-                    "uint unit_at(int col, int row, int k) {\n"
-                    "    float4 p = SRC.Load(int3(col * B.w + SUB.x, row * B.w + SUB.y, 0));\n"
+            say_source(&w, glsl, "float4", "SRC", 0);
+            say(&w, "uint unit_at(int col, int row, int k) {\n"
+                    "    float4 p = %s;\n"
                     "    return k == 0 ? (f32tof16(p.x) | (f32tof16(p.y) << 16)) : (f32tof16(p.z) | (f32tof16(p.w) << 16));\n"
-                    "}\n");
+                    "}\n", px);
             break;
         case GPU_D24S8:
-            say(&w, "Texture2D<float> SRC : register(t0);\nTexture2D<uint2> SRC2 : register(t1);\n"
-                    "uint unit_at(int col, int row, int k) { return uint(SRC.Load(int3(col * B.w + SUB.x, row * B.w + SUB.y, 0)) * 16777215.0 + 0.5) | (SRC2.Load(int3(col * B.w + SUB.x, row * B.w + SUB.y, 0)).y << 24); }\n");
+            say_source(&w, glsl, "float", "SRC", 0);
+            say_source(&w, glsl, "uint2", "SRC2", 1);
+            say(&w, "uint unit_at(int col, int row, int k) { return uint(%s * 16777215.0 + 0.5) | (%s.y << 24); }\n", deep, px2);
             break;
         case GPU_D32FS8:
-            say(&w, "Texture2D<float> SRC : register(t0);\n"
-                    "uint unit_at(int col, int row, int k) { return asuint(SRC.Load(int3(col * B.w + SUB.x, row * B.w + SUB.y, 0))); }\n");
+            say_source(&w, glsl, "float", "SRC", 0);
+            say(&w, "uint unit_at(int col, int row, int k) { return asuint(%s); }\n", deep);
             break;
         case GPU_D16:
             /* two bytes a pixel: a word is two pixels side by side */
-            say(&w, "Texture2D<float> SRC : register(t0);\n"
-                    "uint half_at(int col, int row) { return col < B.y ? uint(SRC.Load(int3(col * B.w + SUB.x, row * B.w + SUB.y, 0)) * 65535.0 + 0.5) : 0u; }\n"
-                    "uint unit_at(int col, int row, int k) { return half_at(col, row) | (half_at(col + 1, row) << 16); }\n");
+            say_source(&w, glsl, "float", "SRC", 0);
+            say(&w, "uint half_at(int col, int row) { return col < B.y ? uint(%s * 65535.0 + 0.5) : 0u; }\n"
+                    "uint unit_at(int col, int row, int k) { return half_at(col, row) | (half_at(col + 1, row) << 16); }\n", deep);
             break;
         default:
             free(w.s);
             return NULL;
         }
         if (how == BY_PIXEL)
-            say(&w, "float4 main(float4 pos : SV_Position) : SV_Target {\n"
-                    "    int2 whole = int2(pos.xy), at = whole / B.w;\n"
-                    "    SUB = whole %% B.w;\n"
+            say(&w, "%s"
+                    "    int2 whole = int2(pos.xy), at = %s;\n"
+                    "    SUB = %s;\n"
                     "    if (at.x >= B.y || at.y >= B.z) return float4(0.0, 0.0, 0.0, 0.0);\n"
-                    "    uint lo = unit_at(at.x, at.y, 0), hi = unit_at(at.x, at.y, 1);\n");
+                    "    uint lo = unit_at(at.x, at.y, 0), hi = unit_at(at.x, at.y, 1);\n", head, each, sub);
         else
             say(&w, "uint word_at(int byte) {\n"
                     "    if (byte < 0) return 0u;\n"
-                    "    int row = byte / A.w, rest = byte - row * A.w, col = rest / B.x, k = (rest - col * B.x) >> 2;\n"
+                    "    int row = %s, rest = byte - row * A.w, col = %s, k = (rest - col * B.x) >> 2;\n"
                     "    if (col >= B.y || row >= B.z) return 0u;\n"
                     "    return unit_at(col, row, k);\n"
                     "}\n"
-                    "float4 main(float4 pos : SV_Position) : SV_Target {\n"
-                    "    int2 whole = int2(pos.xy), at = whole / B.w;\n"
-                    "    SUB = whole %% B.w;\n"
+                    "%s"
+                    "    int2 whole = int2(pos.xy), at = %s;\n"
+                    "    SUB = %s;\n"
                     "    int byte = A.x + at.y * A.y + at.x * A.z, first = byte & ~3;\n"
                     "    uint turn = uint(byte & 3) * 8u, w0 = word_at(first), w1 = word_at(first + 4);\n"
-                    "    uint lo = turn != 0u ? (w0 >> turn) | (w1 << (32u - turn)) : w0, hi = turn != 0u ? w1 >> turn : w1;\n");
+                    "    uint lo = turn != 0u ? (w0 >> turn) | (w1 << (32u - turn)) : w0, hi = turn != 0u ? w1 >> turn : w1;\n",
+                    row_of, col_of, head, each, sub);
         for (int i = 0; i < tf->fields; i++) if (!say_field(&w, tf, i)) { free(w.s); return NULL; }
         say(&w, "    float4 c;\n");
         for (int k = 0; k < 4; k++) {
@@ -1591,6 +1634,7 @@ static char *view_text(unsigned format, const pixfmt *tf, unsigned texture_gamma
     /* a texture kept on the display's curve is handed over as light: gxm_tex.c's gxm_tex_texel */
     if (texture_gamma) say(&w, "    c.xy = float2(off_curve(c.x), off_curve(c.y));\n%s", texture_gamma != 3 ? "    c.z = off_curve(c.z);\n" : "");
     say(&w, "    return c;\n}\n");
+    if (glsl) say(&w, "layout(location = 0) out vec4 result;\nvoid main() { result = program(gl_FragCoord); }\n");
     if (w.bad) { free(w.s); return NULL; }
     return w.s;
 }
@@ -1610,7 +1654,7 @@ static gpu_shader *view_program_for(char *text) {
     const char *dump = getenv("VITARECOMP_GXM_GPU_SHADERS");
     if (dump && *dump) {
         char path[1024];
-        snprintf(path, sizeof(path), "%s/view_%016llx.hlsl", dump, (unsigned long long)hash);
+        snprintf(path, sizeof(path), "%s/view_%016llx.%s", dump, (unsigned long long)hash, gpu_language() == GPU_GLSL ? "glsl" : "hlsl");
         FILE *f = fopen(path, "wb");
         if (f) { fputs(text, f); fclose(f); }
     }

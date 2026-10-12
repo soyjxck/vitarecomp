@@ -1,12 +1,19 @@
 /* window_switch.c — the host's window on the Nintendo Switch.
  *
  * A homebrew program has one window, the whole screen, and the console's
- * own controller. This is the plain form of it: the frame the program
- * shows, read from its memory, is drawn into the screen's frame buffer
- * (1280 by 720, the console's size in the hand; docked, the console scales
- * it), keeping its shape with black beside it, the samples between four of
- * its pixels a blend of the four. Nothing here draws with the graphics
- * card.
+ * own controller. The frame the program shows reaches the screen one of
+ * two ways. A graphics card that holds the frame draws it there for itself
+ * (vita_window_native, and gpu_gl.c). Otherwise it is read from the
+ * program's memory and drawn into the screen's frame buffer here (1280 by
+ * 720, the console's size in the hand; docked, the console scales it),
+ * keeping its shape with black beside it, the samples between four of its
+ * pixels a blend of the four.
+ *
+ * The screen is one or the other's and never both: the console will not
+ * have a frame buffer made on a window the card draws to, nor the reverse.
+ * So the frame buffer is not made when the window is opened but when the
+ * first frame is drawn into it, and once it is made the card is told
+ * there is no window for it.
  *
  * The buttons are where a player's thumbs expect them, not where their
  * letters say: the console's right-hand button (A) is the program's
@@ -30,14 +37,14 @@
 static Framebuffer g_fb;
 static PadState    g_pad;
 static int         g_open;
+static int         g_ours;      /* the screen's frame buffer has been made: the picture is drawn here */
+static int         g_theirs;    /* a graphics card draws the picture in the screen for itself */
 static int         g_x0, g_y0, g_w = SCREEN_W, g_h = SCREEN_H;   /* where the picture lies on the screen */
 static u64         g_next_tick;
 
 int vita_window_open(const char *title, int width, int height) {
     (void)title; (void)width; (void)height;
     if (g_open) return 0;
-    if (R_FAILED(framebufferCreate(&g_fb, nwindowGetDefault(), SCREEN_W, SCREEN_H, PIXEL_FORMAT_RGBA_8888, 2))) return -1;
-    framebufferMakeLinear(&g_fb);
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     padInitializeDefault(&g_pad);
     hidInitializeTouchScreen();
@@ -45,21 +52,36 @@ int vita_window_open(const char *title, int width, int height) {
     return 0;
 }
 
+/* Where a frame of this size lies on the screen: the largest picture of its shape that the screen holds. */
+static void place(int width, int height) {
+    g_w = SCREEN_W; g_h = SCREEN_W * height / width;
+    if (g_h > SCREEN_H) { g_h = SCREEN_H; g_w = SCREEN_H * width / height; }
+    g_x0 = (SCREEN_W - g_w) / 2; g_y0 = (SCREEN_H - g_h) / 2;
+}
+
 void vita_window_fullscreen(void) { }
-void *vita_window_native(void) { return NULL; }
-void vita_window_drawn(int width, int height) { (void)width; (void)height; }
 void vita_window_title(const char *text) { (void)text; }
 
+/* The screen, for a card to draw in: for as long as it has not been taken for a picture drawn here. */
+void *vita_window_native(void) { return g_open && !g_ours ? nwindowGetDefault() : NULL; }
+
+void vita_window_drawn(int width, int height) {
+    if (width > 0 && height > 0) place(width, height);          /* a finger is still placed on the picture */
+    g_theirs = 1;
+}
+
 void vita_window_present(const uint8_t *pixels, int width, int height, int pitch) {
-    if (!g_open || width <= 0 || height <= 0) return;
+    if (!g_open || g_theirs || width <= 0 || height <= 0) return;
+    if (!g_ours) {
+        if (R_FAILED(framebufferCreate(&g_fb, nwindowGetDefault(), SCREEN_W, SCREEN_H, PIXEL_FORMAT_RGBA_8888, 2))) return;
+        framebufferMakeLinear(&g_fb);
+        g_ours = 1;
+    }
     u32 stride = 0;
     uint8_t *screen = (uint8_t *)framebufferBegin(&g_fb, &stride);
     if (!screen) return;
 
-    /* the largest picture of the frame's shape that the screen holds */
-    g_w = SCREEN_W; g_h = SCREEN_W * height / width;
-    if (g_h > SCREEN_H) { g_h = SCREEN_H; g_w = SCREEN_H * width / height; }
-    g_x0 = (SCREEN_W - g_w) / 2; g_y0 = (SCREEN_H - g_h) / 2;
+    place(width, height);
 
     const uint32_t step_x = (uint32_t)(((uint64_t)width << 16) / (uint32_t)g_w);
     const uint32_t step_y = (uint32_t)(((uint64_t)height << 16) / (uint32_t)g_h);
