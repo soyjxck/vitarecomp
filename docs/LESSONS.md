@@ -1347,3 +1347,24 @@ one that says which pages have been written.
    The other order would be the fault: told nothing of a change that
    happened. A page is given the moment it was found at, and a moment
    is never before the writing.
+
+## Figures from a busy machine (2026-10-12)
+
+Three and four times the title's size were written down as costing seven
+to ten milliseconds of a frame, and play by the real clock as missing
+one frame in five. Both were measured while another program compiled on
+twenty cores. With the machine quiet, three and four times the size
+lose no frame at all and the card is waited for two and four
+milliseconds; play is 33.3 ms from one frame to the next.
+
+1. **Say what else was running, or look.** The figures were given with
+   "other programs at work on the machine" beside them, which was true
+   and not enough: nobody reading it could tell a cost from a
+   coincidence. Looking at which programs were using the processor took
+   one command.
+2. **The virtual clock does not wait for the card.** The same sizes had
+   been measured on the virtual clock first, where a frame's time is
+   the processor's and the card's work is only seen when something
+   waits for it. A level that had settled took 8 ms a frame at every
+   size, which said nothing about the sizes. What a size costs is to
+   be measured where the frame is shown.

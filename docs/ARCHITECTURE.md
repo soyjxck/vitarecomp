@@ -1074,9 +1074,11 @@ screen, the texel found as the title's size would have found it, and of
 the `n` by `n` the card keeps for that texel the one this fragment is.
 
 It is not done while the card is checked against the processor, which
-draws at the title's size. A frame of play on the first title, with
-other programs at work on the machine: 28 ms at the title's size, 26 at
-twice, 35 at three times, 38 at four (GeForce RTX 4090).
+draws at the title's size. What it costs is the card's time, which a
+run on the virtual clock does not wait for: in a window by the real
+clock the card is waited for 2.0 ms of a frame at three times the size
+and 3.7 at four (GeForce RTX 4090), and the frame rate is the title's
+own at all four.
 
 What is not yet known is when a title's own code reads a larger surface.
 The plan for that is a watch on the pages (PLAN.md).
@@ -1091,9 +1093,12 @@ textures, on targets, on vertices, in draws, waiting, showing, making
 programs ready, and how often the system was asked which pages were
 written and how many it named.
 
-A frame of play takes 23 ms so (2026-10-11, Direct3D 11, GeForce RTX
-4090, nothing else at work on the machine), against 85 for the
-processor's renderer on twenty-four threads: forty-four frames a second
-where the console shows thirty. Three of the 23 are the card's path, by
-its own line of the profile; the card's drawing is about three more;
-the rest is the title and the graphics library around it.
+A frame of play is 19 to 22 ms of work so in the first hundred frames
+of a level and 8 ms once the level has settled (2026-10-12, Direct3D 11,
+GeForce RTX 4090, nothing else at work on the machine), against 85 for
+the processor's renderer on twenty-four threads. Of the 19, four are the
+card's path by its own line of the profile, half a millisecond of that
+asking which pages were written, and one is waiting for the card. In a
+window, by the real clock, the title holds its thirty frames a second
+with the card drawing at one to four times its size: 33.3 ms from one
+frame to the next through the front end, the opening scene and play.

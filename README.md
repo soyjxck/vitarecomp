@@ -52,8 +52,9 @@ twelve frames a second, where the console shows thirty. The same draws
 can be handed to the host's graphics card instead, each program written
 out as HLSL and drawn by Direct3D 11 (`VITARECOMP_GXM_GPU=1`, or `check`
 to draw both ways and compare): the pictures agree, and a frame of play
-takes 23 ms that way, forty-four frames a second (docs/PLAN.md,
-milestone E).
+is 8 to 22 ms of work that way, and in a window the title holds the
+console's thirty frames a second with the card drawing at up to four
+times the console's size (docs/PLAN.md, milestone E).
 The logo movie that comes before the
 title screen is not played: the runtime has no movie library, says so when
 the title asks for it, and the title carries on as it does when a movie

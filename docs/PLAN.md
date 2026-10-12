@@ -394,14 +394,14 @@ list through the front end and the first minute of play, once the choice
 of a texture's level is taken out of the comparison. Surfaces stay on the
 card from one list to the next, a draw's geometry from one frame to the
 next, and bytes that were not written are not read again: a frame of play
-takes 23 ms against the processor's 85, which is past the console's
-thirty a second. The frame is shown in the host's window by the card
+is 8 to 22 ms of work against the processor's 85, and in a window the
+title holds the console's thirty a second. The frame is shown in the host's window by the card
 that drew it, and does not pass through the title's memory on the way;
 a program compiled in one run is not compiled in the next
 (`VITARECOMP_GPU_CACHE`); and the card draws at a whole number of times
-the title's size when asked (`VITARECOMP_GXM_GPU_SCALE`), twice at no
-cost. It is switched on by `VITARECOMP_GXM_GPU=1` and is not yet the
-default. What is left:
+the title's size when asked (`VITARECOMP_GXM_GPU_SCALE`), four times
+without losing a frame on the card it was measured on. It is switched on
+by `VITARECOMP_GXM_GPU=1` and is not yet the default. What is left:
 
 1. **Where the title's own not-a-numbers come from.** The check over the
    front end and the first minute of play finds two lists in three
@@ -419,20 +419,21 @@ default. What is left:
 2. **A watch on the pages of a surface the card holds**, so that the
    title's own code reading it is noticed. Today that is known only for
    surfaces of a few pixels, by sending those back always.
-3. **The rest of a frame.** Sixteen of the 23 ms were neither the card
-   nor its path. Some of that was the path's after all, asking the
-   system which pages had been written, and is gone (LESSONS.md); what
-   is left is the title's code and the graphics library's handling of
-   each draw as it is made, and has still to be measured on a quiet
-   machine.
+3. **The rest of a frame.** Fifteen of the 19 ms of a level's first
+   frames, and four of the 8 after, are neither the card nor its path:
+   the title's code and the graphics library's handling of each draw
+   as it is made. Nine more were the path's after all, asking the
+   system which pages had been written, and are gone (LESSONS.md).
+   There is time to spare on the machine this was measured on; what a
+   slower one makes of it is not known.
 4. **Textures in their own form.** A compressed texture goes to the card
    as four floats a texel; the card has the compressed forms. It costs
    memory and the first frame of a scene, not the frames after.
-5. **A frame's time by the real clock.** In a window, in play, a frame
-   is 33 to 37 ms where the virtual clock says 23 to 28 of work: some
-   frames miss their sixtieth. What the other threads take while the
-   main one waits, and what the wait itself costs, has not been
-   measured.
+5. **A machine that is busy, and a window that is covered.** By the
+   real clock a frame is 33.3 ms with nothing else at work; with
+   another program building on every core it was 36 to 50, and the
+   system gives a covered window's program coarser sleeps. Neither has
+   been measured on purpose.
 6. A second implementation of `src/gpu.h` for hosts without Direct3D.
 7. Making it the default where there is a card, with the processor's
    renderer for what a card's path leaves and for checking it.
