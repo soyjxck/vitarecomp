@@ -109,12 +109,53 @@ static int same(unsigned l, const char *what) {
     return 1;
 }
 
-/* A random word of one format: its fixed bits as they must be, the rest by chance. */
-static uint64_t random_word(int format) { return (rnd() & ~USSE_FORMATS[format].mask) | USSE_FORMATS[format].value; }
+static uint64_t with_field(uint64_t w, int field, uint64_t v) {
+    uint64_t mask = ((1ull << (field >> 8)) - 1) << (field & 0xFF);
+    return (w & ~mask) | ((v << (field & 0xFF)) & mask);
+}
+
+/* A random word of one format: its fixed bits as they must be, the rest by
+ * chance. The instructions on bytes have forms nobody has described, which
+ * are refused and which a word made by chance nearly always is: for those
+ * the fields that decide it are given one of the values that run. */
+static uint64_t random_word(int format) {
+    static const int TWO[5] = { 0, 2, 3, 6, 7 }, THREE[7] = { 0, 2, 3, 4, 5, 6, 7 };
+    uint64_t w = (rnd() & ~USSE_FORMATS[format].mask) | USSE_FORMATS[format].value;
+    switch (format) {
+    case USSE_F_SOP2:
+        w = with_field(w, U_SOP2_CSEL1, rnd() % 5);
+        w = with_field(w, U_SOP2_CSEL2, rnd() % 5);
+        w = with_field(w, U_SOP2_ASEL1, rnd() % 3);
+        w = with_field(w, U_SOP2_ASEL2, rnd() % 3);
+        w = with_field(w, U_SOP2_ASRC1_MOD, usse_field(w, U_SOP2_SRC1_MOD));
+        w = with_field(w, U_SOP2_DEST_MOD, 0);
+        break;
+    case USSE_F_SOP2M:
+        w = with_field(w, U_SOP2M_SEL1, (uint64_t)TWO[rnd() % 5]);
+        w = with_field(w, U_SOP2M_SEL2, (uint64_t)TWO[rnd() % 5]);
+        break;
+    case USSE_F_SOP3:
+        w = with_field(w, U_SOP3_CSEL1, (uint64_t)THREE[rnd() % 7]);
+        w = with_field(w, U_SOP3_CSEL2, (uint64_t)THREE[rnd() % 7]);
+        w = with_field(w, U_SOP3_COP, rnd() & 1);
+        w = with_field(w, U_SOP3_AOP, rnd() & 1);
+        w = with_field(w, U_SOP3_DMOD, 0);
+        w = with_field(w, U_SOP3_PRED, 0);
+        break;
+    case USSE_F_I8MAD:
+        w = with_field(w, U_I8MAD_CMOD0, 0); w = with_field(w, U_I8MAD_CMOD1, 0); w = with_field(w, U_I8MAD_CMOD2, 0);
+        w = with_field(w, U_I8MAD_AMOD0, 0); w = with_field(w, U_I8MAD_AMOD1, 0); w = with_field(w, U_I8MAD_AMOD2, 0);
+        break;
+    default:
+        break;
+    }
+    return w;
+}
 
 static const int FORMATS[] = { USSE_F_VMAD2, USSE_F_V32NMAD, USSE_F_V16NMAD, USSE_F_VMAD, USSE_F_VDP, USSE_F_VCOMP, USSE_F_VMOV,
                                USSE_F_VPCK, USSE_F_VTST, USSE_F_VTSTMSK, USSE_F_VBW, USSE_F_SMP, USSE_F_KILL, USSE_F_SMLSI,
-                               USSE_F_I16MAD, USSE_F_I32MAD, USSE_F_VLDST };
+                               USSE_F_I16MAD, USSE_F_I32MAD, USSE_F_VLDST, USSE_F_VDUAL, USSE_F_SOP2, USSE_F_SOP2M, USSE_F_SOP3,
+                               USSE_F_I8MAD };
 #define FORMAT_COUNT (sizeof(FORMATS) / sizeof(FORMATS[0]))
 
 /* The last eight of the instruction set's constants are not numbers, of two

@@ -2,7 +2,9 @@
  *
  * Every word is assembled field by field from the layout table, printed and
  * compared with the text it should read as, then run against registers
- * filled by hand. Nothing here comes from a title's shaders.
+ * filled by hand. Where a word is given as a number instead, it is one a
+ * title's programs have, and what it should do there is worked out by hand
+ * the same way.
  */
 
 #include "../src/usse.h"
@@ -525,6 +527,282 @@ static void test_repeats(void) {
     printf("  repeats and their increments   ok\n");
 }
 
+/* --- two operations in one instruction ------------------------------------------------------ */
+
+static void test_dual(void) {
+    /* a reciprocal square root into one internal register while two floats
+     * of another are moved out to a temporary */
+    usse_insn rsq = insn(0x2000610000b408fdull, 0, "FRSQ i0.x i1.x + VMOV r10.xy i2.xy\n");
+    fresh();
+    st.internal[1] = fbits(77.0f);
+    st.internal[4] = fbits(4.0f);
+    st.internal[8] = fbits(3.0f); st.internal[9] = fbits(5.0f); st.internal[10] = fbits(6.0f);
+    run1(&rsq);
+    assert(bitsf(st.internal[0]) == 0.5f && bitsf(st.internal[1]) == 77.0f);
+    assert(bitsf(st.temp[10]) == 3.0f && bitsf(st.temp[11]) == 5.0f && st.temp[12] == 0);
+
+    /* Both read before either writes: the reciprocal is of what i0 held,
+     * not of what the move beside it puts there. The move's destination
+     * is written as a temporary past the last and is an internal
+     * register, three components of it. */
+    usse_insn rcp = insn(0x20047000df950088ull, 0, "FRCP i1.x i0.x + VMOV i0.xyz sa16.xyz\n");
+    fresh();
+    st.internal[0] = fbits(4.0f); st.internal[3] = fbits(1.5f);
+    sa[16] = fbits(7.0f); sa[17] = fbits(8.0f); sa[18] = fbits(9.0f); sa[19] = fbits(10.0f);
+    run1(&rcp);
+    assert(bitsf(st.internal[4]) == 0.25f);
+    assert(bitsf(st.internal[0]) == 7.0f && bitsf(st.internal[1]) == 8.0f && bitsf(st.internal[2]) == 9.0f && bitsf(st.internal[3]) == 1.5f);
+
+    /* a difference of vectors, the operand of any bank negated, beside a
+     * sum of squares that leaves one number in a primary attribute */
+    usse_insn ssq = insn(0x2084c112e028079aull, 0, "VADD i2.xyz -sa52.xyz i0.xyz + VSSQ pa1.x i1.xyz\n");
+    fresh();
+    for (int i = 0; i < 3; i++) {
+        sa[52 + i] = fbits(1.0f + (float)i);
+        st.internal[i] = fbits(10.0f * (float)(i + 1));
+    }
+    st.internal[4] = fbits(1.0f); st.internal[5] = fbits(2.0f); st.internal[6] = fbits(2.0f); st.internal[7] = fbits(100.0f);
+    run1(&ssq);
+    assert(bitsf(st.internal[8]) == 9.0f && bitsf(st.internal[9]) == 18.0f && bitsf(st.internal[10]) == 27.0f && st.internal[11] == 0);
+    assert(bitsf(st.pa[1]) == 9.0f && st.pa[0] == 0 && st.pa[2] == 0);
+
+    /* the operand of any bank as halves: three of them, by one float spread over three */
+    usse_insn mul = insn(0x20a43400efbc1897ull, 0, "VMUL i1.xyz sa46.xyz i1.xxx + FRCP i2.x i2.x\n");
+    fresh();
+    sa[46] = halves(2.0f, 3.0f); sa[47] = halves(4.0f, 99.0f);
+    st.internal[4] = fbits(0.5f); st.internal[7] = fbits(-1.0f);
+    st.internal[8] = fbits(8.0f);
+    run1(&mul);
+    assert(bitsf(st.internal[4]) == 1.0f && bitsf(st.internal[5]) == 1.5f && bitsf(st.internal[6]) == 2.0f && bitsf(st.internal[7]) == -1.0f);
+    assert(bitsf(st.internal[8]) == 0.125f);
+
+    /* three operands to the first: a row of a matrix times a component, added to what has gathered */
+    usse_insn mad = insn(0x28c4000ae01c878cull, 0, "VMAD i2.xyzw sa24.xyzw i0.zzzz i2.xyzw + FRCP pa0.x i1.x\n");
+    fresh();
+    for (int i = 0; i < 4; i++) { sa[24 + i] = fbits(1.0f + (float)i); st.internal[8 + i] = fbits(100.0f); }
+    st.internal[2] = fbits(3.0f);
+    st.internal[4] = fbits(2.0f);
+    run1(&mad);
+    for (int i = 0; i < 4; i++) assert(bitsf(st.internal[8 + i]) == 3.0f * (1.0f + (float)i) + 100.0f);
+    assert(bitsf(st.pa[0]) == 0.5f && st.pa[1] == 0);
+
+    /* the same with the move going to an output: 64 bits of it, two floats */
+    usse_insn out = insn(0x28c40109d0d44394ull, 0, "VMAD i1.xyzw sa40.xyzw i0.zzzz i1.xyzw + VMOV o12.xy i0.xy\n");
+    fresh();
+    for (int i = 0; i < 4; i++) { sa[40 + i] = fbits(2.0f); st.internal[i] = fbits(1.0f + (float)i); st.internal[4 + i] = fbits(0.5f); }
+    run1(&out);
+    for (int i = 0; i < 4; i++) assert(bitsf(st.internal[4 + i]) == 6.5f);
+    assert(bitsf(st.out[12]) == 1.0f && bitsf(st.out[13]) == 2.0f && st.out[14] == 0);
+
+    /* the first writing the register of any bank, and a dot product into the internal one */
+    usse_insn dot = insn(0x2080751290042480ull, 0, "FRCP pa0.x pa0.x + VDP i1.x i1.xyz i2.xyz\n");
+    fresh();
+    st.pa[0] = fbits(8.0f);
+    for (int i = 0; i < 4; i++) { st.internal[4 + i] = fbits(1.0f + (float)i); st.internal[8 + i] = fbits(2.0f); }
+    run1(&dot);
+    assert(bitsf(st.pa[0]) == 0.125f);
+    assert(bitsf(st.internal[4]) == 12.0f && bitsf(st.internal[5]) == 2.0f);
+
+    /* its predicate is two bits: none, p0, not p0. Nothing of it is printed. */
+    usse_insn when = insn(word(USSE_F_VDUAL, U_VDUAL_SV_PRED, 2, U_VDUAL_DUAL_OP1, 5, U_VDUAL_DUAL_OP2, 7, U_VDUAL_PRIM_USTORE, 1,
+                               U_VDUAL_PRIM_DEST_BANK, D_PA, U_VDUAL_PRIM_DEST_NUM, 1, U_VDUAL_PRIM_DEST_NUM_GPI_CASE, 1,
+                               U_VDUAL_WRITE_MASK_NON_GPI, 1, U_VDUAL_UNIFIED_STORE_SLOT_BANK, S_SA,
+                               U_VDUAL_UNIFIED_STORE_SLOT_NUM, 2, U_VDUAL_UNIFIED_STORE_SWIZZ, 4, -1),
+                          0, "VMOV pa2.xy sa4.xy + FRCP i1.x i0.x\n");
+    assert(when.pred == USSE_PRED_NOT_P0);
+    for (int p0 = 0; p0 < 2; p0++) {
+        fresh();
+        st.pred[0] = (uint8_t)p0;
+        sa[4] = fbits(6.0f); sa[5] = fbits(7.0f);
+        st.internal[0] = fbits(2.0f);
+        run1(&when);
+        assert(bitsf(st.pa[2]) == (p0 ? 0.0f : 6.0f) && bitsf(st.pa[3]) == (p0 ? 0.0f : 7.0f));
+        assert(bitsf(st.internal[4]) == (p0 ? 0.0f : 0.5f));
+    }
+
+    /* a second operation of no kind is not an instruction */
+    usse_insn none;
+    assert(!usse_decode(word(USSE_F_VDUAL, U_VDUAL_DUAL_OP1, 5, U_VDUAL_DUAL_OP2, 0, -1), 0, &none));
+    printf("  two operations at once         ok\n");
+}
+
+/* --- colours of a byte a channel ------------------------------------------------------------ */
+
+/* Four bytes as the word that holds them: x lowest. */
+static uint32_t bytes4(unsigned x, unsigned y, unsigned z, unsigned w) { return x | y << 8 | z << 16 | w << 24; }
+
+static void test_bytes(void) {
+    usse_insn in;
+    char text[256];
+
+    /* the colour of one source and the alpha of the other: factors of one and of nothing */
+    usse_insn join = insn(0x81800006b0800003ull, 0, "SOP2:FADD\nSOP2:FADD\n");
+    fresh();
+    st.pa[0] = 0x11223344u;
+    sa[3] = 0xAABBCCDDu;
+    run1(&join);
+    assert(st.pa[4] == 0xAA223344u);
+
+    /* a sum that stops at all the colour there is */
+    usse_insn add = insn(0x81808805a0000200ull, 0, "SOP2:FADD\nSOP2:FADD\n");
+    fresh();
+    st.pa[4] = bytes4(0x01, 0x7F, 0xFF, 0x80);
+    st.pa[0] = bytes4(0x02, 0x7F, 0x01, 0x90);
+    run1(&add);
+    assert(st.out[0] == bytes4(0x03, 0xFE, 0xFF, 0xFF));
+
+    /* the colours added and the larger alpha kept */
+    usse_insn larger = insn(0x8180880590030000ull, 0, "SOP2:FADD\nSOP2:FMAX\n");
+    fresh();
+    st.pa[0] = bytes4(0x30, 0x20, 0x10, 0x40);
+    st.out[0] = bytes4(0x03, 0x02, 0x01, 0x80);
+    run1(&larger);
+    assert(st.out[0] == bytes4(0x33, 0x22, 0x11, 0x80));
+
+    /* A blend by the first source's alpha: src1 * a + src2 * (1 - a), and
+     * for the alpha a + src2's * (1 - a). 200 at 128/255 over 50 is
+     * (128 * 200 + 127 * 50) / 255 = 125.3, and so on. */
+    usse_insn blend = insn(word(USSE_F_SOP2, U_SOP2_CSEL1, 3, U_SOP2_CSEL2, 3, U_SOP2_CMOD2, 1, U_SOP2_AMOD1, 1,
+                                U_SOP2_ASEL2, 1, U_SOP2_AMOD2, 1, U_SOP2_DEST_BANK, D_OUT, U_SOP2_SRC1_BANK, S_PA,
+                                U_SOP2_SRC1_N, 1, U_SOP2_SRC2_BANK, S_OUT, -1),
+                           0, "SOP2:FADD\nSOP2:FADD\n");
+    fresh();
+    st.pa[1] = bytes4(200, 100, 0, 128);
+    st.out[0] = bytes4(50, 150, 255, 255);
+    run1(&blend);
+    assert(st.out[0] == bytes4(125, 125, 127, 255));
+
+    /* a difference stops at nothing; the smaller alpha */
+    usse_insn sub = insn(word(USSE_F_SOP2, U_SOP2_CMOD1, 1, U_SOP2_CMOD2, 1, U_SOP2_COP, 1, U_SOP2_AMOD1, 1, U_SOP2_AMOD2, 1,
+                              U_SOP2_AOP, 2, U_SOP2_DEST_BANK, D_PA, U_SOP2_DEST_N, 3, U_SOP2_SRC1_BANK, S_PA, U_SOP2_SRC1_N, 1,
+                              U_SOP2_SRC2_BANK, S_SA, U_SOP2_SRC2_N, 2, -1),
+                         0, "SOP2:FSUB\nSOP2:FMIN\n");
+    fresh();
+    st.pa[1] = bytes4(0x10, 0x20, 0x30, 0x40);
+    sa[2] = bytes4(0x30, 0x20, 0x10, 0x80);
+    run1(&sub);
+    assert(st.pa[3] == bytes4(0x00, 0x00, 0x20, 0x40));
+
+    /* A form there is no account of, here a modifier on the destination,
+     * is listed and not run; one the reference does not translate, here a
+     * factor of the saturated alpha, is not listed either. */
+    assert(usse_decode(word(USSE_F_SOP2, U_SOP2_CMOD1, 1, U_SOP2_DEST_MOD, 1, U_SOP2_DEST_BANK, D_PA, U_SOP2_SRC1_BANK, S_PA,
+                            U_SOP2_SRC2_BANK, S_PA, -1), 0, &in));
+    assert(!usse_can_run(&in) && usse_run(&in, 1, &st) == 1);
+    usse_disassemble(&in, &st, text, sizeof(text));
+    assert(strstr(text, "SOP2:FADD"));
+    assert(usse_decode(word(USSE_F_SOP2, U_SOP2_CSEL1, 5, U_SOP2_DEST_BANK, D_PA, U_SOP2_SRC1_BANK, S_PA, U_SOP2_SRC2_BANK, S_PA, -1),
+                       0, &in));
+    assert(!usse_can_run(&in));
+    usse_disassemble(&in, &st, text, sizeof(text));
+    assert(text[0] == '\0');
+
+    /* with a mask: two bytes of a secondary attribute into a temporary, the other two left */
+    usse_insn two = insn(0x91013000e0000100ull, 0, "SOP2M:FADD\nSOP2M:FADD\n");
+    fresh();
+    sa[2] = 0x44332211u;
+    st.temp[0] = 0xAABBCCDDu;
+    run1(&two);
+    assert(st.temp[0] == 0xAABB2211u);
+
+    /* The mask's lowest bit is the alpha. An output onto itself, its first
+     * channel and its alpha, changes nothing: each channel written is the
+     * one worked out for it. */
+    usse_insn same = insn(0x91801a0150000000ull, 0, "SOP2M:FADD\nSOP2M:FSUB\n");
+    assert(same.mask == 9);
+    fresh();
+    st.out[0] = 0x12345678u;
+    run1(&same);
+    assert(st.out[0] == 0x12345678u);
+
+    /* the alpha alone, a product of two: 128/255 squared is 64.25/255 */
+    usse_insn alpha = insn(word(USSE_F_SOP2M, U_SOP2M_SEL1, 6, U_SOP2M_WMASK, 1, U_SOP2M_DESTBANK, D_PA, U_SOP2M_SRC1BANK, S_PA,
+                                U_SOP2M_SRC1NUM, 1, U_SOP2M_SRC2BANK, S_PA, U_SOP2M_SRC2NUM, 2, -1),
+                           0, "SOP2M:FADD\nSOP2M:FADD\n");
+    fresh();
+    st.pa[0] = 0x11223344u;
+    st.pa[1] = bytes4(255, 255, 255, 128);
+    st.pa[2] = bytes4(0, 0, 0, 128);
+    run1(&alpha);
+    assert(st.pa[0] == 0x40223344u);
+
+    /* three sources: the first one's channels weigh the second against the
+     * third, src1 * src0 + src2 * (1 - src0) */
+    usse_insn weigh = insn(word(USSE_F_SOP3, U_SOP3_CSEL1, 4, U_SOP3_CSEL2, 4, U_SOP3_CMOD2, 1, U_SOP3_ASEL1, 1, U_SOP3_DESTBANK, D_OUT,
+                                U_SOP3_SRC0BANK, S0_PA, U_SOP3_SRC1BANK, S_PA, U_SOP3_SRC1N, 1, U_SOP3_SRC2BANK, S_PA,
+                                U_SOP3_SRC2N, 2, -1),
+                           0, "SOP3:FADD\nSOP3:FADD\n");
+    fresh();
+    st.pa[0] = bytes4(255, 0, 128, 255);
+    st.pa[1] = bytes4(10, 20, 30, 40);
+    st.pa[2] = bytes4(50, 60, 70, 80);
+    run1(&weigh);
+    assert(st.out[0] == bytes4(10, 60, 50, 40));
+
+    /* Bytes as whole numbers. Times one and added, held to a byte: how a
+     * program adds colours that must not wrap; */
+    usse_insn held = insn(0x98000800b0c18011ull, 0, "IMA8 r6.xyzw pa0.xyzw sa17.xyzw (r6.xyz, r6.---w)\n");
+    fresh();
+    st.pa[0] = bytes4(0x01, 0x80, 0xFF, 0x10);
+    sa[17] = 0x01010101u;
+    st.temp[6] = bytes4(0x02, 0x80, 0x01, 0xF0);
+    run1(&held);
+    assert(st.temp[6] == bytes4(0x03, 0xFF, 0xFF, 0xFF));
+
+    /* the same not held, cut to a byte; */
+    usse_insn cut = insn(0x98000006b0008011ull, 0, "IMA8 pa0.xyzw pa0.xyzw sa17.xyzw (pa2.xyz, pa2.---w)\n");
+    fresh();
+    st.pa[0] = bytes4(0x01, 0x80, 0xFF, 0x10);
+    sa[17] = 0x01010101u;
+    st.pa[2] = bytes4(0x02, 0x80, 0x01, 0xF0);
+    run1(&cut);
+    assert(st.pa[0] == bytes4(0x03, 0x00, 0x00, 0x00));
+
+    /* and a product that is a product: 5 times 8 and 1 is 41, 64 times 8 is 512 and cut to nothing */
+    usse_insn times = insn(0x98c0000030008185ull, 0, "IMA8 r0.xyzw r3.xyzw sa5.xyzw (r2.xyz, r2.---w)\n");
+    fresh();
+    st.temp[3] = bytes4(5, 4, 3, 64);
+    sa[5] = 0x08080808u;
+    st.temp[2] = 0x01010101u;
+    run1(&times);
+    assert(st.temp[0] == bytes4(41, 33, 25, 1));
+
+    /* Subtracted and held at nothing; source 1's alpha in each of its
+     * channels; the addend's colour from source 0's alpha and its alpha
+     * from source 1's. */
+    usse_insn pick = insn(word(USSE_F_I8MAD, U_I8MAD_SRC0_NEG, 1, U_I8MAD_SATURATED, 1, U_I8MAD_CSEL1, 1, U_I8MAD_CSEL0, 2,
+                               U_I8MAD_ASEL0, 1, U_I8MAD_DEST_BANK, D_OUT, U_I8MAD_DEST_NUM, 1, U_I8MAD_SRC0_BANK, S0_TEMP,
+                               U_I8MAD_SRC0_NUM, 2, U_I8MAD_SRC1_BANK, S_PA, U_I8MAD_SRC1_NUM, 1, U_I8MAD_SRC2_BANK, S_SA,
+                               U_I8MAD_SRC2_NUM, 4, -1),
+                          0, "IMA8 o1.xyzw pa1.wwww sa4.xyzw -(r2.www, pa1.---w)\n");
+    fresh();
+    st.pa[1] = bytes4(9, 9, 9, 3);
+    sa[4] = bytes4(10, 20, 100, 2);
+    st.temp[2] = bytes4(0, 0, 0, 50);
+    run1(&pick);
+    assert(st.out[1] == bytes4(0, 10, 250, 3));
+
+    /* one of its six modifiers, which nothing describes: listed, not run */
+    assert(usse_decode(word(USSE_F_I8MAD, U_I8MAD_CMOD1, 1, U_I8MAD_DEST_BANK, D_PA, U_I8MAD_SRC0_BANK, S0_PA, U_I8MAD_SRC1_BANK, S_PA,
+                            U_I8MAD_SRC2_BANK, S_PA, -1), 0, &in));
+    assert(!usse_can_run(&in) && usse_run(&in, 1, &st) == 1);
+    usse_disassemble(&in, &st, text, sizeof(text));
+    assert(strstr(text, "IMA8 pa0.xyzw pa0.xyzw pa0.xyzw (pa0.xyz, pa0.---w)"));
+    printf("  colours of a byte a channel    ok\n");
+}
+
+/* --- a depth of the program's own ------------------------------------------------------------ */
+
+static void test_depth(void) {
+    usse_insn depth = insn(0xfb300000f0000000ull, 0, "DEPTHF r0.x sa0.x sa0.x\n");
+    fresh();
+    st.temp[0] = fbits(0.25f);
+    assert(!st.depth_written);
+    run1(&depth);
+    assert(st.depth_written && st.depth == 0.25f);
+    printf("  a depth from a register        ok\n");
+}
+
 int main(void) {
     printf("usse:\n");
     test_moves();
@@ -534,6 +812,9 @@ int main(void) {
     test_flow();
     test_outside();
     test_repeats();
+    test_dual();
+    test_bytes();
+    test_depth();
     printf("all usse tests passed\n");
     return 0;
 }

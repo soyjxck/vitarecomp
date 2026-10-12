@@ -115,6 +115,7 @@ static void env_gather(void *user, uint32_t sa_register, const float *coord, flo
 
 static void run(stage *g, const usse_insn *code, uint32_t count) {
     g->st.killed = 0;
+    g->st.depth_written = 0;
     usse_reset(&g->st);
     uint32_t at = usse_run(code, count, &g->st);
     if (at) { g->counters->stopped++; g->counters->stopped_at = at; }
@@ -853,6 +854,8 @@ static int shade_pixel(void *user, int x, int y, float depth, int clockwise,
     if (shaded && (wk->f.p->flags & (GXP_FLAG_DISCARD | GXP_FLAG_DEPTH))) {
         run_fragment(wk, x, y, depth, var, ddx, ddy);
         if (wk->f.st.killed) return 0;
+        /* a program that gives the fragment a depth of its own is tested with that one, and it is the one kept */
+        if (wk->f.st.depth_written) depth = whole_depth(s, unit_clamp(wk->f.st.depth));
         ran = 1;
     }
     if (!tested(s, f, at, depth)) return 0;

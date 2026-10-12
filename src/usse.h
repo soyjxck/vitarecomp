@@ -66,8 +66,13 @@ enum {
     USSE_OP_LDR, USSE_OP_STR,
     USSE_OP_SMP,
     USSE_OP_BR, USSE_OP_KILL, USSE_OP_PHAS, USSE_OP_NOP, USSE_OP_SMLSI, USSE_OP_SMBO, USSE_OP_SPEC, USSE_OP_LIMM,
-    USSE_OP_DEPTHF,
-    USSE_OP_TESTMASK        /* the test that writes one and zero instead of a predicate */
+    USSE_OP_DEPTHF,         /* the fragment's depth, from a register */
+    USSE_OP_TESTMASK,       /* the test that writes one and zero instead of a predicate */
+    USSE_OP_DUAL,           /* two operations in one instruction: both read, then both written */
+    USSE_OP_SOP2,           /* a sum of two products, on colours of a byte a channel */
+    USSE_OP_SOP2M,          /* the same with a mask on what is written */
+    USSE_OP_SOP3,           /* the same with a third source to take factors from */
+    USSE_OP_IMAD8           /* dest = src1 * src2 + src0, four bytes at a time */
 };
 
 typedef struct {
@@ -109,8 +114,8 @@ typedef struct {
     uint8_t   pred[4];
     int32_t   inc[4][17];                   /* the repeat increments, by role, which SMLSI sets */
     uint8_t   killed;                       /* the fragment was discarded */
-    uint8_t   depth_written;
-    float     depth;
+    uint8_t   depth_written;                /* the program gave the fragment a depth of its own: */
+    float     depth;                        /* this one. The caller clears the flag before a run */
     const usse_env *env;
 } usse_state;
 

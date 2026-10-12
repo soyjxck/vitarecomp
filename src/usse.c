@@ -531,6 +531,246 @@ static int decode_i32mad(uint64_t word, int sec, usse_insn *in) {
     return 1;
 }
 
+/* --- two operations in one instruction ---------------------------------------------------
+ * The dual-issue instruction carries two operations, issued together. They
+ * share four places to read from, one operand of any bank and three
+ * internal registers, and write two: one register of any bank and one
+ * internal register. Which operation reads which places is a two-bit
+ * choice whose meaning depends on how many operands each of the two takes;
+ * which of them writes the register of any bank is one bit.
+ *
+ * The record keeps the pieces: `dest` is the destination of any bank, `src1`
+ * the source of any bank, `src0` and `src2` the first two internal slots.
+ * `a` and `b` are the two operations (DUAL_*), `c` has bit 0 set when the
+ * first writes `dest` and bit 1 for four components against three, and
+ * `imm` holds what is left: the places each reads, three bits a place (1
+ * the source of any bank, 2 3 4 the internal slots), the first operation's
+ * at bit 0 and the second's at bit 9; the mask, at bit 18, and the number,
+ * at bit 22, of the internal destination; the third slot's register at bit
+ * 24. usse_dual_halves puts them back together. */
+
+static const struct { uint8_t sources, vector_load, vector_store; } DUAL_OPS[15] = {
+    { 0, 0, 0 },
+    { 3, 1, 1 }, { 2, 1, 0 }, { 1, 1, 0 }, { 2, 1, 1 }, { 2, 1, 1 }, { 1, 1, 1 },      /* VMAD VDP VSSQ VMUL VADD VMOV */
+    { 1, 0, 0 }, { 1, 0, 0 }, { 3, 0, 0 }, { 2, 0, 0 }, { 2, 0, 0 }, { 2, 0, 0 },      /* FRSQ FRCP FMAD FADD FMUL FSUBFLR */
+    { 1, 0, 0 }, { 1, 0, 0 },                                                          /* FEXP FLOG */
+};
+
+/* The places each operation reads, by how many operands the two take and
+ * by the instruction's choice: u the source of any bank, 0 1 2 the slots. */
+static const char *const DUAL_FIRST[3][4] = {
+    { "u", "0", "1", "2" }, { "u1", "0u", "01", NULL }, { "u12", "0u2", "01u", "012" },
+};
+static const char *const DUAL_SECOND[3][3][4] = {
+    { { "0", "u", "u", "u" }, { "01", "u1", "0u", "1u" }, { "012", "u12", "0u2", "0u1" } },
+    { { "0", "1", "u", NULL }, { "02", "12", "2u", NULL }, { NULL, NULL, NULL, NULL } },
+    { { "0", "1", "2", "u" }, { NULL, NULL, NULL, NULL }, { NULL, NULL, NULL, NULL } },
+};
+
+/* Its swizzles are its own: tables of sixteen like the others', with other
+ * entries towards their ends. */
+static const char *const DUAL4_STD[16] = { "xxxx", "yyyy", "zzzz", "wwww", "xyzw", "yzww", "xyzz", "xxyz",
+                                           "xyxy", "xywz", "zxyw", "zwzw", "0000", "HHHH", "1111", "2222" };
+static const char *const DUAL4_EXT[16] = { "yzxw", "zwxy", "xzwy", "yyww", "wyzw", "wzwz", "xyzx", "zzww",
+                                           "xwzx", "yyyx", "yyyz", "zwzw", "yzxz", "xxyy", "xzww", "xyz1" };
+static const char *const DUAL3_STD[16] = { "xxx", "yyy", "zzz", "www", "xyz", "yzw", "xxy", "xyx",
+                                           "yyx", "yyz", "zxy", "xzy", "000", "HHH", "111", "222" };
+static const char *const DUAL3_EXT[16] = { "xyy", "yxy", "xxz", "yxx", "xy0", "x10", "xzy", "yzx",
+                                           "zyx", "zzy", "xy1", "???", "???", "???", "???", "???" };
+
+static void dual_swizzle(usse_operand *op, uint32_t code, uint32_t ext, uint32_t four) {
+    swizzle(op, (four ? (ext ? DUAL4_EXT : DUAL4_STD) : (ext ? DUAL3_EXT : DUAL3_STD))[code & 15]);
+}
+
+static uint32_t dual_places(const char *text) {
+    uint32_t places = 0;
+    for (int i = 0; text[i]; i++) places |= (text[i] == 'u' ? 1u : (uint32_t)(text[i] - '0') + 2u) << (3 * i);
+    return places;
+}
+
+static int decode_vdual(uint64_t word, int sec, usse_insn *in) {
+    static const uint8_t PRED[4] = { USSE_PRED_NONE, USSE_PRED_P0, USSE_PRED_NOT_P0, USSE_PRED_PN };
+    uint32_t four = F(VDUAL, COMP_COUNT_TYPE), extra = F(VDUAL, DUAL_OP1_EXT_VEC3_OR_HAS_W_VEC4), f16 = F(VDUAL, TYPE_F16);
+    /* the bit that is the first operation's fourth with three components is the mask's fourth with four */
+    uint32_t first = F(VDUAL, DUAL_OP1) | ((!four && extra) ? 8u : 0u), second = F(VDUAL, DUAL_OP2) | F(VDUAL, DUAL_OP2_EXT) << 3;
+    uint32_t choice = F(VDUAL, SRC_CONFIG), to_dest = F(VDUAL, PRIM_USTORE);
+    uint32_t high = F(VDUAL, GPI2_SLOT_NUM_BIT_1), low = F(VDUAL, GPI2_SLOT_NUM_BIT_0_OR_UNIFIED_STORE_ABS);
+    uint8_t op1 = first < 14 ? (uint8_t)(first + 1) : DUAL_NONE, op2 = (second && second < 14) ? (uint8_t)(second + 1) : DUAL_NONE;
+    if (!op1 || !op2) return 0;
+    int count1 = DUAL_OPS[op1].sources, count2 = DUAL_OPS[op2].sources;
+    const char *reads1 = DUAL_FIRST[count1 - 1][choice], *reads2 = DUAL_SECOND[count1 - 1][count2 - 1][choice];
+    if (!reads1 || !reads2) return 0;
+
+    /* A vector operation addresses 64-bit registers and a scalar one words:
+     * for each of the two operands of any bank, the operation that has it. */
+    int wide_source = DUAL_OPS[strchr(reads1, 'u') ? op1 : op2].vector_load;
+    int wide_dest = DUAL_OPS[to_dest ? op1 : op2].vector_store;
+    in->op = USSE_OP_DUAL;
+    in->pred = PRED[F(VDUAL, SV_PRED)];
+    in->dest = dest_operand(F(VDUAL, PRIM_DEST_NUM), F(VDUAL, PRIM_DEST_BANK), 0, wide_dest, wide_dest ? 8 : 7, sec);
+    in->src1 = src12_operand(F(VDUAL, UNIFIED_STORE_SLOT_NUM), F(VDUAL, UNIFIED_STORE_SLOT_BANK), 0, wide_source,
+                             wide_source ? 8 : 7, sec, 1);
+    in->src0 = gpi_operand(F(VDUAL, GPI0_SLOT_NUM), 0);
+    in->src2 = gpi_operand(F(VDUAL, GPI1_SLOT_NUM), 2);
+    /* with one operand to the first operation the third slot is i2, and its
+     * two bits say more about the source of any bank instead */
+    dual_swizzle(&in->src1, F(VDUAL, UNIFIED_STORE_SWIZZ), count1 < 2 && high, four);
+    dual_swizzle(&in->src0, F(VDUAL, GPI0_SWIZZ), 0, four);
+    dual_swizzle(&in->src2, F(VDUAL, GPI1_SWIZZ), F(VDUAL, GPI1_SWIZZ_EXT), four);
+    if (count1 < 2 && low) in->src1.flags |= USSE_ABS;
+    if (F(VDUAL, UNIFIED_STORE_NEG)) in->src1.flags |= USSE_NEG;
+    if (F(VDUAL, GPI1_NEG)) in->src2.flags |= USSE_NEG;
+    set_type(in, f16 ? USSE_F16 : USSE_F32);
+
+    /* The instruction's mask is the internal destination's. The other
+     * destination takes what its register holds of the operation's result:
+     * 64 bits of a vector's, 32 of a scalar's. */
+    uint32_t inner_mask = F(VDUAL, WRITE_MASK_NON_GPI) | ((four && extra) ? 8u : 0u);
+    if (in->dest.bank == USSE_INTERNAL) in->mask = four ? 15 : 7;
+    else if (wide_dest) in->mask = f16 ? 15 : 3;
+    else in->mask = f16 ? 3 : 1;
+    in->src_mask = in->mask;
+    in->a = op1;
+    in->b = op2;
+    in->c = (uint8_t)(to_dest | four << 1);
+    in->imm = dual_places(reads1) | dual_places(reads2) << 9 | inner_mask << 18 | F(VDUAL, PRIM_DEST_NUM_GPI_CASE) << 22
+            | (count1 >= 2 ? (high << 1 | low) : 2u) << 24;
+    return 1;
+}
+
+void usse_dual_halves(const usse_insn *in, usse_half half[2]) {
+    int four = (in->c >> 1) & 1;
+    usse_operand inner = gpi_operand((in->imm >> 22) & 3, 3), third = gpi_operand((in->imm >> 24) & 3, 2);
+    swizzle(&inner, "xyzw");
+    swizzle(&third, "xyzw");
+    inner.type = third.type = in->dest.type;
+    for (int k = 0; k < 2; k++) {
+        usse_half *h = &half[k];
+        uint32_t places = (in->imm >> (9 * k)) & 0x1FF;
+        int to_dest = (in->c & 1) == !k;
+        memset(h, 0, sizeof(*h));
+        h->op = k ? in->b : in->a;
+        h->dest = to_dest ? in->dest : inner;
+        h->mask = to_dest ? in->mask : (uint8_t)((in->imm >> 18) & 15);
+        /* a vector is read where it is written, but a dot product whole; a scalar is one component */
+        if (!DUAL_OPS[h->op].vector_load) h->src_mask = 1;
+        else if (h->op == DUAL_VDP || h->op == DUAL_VSSQ) h->src_mask = four ? 15 : 7;
+        else h->src_mask = h->mask;
+        for (; h->sources < 3; h->sources++) {
+            uint32_t place = (places >> (3 * h->sources)) & 7;
+            if (!place) break;
+            h->src[h->sources] = place == 1 ? in->src1 : place == 2 ? in->src0 : place == 3 ? in->src2 : third;
+        }
+    }
+}
+
+/* --- sums of products ---------------------------------------------------------------------
+ * What a fragment program blends with: on colours of a byte a channel,
+ *     dest = op(factor1 * src1, factor2 * src2)
+ * for the three colour channels with one pair of factors and one
+ * operation, and for the alpha with another. A factor is nothing, or a
+ * source's channel, or a source's alpha, and may be taken as one minus
+ * itself; so "one" is the complement of nothing. The three instructions
+ * differ in what their factors can be and are brought to one record here
+ * (usse_private.h says what is in it). */
+
+static uint8_t sop_factor(uint8_t from, uint32_t complement) { return (uint8_t)(from | (complement ? SOP_COMPLEMENT : 0)); }
+
+static int decode_sop2(uint64_t word, int sec, usse_insn *in) {
+    static const uint8_t COLOUR[8] = { SOP_ZERO, SOP_SRC1, SOP_SRC2, SOP_SRC1_ALPHA, SOP_SRC2_ALPHA,
+                                       SOP_UNKNOWN, SOP_UNKNOWN, SOP_UNKNOWN };
+    static const uint8_t ALPHA[4] = { SOP_ZERO, SOP_SRC1_ALPHA, SOP_SRC2_ALPHA, SOP_UNKNOWN };
+    uint32_t colour_inverse = F(SOP2, SRC1_MOD), alpha_inverse = F(SOP2, ASRC1_MOD);
+    in->op = USSE_OP_SOP2;
+    in->pred = SHORT_PRED[F(SOP2, PRED)];
+    in->dest = dest_operand(F(SOP2, DEST_N), F(SOP2, DEST_BANK), F(SOP2, DEST_BANK_EXT), 0, 7, sec);
+    in->src1 = src12_operand(F(SOP2, SRC1_N), F(SOP2, SRC1_BANK), F(SOP2, SRC1_BANK_EXT), 0, 7, sec, 1);
+    in->src2 = src12_operand(F(SOP2, SRC2_N), F(SOP2, SRC2_BANK), F(SOP2, SRC2_BANK_EXT), 0, 7, sec, 2);
+    in->a = (uint8_t)(sop_factor(COLOUR[F(SOP2, CSEL1)], F(SOP2, CMOD1)) | sop_factor(COLOUR[F(SOP2, CSEL2)], F(SOP2, CMOD2)) << 4);
+    in->b = (uint8_t)(sop_factor(ALPHA[F(SOP2, ASEL1)], F(SOP2, AMOD1)) | sop_factor(ALPHA[F(SOP2, ASEL2)], F(SOP2, AMOD2)) << 4);
+    in->c = (uint8_t)(F(SOP2, COP) | F(SOP2, AOP) << 2);
+    /* Source 1 has a complement bit for its colour and one for its alpha,
+     * and the destination a modifier. With both of the first set the whole
+     * source is complemented; one without the other, or the third, is a
+     * form there is no account of. */
+    in->d = (uint8_t)((colour_inverse && alpha_inverse ? SOP_SRC1_INVERSE : 0) |
+                      (colour_inverse != alpha_inverse || F(SOP2, DEST_MOD) ? SOP_UNDESCRIBED : 0));
+    in->mask = in->src_mask = 15;
+    in->repeat = (uint8_t)F(SOP2, COUNT);
+    in->repeat_mode = 3;
+    set_type(in, USSE_U8);
+    return 1;
+}
+
+static int decode_sop2m(uint64_t word, int sec, usse_insn *in) {
+    static const uint8_t FACTORS[8] = { SOP_ZERO, SOP_UNKNOWN, SOP_SRC1, SOP_SRC1_ALPHA, SOP_UNKNOWN, SOP_UNKNOWN,
+                                        SOP_SRC2, SOP_SRC2_ALPHA };
+    uint32_t mask = F(SOP2M, WMASK);
+    in->op = USSE_OP_SOP2M;
+    in->pred = SHORT_PRED[F(SOP2M, PRED)];
+    in->dest = dest_operand(F(SOP2M, DESTNUM), F(SOP2M, DESTBANK), F(SOP2M, DESTBANKEXT), 0, 7, sec);
+    in->src1 = src12_operand(F(SOP2M, SRC1NUM), F(SOP2M, SRC1BANK), F(SOP2M, SRC1BANKEXT), 0, 7, sec, 1);
+    in->src2 = src12_operand(F(SOP2M, SRC2NUM), F(SOP2M, SRC2BANK), F(SOP2M, SRC2BANKEXT), 0, 7, sec, 2);
+    /* one pair of factors for all four channels: at the alpha a source's channel is its alpha */
+    in->a = in->b = (uint8_t)(sop_factor(FACTORS[F(SOP2M, SEL1)], F(SOP2M, MOD1)) | sop_factor(FACTORS[F(SOP2M, SEL2)], F(SOP2M, MOD2)) << 4);
+    in->c = (uint8_t)(F(SOP2M, COP) | F(SOP2M, AOP) << 2);
+    in->mask = (uint8_t)((mask >> 1) | ((mask & 1) << 3));     /* the field has the alpha first */
+    in->src_mask = 15;
+    set_type(in, USSE_U8);
+    return 1;
+}
+
+static int decode_sop3(uint64_t word, int sec, usse_insn *in) {
+    static const uint8_t FACTORS[8] = { SOP_ZERO, SOP_UNKNOWN, SOP_SRC1, SOP_SRC1_ALPHA, SOP_SRC0, SOP_SRC0_ALPHA,
+                                        SOP_SRC2, SOP_SRC2_ALPHA };
+    static const uint8_t ALPHA[4] = { SOP_ZERO, SOP_SRC0_ALPHA, SOP_SRC1_ALPHA, SOP_SRC2_ALPHA };
+    /* the second factor is the same for the colour and for the alpha */
+    uint8_t second = sop_factor(FACTORS[F(SOP3, CSEL2)], F(SOP3, CMOD2));
+    in->op = USSE_OP_SOP3;
+    in->pred = SHORT_PRED[F(SOP3, PRED)];
+    in->dest = dest_operand(F(SOP3, DESTN), F(SOP3, DESTBANK), F(SOP3, DESTBEXT), 0, 7, sec);
+    in->src0 = src0_operand(F(SOP3, SRC0N), F(SOP3, SRC0BANK), 0, 0, 7, sec);
+    in->src1 = src12_operand(F(SOP3, SRC1N), F(SOP3, SRC1BANK), F(SOP3, SRC1BEXT), 0, 7, sec, 1);
+    in->src2 = src12_operand(F(SOP3, SRC2N), F(SOP3, SRC2BANK), F(SOP3, SRC2BEXT), 0, 7, sec, 2);
+    in->a = (uint8_t)(sop_factor(FACTORS[F(SOP3, CSEL1)], F(SOP3, CMOD1)) | second << 4);
+    in->b = (uint8_t)(sop_factor(ALPHA[F(SOP3, ASEL1)], F(SOP3, AMOD1)) | second << 4);
+    in->c = (uint8_t)(F(SOP3, COP) | F(SOP3, AOP) << 2);
+    /* A modifier on the destination has no account. Nor, quite, have the
+     * two bits that are the predicate of the other forms: the reference
+     * reads them as one here too and then sets it aside for an instruction
+     * of this kind standing alone. Until that is settled an instruction
+     * with either is listed and not run. */
+    in->d = (F(SOP3, DMOD) || F(SOP3, PRED)) ? SOP_UNDESCRIBED : 0;
+    in->mask = in->src_mask = 15;
+    set_type(in, USSE_U8);
+    return 1;
+}
+
+/* Bytes multiplied and a third added, as whole numbers: a product of 2 and
+ * 3 is 6, where a sum of products would have it a colour and nearly
+ * nothing. Sources 1 and 2 can each put their alpha in every channel, and
+ * the addend can be source 0's or source 1's, colour and alpha apart. */
+static int decode_i8mad(uint64_t word, int sec, usse_insn *in) {
+    in->op = USSE_OP_IMAD8;
+    in->pred = SHORT_PRED[F(I8MAD, PRED)];
+    in->dest = dest_operand(F(I8MAD, DEST_NUM), F(I8MAD, DEST_BANK), F(I8MAD, DEST_BANK_EXT), 0, 7, sec);
+    in->src0 = src0_operand(F(I8MAD, SRC0_NUM), F(I8MAD, SRC0_BANK), 0, 0, 7, sec);
+    in->src1 = src12_operand(F(I8MAD, SRC1_NUM), F(I8MAD, SRC1_BANK), F(I8MAD, SRC1_BANK_EXT), 0, 7, sec, 1);
+    in->src2 = src12_operand(F(I8MAD, SRC2_NUM), F(I8MAD, SRC2_BANK), F(I8MAD, SRC2_BANK_EXT), 0, 7, sec, 2);
+    if (F(I8MAD, CSEL1)) swizzle(&in->src1, "wwww");
+    if (F(I8MAD, CSEL2)) swizzle(&in->src2, "wwww");
+    in->a = (uint8_t)(F(I8MAD, CSEL0) | F(I8MAD, ASEL0) << 2);
+    in->b = (uint8_t)((F(I8MAD, SRC0_NEG) ? IMAD8_SUBTRACT : 0) | (F(I8MAD, SATURATED) ? IMAD8_SATURATE : 0));
+    /* six modifier bits, one for the colour and one for the alpha of each source: what they do is not known */
+    in->c = (uint8_t)(F(I8MAD, CMOD0) | F(I8MAD, CMOD1) << 1 | F(I8MAD, CMOD2) << 2 | F(I8MAD, AMOD0) << 3 |
+                      F(I8MAD, AMOD1) << 4 | F(I8MAD, AMOD2) << 5);
+    in->mask = in->src_mask = 15;
+    in->repeat = (uint8_t)F(I8MAD, REPEAT_COUNT);
+    in->repeat_mode = 3;
+    set_type(in, USSE_U8);
+    return 1;
+}
+
 int usse_decode(uint64_t word, int secondary, usse_insn *in) {
     memset(in, 0, sizeof(*in));
     in->raw = word;
@@ -546,6 +786,7 @@ int usse_decode(uint64_t word, int secondary, usse_insn *in) {
     case USSE_F_V16NMAD: return decode_nmad(word, secondary, in, 1);
     case USSE_F_VMAD:    return decode_vmad(word, secondary, in);
     case USSE_F_VDP:     return decode_vdp(word, secondary, in);
+    case USSE_F_VDUAL:   return decode_vdual(word, secondary, in);
     case USSE_F_VCOMP:   return decode_vcomp(word, secondary, in);
     case USSE_F_VMOV:    return decode_vmov(word, secondary, in);
     case USSE_F_VPCK:    return decode_vpck(word, secondary, in);
@@ -554,6 +795,10 @@ int usse_decode(uint64_t word, int secondary, usse_insn *in) {
     case USSE_F_VTSTMSK: return decode_vtstmsk(word, secondary, in);
     case USSE_F_VLDST:   return decode_vldst(word, secondary, in);
     case USSE_F_SMP:     return decode_smp(word, secondary, in);
+    case USSE_F_SOP2:    return decode_sop2(word, secondary, in);
+    case USSE_F_SOP2M:   return decode_sop2m(word, secondary, in);
+    case USSE_F_SOP3:    return decode_sop3(word, secondary, in);
+    case USSE_F_I8MAD:   return decode_i8mad(word, secondary, in);
     case USSE_F_I16MAD:  return decode_i16mad(word, secondary, in);
     case USSE_F_I32MAD:  return decode_i32mad(word, secondary, in);
     case USSE_F_PHAS:    in->op = USSE_OP_PHAS; return 1;
@@ -589,6 +834,17 @@ int usse_decode(uint64_t word, int secondary, usse_insn *in) {
         in->dest.type = USSE_U32;
         in->imm = F(LIMM, IMM_VALUE_FIRST_21BITS) | F(LIMM, IMM_VALUE_BITS21TO25) << 21 | F(LIMM, IMM_VALUE_BITS26TO31) << 26;
         in->mask = 1;
+        return 1;
+    case USSE_F_DEPTHF:
+        /* The fragment's depth is what source 0 holds, a float in a 64-bit
+         * register. Two more operands are named; nothing is known to be
+         * read from them. */
+        in->op = USSE_OP_DEPTHF;
+        in->pred = SHORT_PRED[F(DEPTHF, PRED)];
+        in->src0 = src0_operand(F(DEPTHF, SRC0_N), F(DEPTHF, SRC0_BANK), F(DEPTHF, SRC0_BANK_EXT), 1, 7, secondary);
+        in->src1 = src12_operand(F(DEPTHF, SRC1_N), F(DEPTHF, SRC1_BANK), F(DEPTHF, SRC1_BANK_EXT), 0, 7, secondary, 1);
+        in->src2 = src12_operand(F(DEPTHF, SRC2_N), F(DEPTHF, SRC2_BANK), F(DEPTHF, SRC2_BANK_EXT), 0, 7, secondary, 2);
+        in->mask = in->src_mask = 1;
         return 1;
     default:
         return 0;
@@ -889,6 +1145,56 @@ size_t usse_disassemble(const usse_insn *in, usse_state *s, char *out, size_t ca
     case USSE_OP_SPEC: HEAD(); put(&t, "SPEC category: %u, special: %s\n", in->a, in->b ? "true" : "false"); break;
     case USSE_OP_KILL: HEAD(); put(&t, "KILL %s\n", pred_text(SHORT_PRED[in->a & 3])); break;
     case USSE_OP_BR:   HEAD(); put(&t, "%sBR %+d\n", pred_text(in->pred), (int)(int32_t)in->imm); break;
+    case USSE_OP_DUAL: {
+        /* the two operations on one line, and no word of the predicate */
+        static const char *const NAMES[15] = { "", "VMAD", "VDP", "VSSQ", "VMUL", "VADD", "VMOV", "FRSQ", "FRCP",
+                                               "FMAD", "FADD", "FMUL", "FSUBFLR", "FEXP", "FLOG" };
+        usse_half half[2];
+        usse_dual_halves(in, half);
+        HEAD();
+        for (int k = 0; k < 2; k++) {
+            put(&t, "%s%s ", k ? " + " : "", NAMES[half[k].op]);
+            put_operand(&t, &half[k].dest, half[k].mask, 0);
+            for (int i = 0; i < half[k].sources; i++) { put(&t, " "); put_operand(&t, &half[k].src[i], half[k].src_mask, 0); }
+        }
+        put(&t, "\n");
+        break;
+    }
+    case USSE_OP_SOP2: case USSE_OP_SOP2M: case USSE_OP_SOP3: {
+        /* Two lines an execution, the colour's operation and the alpha's,
+         * and nothing of the operands. The reference lists no line at all
+         * for the forms it does not translate, and neither does this. */
+        static const char *const OPS[4] = { "FADD", "FSUB", "FMIN", "FMAX" };
+        const char *name = in->op == USSE_OP_SOP2 ? "SOP2" : in->op == USSE_OP_SOP2M ? "SOP2M" : "SOP3";
+        int unknown = (in->a & 7) == SOP_UNKNOWN || ((in->a >> 4) & 7) == SOP_UNKNOWN ||
+                      (in->b & 7) == SOP_UNKNOWN || ((in->b >> 4) & 7) == SOP_UNKNOWN;
+        if (in->op == USSE_OP_SOP3 && ((in->c & 0xA) || usse_field(in->raw, U_SOP3_DMOD))) unknown = 1;
+        if (unknown) break;
+        for (int r = 0; r <= in->repeat; r++) {
+            HEAD(); put(&t, "%s:%s\n", name, OPS[in->c & 3]);
+            HEAD(); put(&t, "%s:%s\n", name, OPS[(in->c >> 2) & 3]);
+        }
+        break;
+    }
+    case USSE_OP_IMAD8:
+        /* the addend last, in brackets: where its colour comes from, then its alpha */
+        for (int r = 0; r <= in->repeat; r++) {
+            usse_operand colour = (in->a & 1) ? in->src1 : in->src0, alpha = (in->a & 4) ? in->src1 : in->src0;
+            int32_t moved = repeat_offset(s, in, &in->src0, r);
+            if ((in->a & 3) == 2) colour.sw[0] = colour.sw[1] = colour.sw[2] = USSE_W;
+            HEAD(); put(&t, "%sIMA8 ", pred_text(in->pred));
+            OP(dest, 15, r); put(&t, " "); OP(src1, 15, r); put(&t, " "); OP(src2, 15, r);
+            put(&t, " %s(", (in->b & IMAD8_SUBTRACT) ? "-" : "");
+            put_operand(&t, &colour, 7, moved); put(&t, ", "); put_operand(&t, &alpha, 8, moved);
+            put(&t, ")\n");
+        }
+        break;
+    case USSE_OP_DEPTHF:
+        HEAD(); put(&t, "%sDEPTHF ", pred_text(in->pred));
+        put_operand(&t, &in->src0, 1, 0); put(&t, " ");
+        put_operand(&t, &in->src1, 1, 0); put(&t, " ");
+        put_operand(&t, &in->src2, 1, 0); put(&t, "\n");
+        break;
     default:
         HEAD(); put(&t, "<format %u>\n", in->format);
         break;
@@ -1407,6 +1713,106 @@ static uint32_t bitwise(const usse_insn *in, uint32_t a, uint32_t b) {
     }
 }
 
+/* What one operation of a dual-issue instruction computes. A dot product
+ * and a scalar operation give one number, whatever the mask they are
+ * stored under. */
+static value dual_result(usse_state *s, const usse_half *h) {
+    value a = load(s, &h->src[0], h->src_mask, 0), b = a, c = a, out = floats(a.n);
+    if (h->sources > 1) b = load(s, &h->src[1], h->src_mask, 0);
+    if (h->sources > 2) c = load(s, &h->src[2], h->src_mask, 0);
+    switch (h->op) {
+    case DUAL_VMAD: case DUAL_FMAD:
+        for (int i = 0; i < a.n; i++) out.v.f[i] = a.v.f[i] * b.v.f[i] + c.v.f[i];
+        break;
+    case DUAL_VMUL: case DUAL_FMUL:
+        for (int i = 0; i < a.n; i++) out.v.f[i] = a.v.f[i] * b.v.f[i];
+        break;
+    case DUAL_VADD: case DUAL_FADD:
+        for (int i = 0; i < a.n; i++) out.v.f[i] = a.v.f[i] + b.v.f[i];
+        break;
+    case DUAL_FSUBFLR:
+        for (int i = 0; i < a.n; i++) out.v.f[i] = a.v.f[i] - floorf(b.v.f[i]);
+        break;
+    case DUAL_VDP: case DUAL_VSSQ: {
+        /* a sum of squares is the dot product of its one operand with itself */
+        float d = 0.0f;
+        for (int i = 0; i < a.n; i++) d += a.v.f[i] * b.v.f[i];
+        out = floats(1);
+        out.v.f[0] = d;
+        break;
+    }
+    case DUAL_FRSQ: out.v.f[0] = unary(USSE_OP_RSQ, a.v.f[0]); break;
+    case DUAL_FRCP: out.v.f[0] = unary(USSE_OP_RCP, a.v.f[0]); break;
+    case DUAL_FEXP: out.v.f[0] = unary(USSE_OP_EXP, a.v.f[0]); break;
+    case DUAL_FLOG: out.v.f[0] = unary(USSE_OP_LOG, a.v.f[0]); break;
+    default:        out = a; break;                     /* a move */
+    }
+    return out;
+}
+
+/* Whether an operand is one the instructions on bytes work with here: a
+ * register of four bytes, or for a source a number in the instruction. An
+ * internal register is not: what such an instruction finds in one, and
+ * leaves in one, is the hardware's own fixed-point form and no account of
+ * it is to hand. */
+static int holds_bytes(const usse_operand *op, int source) {
+    switch (op->bank) {
+    case USSE_TEMP: case USSE_PA: case USSE_OUT: case USSE_SA: case USSE_INDEXED1: case USSE_INDEXED2: return 1;
+    case USSE_IMMEDIATE: return source;
+    default: return 0;
+    }
+}
+
+/* Whether a sum of products is one this file computes: every factor one it
+ * knows, nothing asked that nobody has described, and for the form with
+ * three sources a sum or a difference, its other two operations being
+ * something else again. */
+static int sop_runs(const usse_insn *in) {
+    if ((in->a & 7) == SOP_UNKNOWN || ((in->a >> 4) & 7) == SOP_UNKNOWN || (in->b & 7) == SOP_UNKNOWN || ((in->b >> 4) & 7) == SOP_UNKNOWN) return 0;
+    if (in->d & SOP_UNDESCRIBED) return 0;
+    if (in->op == USSE_OP_SOP3 && ((in->c & 0xA) || !holds_bytes(&in->src0, 1))) return 0;
+    return holds_bytes(&in->dest, 0) && holds_bytes(&in->src1, 1) && holds_bytes(&in->src2, 1);
+}
+
+/* A factor on one channel: nothing, a source's channel or a source's alpha, or one minus that. */
+static uint32_t sop_factor_of(uint8_t factor, int channel, const value *s0, const value *s1, const value *s2) {
+    uint32_t f;
+    switch (factor & 7) {
+    case SOP_SRC0:       f = s0->v.u[channel]; break;
+    case SOP_SRC0_ALPHA: f = s0->v.u[3]; break;
+    case SOP_SRC1:       f = s1->v.u[channel]; break;
+    case SOP_SRC1_ALPHA: f = s1->v.u[3]; break;
+    case SOP_SRC2:       f = s2->v.u[channel]; break;
+    case SOP_SRC2_ALPHA: f = s2->v.u[3]; break;
+    default:             f = 0; break;
+    }
+    f &= 0xFFu;
+    return (factor & SOP_COMPLEMENT) ? 255u - f : f;
+}
+
+/* One channel of a sum of products. A byte is a colour from 0 to 1 in 255
+ * steps, so the product of two is in steps of 1/65025: the two products
+ * are combined in those, held between nothing and one, and brought back to
+ * a byte by rounding to the nearest. No two bytes give a product half way
+ * between two results, so there is no tie to break. */
+static uint32_t sop_channel(uint8_t op, uint32_t factor1, uint32_t source1, uint32_t factor2, uint32_t source2) {
+    uint32_t x = factor1 * source1, y = factor2 * source2, v;
+    switch (op & 3) {
+    case 0:  v = x + y; break;
+    case 1:  v = x > y ? x - y : 0; break;
+    case 2:  v = x < y ? x : y; break;
+    default: v = x > y ? x : y; break;
+    }
+    if (v > 255u * 255u) v = 255u * 255u;
+    return (v + 127u) / 255u;
+}
+
+/* Whether an 8-bit multiply-add is one this file computes: none of the six
+ * modifiers, whose meaning is not known. */
+static int imad8_runs(const usse_insn *in) {
+    return !in->c && holds_bytes(&in->dest, 0) && holds_bytes(&in->src0, 1) && holds_bytes(&in->src1, 1) && holds_bytes(&in->src2, 1);
+}
+
 /* The instructions this file does not execute end the run and say which
  * they were, so a program that needs one is named instead of producing a
  * wrong picture. */
@@ -1567,6 +1973,64 @@ static int execute(usse_state *s, const usse_insn *in) {
         return 1;
     }
 
+    case USSE_OP_IMAD8: {
+        /* src1 times src2, a byte from each, plus or minus the addend:
+         * whole numbers, cut to a byte or held to one */
+        if (!imad8_runs(in)) return 0;
+        for (int r = 0; r <= in->repeat; r++) {
+            value a = load(s, &in->src0, 15, repeat_offset(s, in, &in->src0, r));
+            value b = load(s, &in->src1, 15, repeat_offset(s, in, &in->src1, r));
+            value c = load(s, &in->src2, 15, repeat_offset(s, in, &in->src2, r)), out = b;
+            for (int ch = 0; ch < 4; ch++) {
+                const value *from = (ch < 3 ? (in->a & 1) : (in->a & 4)) ? &b : &a;
+                int32_t addend = (int32_t)(from->v.u[(ch < 3 && (in->a & 2)) ? 3 : ch] & 0xFFu);
+                int32_t v = (int32_t)((b.v.u[ch] & 0xFFu) * (c.v.u[ch] & 0xFFu)) + ((in->b & IMAD8_SUBTRACT) ? -addend : addend);
+                if (in->b & IMAD8_SATURATE) v = v < 0 ? 0 : v > 255 ? 255 : v;
+                out.v.u[ch] = (uint32_t)v & 0xFFu;
+            }
+            store(s, &in->dest, &out, 15, repeat_offset(s, in, &in->dest, r));
+        }
+        return 1;
+    }
+
+    case USSE_OP_SOP2: case USSE_OP_SOP2M: case USSE_OP_SOP3:
+        if (!sop_runs(in)) return 0;
+        for (int r = 0; r <= in->repeat; r++) {
+            /* the form with two sources has no source 0, which then reads as nothing */
+            value s0 = load(s, &in->src0, 15, repeat_offset(s, in, &in->src0, r));
+            value s1 = load(s, &in->src1, 15, repeat_offset(s, in, &in->src1, r));
+            value s2 = load(s, &in->src2, 15, repeat_offset(s, in, &in->src2, r)), out = one_integer(0, V_UINT);
+            if (in->d & SOP_SRC1_INVERSE)
+                for (int ch = 0; ch < 4; ch++) s1.v.u[ch] = 255u - (s1.v.u[ch] & 0xFFu);
+            /* every channel is worked out and the mask picks the ones kept */
+            out.n = 0;
+            for (int ch = 0; ch < 4; ch++) {
+                uint8_t factors = ch < 3 ? in->a : in->b, op = ch < 3 ? in->c : (uint8_t)(in->c >> 2);
+                if (!((in->mask >> ch) & 1)) continue;
+                out.v.u[out.n++] = sop_channel(op, sop_factor_of(factors, ch, &s0, &s1, &s2), s1.v.u[ch] & 0xFFu,
+                                               sop_factor_of((uint8_t)(factors >> 4), ch, &s0, &s1, &s2), s2.v.u[ch] & 0xFFu);
+            }
+            store(s, &in->dest, &out, in->mask, repeat_offset(s, in, &in->dest, r));
+        }
+        return 1;
+
+    case USSE_OP_DUAL: {
+        /* both operations read what was there before either writes */
+        usse_half half[2];
+        value out[2];
+        usse_dual_halves(in, half);
+        for (int k = 0; k < 2; k++) out[k] = dual_result(s, &half[k]);
+        for (int k = 0; k < 2; k++) store(s, &half[k].dest, &out[k], half[k].mask, 0);
+        return 1;
+    }
+
+    case USSE_OP_DEPTHF: {
+        value d = load(s, &in->src0, 1, 0);
+        s->depth = d.v.f[0];
+        s->depth_written = 1;
+        return 1;
+    }
+
     case USSE_OP_LIMM: {
         value out = one_integer(in->imm, V_UINT);
         store(s, &in->dest, &out, 1, 0);
@@ -1657,10 +2121,14 @@ static int execute(usse_state *s, const usse_insn *in) {
 
 int usse_can_run(const usse_insn *in) {
     switch (in->op) {
-    case USSE_OP_INVALID: case USSE_OP_DSX: case USSE_OP_DSY: case USSE_OP_STR: case USSE_OP_SMBO: case USSE_OP_DEPTHF:
+    case USSE_OP_INVALID: case USSE_OP_DSX: case USSE_OP_DSY: case USSE_OP_STR: case USSE_OP_SMBO:
         return 0;
     case USSE_OP_PCK:
         return in->src1.type != USSE_O8 && in->dest.type != USSE_O8;
+    case USSE_OP_SOP2: case USSE_OP_SOP2M: case USSE_OP_SOP3:
+        return sop_runs(in);
+    case USSE_OP_IMAD8:
+        return imad8_runs(in);
     case USSE_OP_TEST: case USSE_OP_TESTMASK:
         if (is_float_type(in->src1.type))
             return in->a == T_SUB || in->a == T_ADD || in->a == T_MUL || in->a == T_MIN || in->a == T_MAX || in->a == T_FRC;
@@ -1999,10 +2467,11 @@ static int wide_can(const usse_insn *in) {
     case USSE_OP_SMLSI:
         return in->pred == USSE_PRED_NONE;     /* the increments are the row's, not a lane's */
     case USSE_OP_IMAD16: case USSE_OP_IMAD32: case USSE_OP_LDR:
+    case USSE_OP_IMAD8: case USSE_OP_SOP2: case USSE_OP_SOP2M: case USSE_OP_SOP3: case USSE_OP_DUAL:
         /* taken a lane at a time inside the row (wide_by_lane) */
         return lane_operand_ok(&in->src0) && lane_operand_ok(&in->src1) && lane_operand_ok(&in->src2) && in_rows(in->dest.bank);
     default:
-        return 0;                               /* branches, indices, stores to memory: a lane at a time */
+        return 0;                               /* branches, indices, stores to memory, a depth: a lane at a time */
     }
 }
 
@@ -2059,7 +2528,8 @@ static void wide_by_lane(usse_wide *w, const usse_insn *in, const uint8_t *exec)
         s.killed = 0;
         execute(&s, in);
         if (writes_rows) for (unsigned r = part[0].lo; r < part[0].hi; r++) part[0].rows[r][l] = part[0].words[r];
-        else for (int i = 0; i < 16; i++) w->internal[i][l] = s.internal[i];
+        /* a dual-issue instruction has a second destination, always an internal register */
+        if (!writes_rows || in->op == USSE_OP_DUAL) for (int i = 0; i < 16; i++) w->internal[i][l] = s.internal[i];
     }
 }
 
@@ -2068,6 +2538,7 @@ static void wide_execute(usse_wide *w, const usse_insn *in, const uint8_t *exec)
     unsigned n = w->lanes;
     switch (in->op) {
     case USSE_OP_IMAD16: case USSE_OP_IMAD32: case USSE_OP_LDR:
+    case USSE_OP_IMAD8: case USSE_OP_SOP2: case USSE_OP_SOP2M: case USSE_OP_SOP3: case USSE_OP_DUAL:
         wide_by_lane(w, in, exec);
         return;
     case USSE_OP_MAD:

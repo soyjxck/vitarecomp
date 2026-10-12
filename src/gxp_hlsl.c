@@ -540,6 +540,62 @@ static void zero_test(const val *t, int i, uint8_t test, char *out, size_t cap) 
     }
 }
 
+/* What one operation of a dual-issue instruction computes. A dot product
+ * and a scalar operation give one number, whatever the mask they are
+ * stored under. */
+static val dual_result(gen *g, const usse_half *h) {
+    val a = load(g, &h->src[0], h->src_mask, 0), b = a, c = a;
+    char x[96], y[96], z[96], e[512];
+    if (h->sources > 1) b = load(g, &h->src[1], h->src_mask, 0);
+    if (h->sources > 2) c = load(g, &h->src[2], h->src_mask, 0);
+    if (h->op == DUAL_VMOV) return a;
+    val out = new_val(g, K_FLOAT);
+    if (!a.n || b.n < a.n || c.n < a.n) { fail(g, "a dual-issue instruction with nothing to read"); return out; }
+    if (h->op == DUAL_VDP || h->op == DUAL_VSSQ) {
+        /* a sum of squares is the dot product of its one operand with itself */
+        size_t at = (size_t)snprintf(e, sizeof(e), "0.0");
+        for (int i = 0; i < a.n && at < sizeof(e); i++)
+            at += (size_t)snprintf(e + at, sizeof(e) - at, " + %s * %s", as_kind(&a, i, K_FLOAT, x, sizeof(x)), as_kind(&b, i, K_FLOAT, y, sizeof(y)));
+        local(g, &out, e);
+        return out;
+    }
+    for (int i = 0; i < a.n; i++) {
+        as_kind(&a, i, K_FLOAT, x, sizeof(x));
+        as_kind(&b, i, K_FLOAT, y, sizeof(y));
+        as_kind(&c, i, K_FLOAT, z, sizeof(z));
+        switch (h->op) {
+        case DUAL_VMAD: case DUAL_FMAD: snprintf(e, sizeof(e), "%s * %s + %s", x, y, z); break;
+        case DUAL_VMUL: case DUAL_FMUL: snprintf(e, sizeof(e), "%s * %s", x, y); break;
+        case DUAL_VADD: case DUAL_FADD: snprintf(e, sizeof(e), "%s + %s", x, y); break;
+        case DUAL_FSUBFLR:              snprintf(e, sizeof(e), "%s - floor(%s)", x, y); break;
+        case DUAL_FRSQ:                 snprintf(e, sizeof(e), "1.0 / sqrt(%s)", x); break;
+        case DUAL_FRCP:                 snprintf(e, sizeof(e), "1.0 / %s", x); break;
+        case DUAL_FEXP:                 snprintf(e, sizeof(e), "(%s != %s ? 1.0 : exp(%s))", x, x, x); break;
+        default:                        snprintf(e, sizeof(e), "log(%s)", x); break;
+        }
+        local(g, &out, e);
+    }
+    return out;
+}
+
+/* A factor of a sum of products on one channel: nothing, a source's
+ * channel or a source's alpha, or one minus that. */
+static void sop_factor(uint8_t factor, int channel, const val *s0, const val *s1, const val *s2, char *out, size_t cap) {
+    const char *from;
+    switch (factor & 7) {
+    case SOP_SRC0:       from = s0->e[channel]; break;
+    case SOP_SRC0_ALPHA: from = s0->e[3]; break;
+    case SOP_SRC1:       from = s1->e[channel]; break;
+    case SOP_SRC1_ALPHA: from = s1->e[3]; break;
+    case SOP_SRC2:       from = s2->e[channel]; break;
+    case SOP_SRC2_ALPHA: from = s2->e[3]; break;
+    default:             from = NULL; break;
+    }
+    if (!from) snprintf(out, cap, (factor & SOP_COMPLEMENT) ? "255u" : "0u");
+    else if (factor & SOP_COMPLEMENT) snprintf(out, cap, "(255u - %s)", from);
+    else snprintf(out, cap, "%s", from);
+}
+
 /* The unit a sample instruction means, by the register it names; -1 for none. */
 static int sampler_unit(const gxp_program *p, uint32_t sa_register) {
     for (uint32_t i = 0; i < p->sampler_count; i++)
@@ -763,6 +819,77 @@ static void emit(gen *g, const usse_insn *in) {
         }
         return;
     }
+    case USSE_OP_IMAD8:
+        /* src1 times src2, a byte from each, plus or minus the addend:
+         * whole numbers, cut to a byte or held to one */
+        if (!usse_can_run(in)) { fail(g, "an 8-bit multiply-add in a form there is no account of"); return; }
+        for (int r = 0; r <= in->repeat; r++) {
+            val a = load(g, &in->src0, 15, OFF(&in->src0, r));
+            val b = load(g, &in->src1, 15, OFF(&in->src1, r));
+            val c = load(g, &in->src2, 15, OFF(&in->src2, r));
+            val out = new_val(g, K_UINT);
+            if (a.n < 4 || b.n < 4 || c.n < 4) { fail(g, "an 8-bit multiply-add with nothing to read"); return; }
+            for (int ch = 0; ch < 4; ch++) {
+                const val *from = (ch < 3 ? (in->a & 1) : (in->a & 4)) ? &b : &a;
+                const char *addend = from->e[(ch < 3 && (in->a & 2)) ? 3 : ch];
+                char sign = (in->b & IMAD8_SUBTRACT) ? '-' : '+';
+                if (in->b & IMAD8_SATURATE) snprintf(e, sizeof(e), "uint(clamp(int(%s * %s) %c int(%s), 0, 255))", b.e[ch], c.e[ch], sign, addend);
+                else snprintf(e, sizeof(e), "(%s * %s %c %s) & 0xFFu", b.e[ch], c.e[ch], sign, addend);
+                local(g, &out, e);
+            }
+            store(g, &in->dest, &out, 15, OFF(&in->dest, r));
+        }
+        return;
+
+    case USSE_OP_SOP2: case USSE_OP_SOP2M: case USSE_OP_SOP3:
+        /* Bytes are colours from 0 to 1 in 255 steps: the two products are
+         * combined in steps of 1/65025, held between nothing and one, and
+         * rounded back to a byte. */
+        if (!usse_can_run(in)) { fail(g, "a sum of products in a form there is no account of"); return; }
+        for (int r = 0; r <= in->repeat; r++) {
+            val s1 = load(g, &in->src1, 15, OFF(&in->src1, r));
+            val s2 = load(g, &in->src2, 15, OFF(&in->src2, r));
+            val s0 = in->op == USSE_OP_SOP3 ? load(g, &in->src0, 15, OFF(&in->src0, r)) : s1;      /* the others have no source 0 */
+            if (s0.n < 4 || s1.n < 4 || s2.n < 4) { fail(g, "a sum of products with nothing to read"); return; }
+            if (in->d & SOP_SRC1_INVERSE)
+                for (int ch = 0; ch < 4; ch++) put(o, "        %s = 255u - %s;\n", s1.e[ch], s1.e[ch]);
+            val out = new_val(g, K_UINT);
+            /* every channel the mask keeps is worked out, the colour's three one way and the alpha another */
+            for (int ch = 0; ch < 4; ch++) {
+                uint8_t factors = ch < 3 ? in->a : in->b, op = (uint8_t)((ch < 3 ? in->c : in->c >> 2) & 3);
+                int n = ++g->serial;
+                if (!((in->mask >> ch) & 1)) continue;
+                sop_factor(factors, ch, &s0, &s1, &s2, a_, sizeof(a_));
+                sop_factor((uint8_t)(factors >> 4), ch, &s0, &s1, &s2, b_, sizeof(b_));
+                put(o, "        uint p%d = %s * %s, q%d = %s * %s;\n", n, a_, s1.e[ch], n, b_, s2.e[ch]);
+                if (op == 0) snprintf(e, sizeof(e), "(min(p%d + q%d, 65025u) + 127u) / 255u", n, n);
+                else if (op == 1) snprintf(e, sizeof(e), "((p%d > q%d ? p%d - q%d : 0u) + 127u) / 255u", n, n, n, n);
+                else if (op == 2) snprintf(e, sizeof(e), "(min(p%d, q%d) + 127u) / 255u", n, n);
+                else snprintf(e, sizeof(e), "(max(p%d, q%d) + 127u) / 255u", n, n);
+                local(g, &out, e);
+            }
+            store(g, &in->dest, &out, in->mask, OFF(&in->dest, r));
+        }
+        return;
+
+    case USSE_OP_DUAL: {
+        /* both operations read what was there before either writes */
+        usse_half half[2];
+        val out[2];
+        usse_dual_halves(in, half);
+        for (int k = 0; k < 2; k++) {
+            out[k] = dual_result(g, &half[k]);
+            if (g->failed) return;
+        }
+        for (int k = 0; k < 2; k++) store(g, &half[k].dest, &out[k], half[k].mask, 0);
+        return;
+    }
+
+    case USSE_OP_DEPTHF:
+        /* the tests would have to be made after the program, on what it leaves: nothing here sets that up */
+        fail(g, "a depth of the program's own");
+        return;
+
     case USSE_OP_LIMM: {
         val out = new_val(g, K_UINT);
         snprintf(e, sizeof(e), "0x%08Xu", in->imm);
