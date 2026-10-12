@@ -12,6 +12,8 @@
 #include "sched.h"
 #include "gxm_surfaces.h"
 
+#include <stdlib.h>
+
 #define SCE_DISPLAY_ERROR_INVALID_VALUE       0x80290001u
 #define SCE_DISPLAY_ERROR_INVALID_ADDR        0x80290002u
 #define SCE_DISPLAY_ERROR_INVALID_PIXELFORMAT 0x80290003u
@@ -82,21 +84,40 @@ void vita_hle_sceDisplayWaitSetFrameBufMulti(void) { vita_hle_sceDisplayWaitVbla
 /* The ...CB forms, which also let the waiting thread's callbacks run. These
  * count: sceDisplayWaitVblankStartMultiCB(n) is n blanks from now, and the
  * SetFrameBuf forms wait for the n-th blank after the frame buffer was last
- * set (one at the least), which is how a program holds itself to thirty
- * frames a second however quickly it drew. */
+ * set, which is how a program holds itself to thirty frames a second
+ * however quickly it drew. A blank that has already come is not waited for
+ * again: a program that took its time comes straight back. Once for each
+ * blank, though: here a blank only comes when somebody waits for one, and a
+ * loop on such a wait with no new frame set would otherwise never see the
+ * next. */
 static void wait_blanks(uint32_t n) {
-    if (n < 1) n = 1;
     if (n > 60) n = 60;
     while (n--) vita_hle_sceDisplayWaitVblankStart();
     vita_callbacks_run();
     r0 = 0;
 }
 static uint32_t since_set(uint32_t n) {
+    /* VITARECOMP_DISPLAY_INTERVAL=n: every such wait is for n blanks,
+     * whatever the program asked for: 1 lets a program that holds itself
+     * to thirty frames a second show sixty. Whether it then also runs at
+     * twice its speed is the program's affair. */
+    static int asked, forced;
+    static uint32_t passed_at = ~0u;    /* the blank at which a wait last came straight back */
+    if (!asked) {
+        const char *e = getenv("VITARECOMP_DISPLAY_INTERVAL");
+        forced = e ? atoi(e) : 0;
+        asked = 1;
+    }
+    if (forced > 0) n = (uint32_t)forced;
+    if (n < 1) n = 1;
     const uint32_t due = g_set_vcount + n;
-    return due > g_vcount ? due - g_vcount : 1;
+    if (due > g_vcount) return due - g_vcount;
+    if (passed_at == g_vcount) return 1;
+    passed_at = g_vcount;
+    return 0;
 }
 void vita_hle_sceDisplayWaitVblankStartCB(void)      { wait_blanks(1); }
-void vita_hle_sceDisplayWaitVblankStartMultiCB(void) { wait_blanks(r0); }
+void vita_hle_sceDisplayWaitVblankStartMultiCB(void) { wait_blanks(r0 ? r0 : 1); }
 void vita_hle_sceDisplayWaitSetFrameBufCB(void)      { wait_blanks(since_set(1)); }
 void vita_hle_sceDisplayWaitSetFrameBufMultiCB(void) { wait_blanks(since_set(r0)); }
 
