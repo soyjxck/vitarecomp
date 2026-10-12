@@ -102,15 +102,23 @@ void vita_audio_pull(int16_t *out, uint32_t frames) {
     static int32_t sum[2 * 4096];
     /* VITARECOMP_AUDIO_HEARD=<file>: what the device is given, as it takes
      * it, the silence of a program that fell behind included: sixteen bits,
-     * two channels, the host's rate */
-    static FILE *heard;
+     * two channels, the host's rate. And <file>.gaps, a line for each time
+     * the device asked and less was queued than it took: how many frames it
+     * had taken until then, and how many were wanting. A program's own
+     * silence is queued like any sound, and is not a gap. */
+    static FILE *heard, *gaps;
     static int asked;
     int16_t *const first = out;
     const uint32_t all = frames;
     if (!asked) {
         const char *path = getenv("VITARECOMP_AUDIO_HEARD");
         asked = 1;
-        if (path && *path) heard = fopen(path, "wb");
+        if (path && *path) {
+            char beside[1024];
+            heard = fopen(path, "wb");
+            snprintf(beside, sizeof beside, "%s.gaps", path);
+            gaps = fopen(beside, "w");
+        }
     }
     while (frames) {
         const uint32_t n = frames < 4096 ? frames : 4096;
@@ -131,6 +139,7 @@ void vita_audio_pull(int16_t *out, uint32_t frames) {
             end_store(&p->read, read);
         }
         for (uint32_t k = 0; k < n * 2; k++) out[k] = (int16_t)(sum[k] > 32767 ? 32767 : sum[k] < -32768 ? -32768 : sum[k]);
+        if (gaps && most < n) { fprintf(gaps, "%llu %u\n", (unsigned long long)g_taken, n - most); fflush(gaps); }
         g_taken += n;
         g_empty += n - most;
         out += n * 2;
