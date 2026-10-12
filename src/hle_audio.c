@@ -100,6 +100,18 @@ void vita_audio_device(int present) { end_store(&g_device, present ? 1u : 0u); }
 
 void vita_audio_pull(int16_t *out, uint32_t frames) {
     static int32_t sum[2 * 4096];
+    /* VITARECOMP_AUDIO_HEARD=<file>: what the device is given, as it takes
+     * it, the silence of a program that fell behind included: sixteen bits,
+     * two channels, the host's rate */
+    static FILE *heard;
+    static int asked;
+    int16_t *const first = out;
+    const uint32_t all = frames;
+    if (!asked) {
+        const char *path = getenv("VITARECOMP_AUDIO_HEARD");
+        asked = 1;
+        if (path && *path) heard = fopen(path, "wb");
+    }
     while (frames) {
         const uint32_t n = frames < 4096 ? frames : 4096;
         uint32_t most = 0;
@@ -124,6 +136,7 @@ void vita_audio_pull(int16_t *out, uint32_t frames) {
         out += n * 2;
         frames -= n;
     }
+    if (heard) { fwrite(first, 4, all, heard); fflush(heard); }
 }
 
 void vita_audio_counts(uint64_t *taken, uint64_t *empty) { *taken = g_taken; *empty = g_empty; }

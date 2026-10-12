@@ -19,6 +19,7 @@
 #include <mmsystem.h>
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define BUFFERS 4
@@ -62,6 +63,10 @@ int vita_host_audio_start(void) {
         g_out = NULL;
         return 1;
     }
+    /* VITARECOMP_AUDIO=quiet: the device is fed as ever and nothing is heard,
+     * for a run that is to be measured and not listened to */
+    const char *how = getenv("VITARECOMP_AUDIO");
+    if (how && !strcmp(how, "quiet")) waveOutSetVolume(g_out, 0);
     for (int i = 0; i < BUFFERS; i++) {
         memset(&g_header[i], 0, sizeof g_header[i]);
         g_header[i].lpData = (LPSTR)g_samples[i];
