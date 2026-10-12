@@ -93,6 +93,14 @@ static struct {
     int         touch_count;
     tilt        tilts[16];
     int         tilt_count;
+    const char *control;         /* --control: a file of orders, read as it grows */
+    long        control_at;      /* how far into it has been read */
+    uint32_t    held, held_to;   /* buttons an order holds, and the vertical blank it lets them go at */
+    uint8_t     pushed[4];       /* the sticks as an order has them */
+    uint32_t    pushed_to;
+    int         finger_x, finger_y;
+    uint32_t    finger_to;
+    uint32_t    orders_from;     /* no order is read before this vertical blank: a "wait" */
     uint32_t    frame;
     int         virtual_clock;   /* --virtual-clock */
     int         window;          /* --window: show frames and read the keyboard */
@@ -258,6 +266,75 @@ static void window_vblank(void) {
     }
 }
 
+/* --control FILE: the program played from outside, a step at a time. The
+ * scripted input above is written before the run and cannot look at what
+ * the run shows; this is for whoever looks and then decides: a file that
+ * is added to while the program runs, each line an order, read a few times
+ * a second from where the reading stopped.
+ *
+ *   press NAMES [N]     hold the buttons (CIRCLE, or UP+CROSS) for N
+ *                       vertical blanks, 6 unless said
+ *   stick L|R X Y [N]   push a stick, each way in hundredths from -100 to
+ *                       100, for N blanks, 30 unless said
+ *   touch X Y [N]       a finger on the front panel at display pixel X,Y
+ *   shot PATH           the frame being shown, written as a picture (PPM)
+ *   wait N              read no further order for N vertical blanks: what
+ *                       comes after it in the file is done then
+ *   quit                end the run
+ *
+ * What an order does is said on the log with the blank it was read at. */
+static void control_order(char *line) {
+    char what[16] = "", arg[600] = "";
+    int n = 0, x = 0, y = 0;
+    if (sscanf(line, "%15s", what) != 1) return;
+    fprintf(stderr, "vita_host: control at vblank %u: %s\n", g.frame, line);
+    if (!strcmp(what, "wait") && sscanf(line, "%*s %d", &n) == 1) {
+        g.orders_from = g.frame + (uint32_t)(n > 0 ? n : 1);
+    } else if (!strcmp(what, "press") && sscanf(line, "%*s %599s %d", arg, &n) >= 1) {
+        uint32_t mask = 0;
+        for (char *name = strtok(arg, "+"); name; name = strtok(NULL, "+"))
+            for (size_t i = 0; i < sizeof(BUTTONS) / sizeof(BUTTONS[0]); i++)
+                if (!strcmp(BUTTONS[i].name, name)) mask |= BUTTONS[i].bit;
+        g.held = mask;
+        g.held_to = g.frame + (uint32_t)(n > 0 ? n : 6);
+    } else if (!strcmp(what, "stick") && sscanf(line, "%*s %599s %d %d %d", arg, &x, &y, &n) >= 3) {
+        int right = arg[0] == 'R' || arg[0] == 'r';
+        if (x < -100) x = -100;
+        if (x > 100) x = 100;
+        if (y < -100) y = -100;
+        if (y > 100) y = 100;
+        if (g.frame >= g.pushed_to) g.pushed[0] = g.pushed[1] = g.pushed[2] = g.pushed[3] = 128;
+        g.pushed[right ? 2 : 0] = (uint8_t)(128 + x * 127 / 100);
+        g.pushed[right ? 3 : 1] = (uint8_t)(128 + y * 127 / 100);
+        g.pushed_to = g.frame + (uint32_t)(n > 0 ? n : 30);
+    } else if (!strcmp(what, "touch") && sscanf(line, "%*s %d %d %d", &x, &y, &n) >= 2) {
+        if (x < 0 || x > 959 || y < 0 || y > 543) return;
+        g.finger_x = x * 2 + 1;
+        g.finger_y = y * 2 + 1;
+        g.finger_to = g.frame + (uint32_t)(n > 0 ? n : 6);
+    } else if (!strcmp(what, "shot") && sscanf(line, "%*s %599[^\n]", arg) == 1) {
+        write_ppm(arg);
+    } else if (!strcmp(what, "quit")) {
+        finish(0);
+    }
+}
+
+static void control_read(void) {
+    char line[700];
+    if (!g.control || g.frame % 3 || g.frame < g.orders_from) return;
+    FILE *f = fopen(g.control, "rb");
+    if (!f) return;
+    if (!fseek(f, g.control_at, SEEK_SET))
+        while (g.frame >= g.orders_from && fgets(line, sizeof(line), f)) {
+            size_t n = strlen(line);
+            if (!n || line[n - 1] != '\n') break;       /* a line still being written: the next time */
+            g.control_at += (long)n;
+            while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
+            if (n) control_order(line);
+        }
+    fclose(f);
+}
+
 /* And the wait for the next sixtieth of a second. One thread of the
  * program runs at a time (sched.h), and the one that waits for the
  * vertical blank is the one that is here: a host asleep here is every
@@ -276,6 +353,7 @@ static void window_wait(void) {
 void vita_host_vblank(void) {
     /* this blank's number, kept: another thread may come through here while this one waits, and count on */
     const uint32_t frame = ++g.frame;
+    control_read();
     /* Two pictures to each of the program's frames are shown on the beat
      * (vita_display_on_the_beat): the wait first. One to a frame is shown
      * when the program has it ready, and the wait comes last. */
@@ -311,6 +389,7 @@ uint32_t vita_host_buttons(void) {
     for (int i = 0; i < g.press_count; i++)
         if (g.frame >= g.presses[i].from && g.frame < g.presses[i].to &&
             (!g.presses[i].every || (g.frame - g.presses[i].from) % g.presses[i].every < 8)) m |= g.presses[i].mask;
+    if (g.frame < g.held_to) m |= g.held;
     if (g.window) m |= vita_window_buttons();
     return m;
 }
@@ -318,6 +397,7 @@ uint32_t vita_host_buttons(void) {
 void vita_host_sticks(uint8_t xy[4]) {
     xy[0] = xy[1] = xy[2] = xy[3] = 128;
     if (g.window) vita_window_sticks(xy);
+    if (g.frame < g.pushed_to) memcpy(xy, g.pushed, 4);
     for (int i = 0; i < g.tilt_count; i++)
         if (g.frame >= g.tilts[i].from && g.frame < g.tilts[i].to) {
             xy[g.tilts[i].right ? 2 : 0] = g.tilts[i].x;
@@ -326,6 +406,11 @@ void vita_host_sticks(uint8_t xy[4]) {
 }
 
 int vita_host_touch(int *x, int *y) {
+    if (g.frame < g.finger_to) {
+        *x = g.finger_x;
+        *y = g.finger_y;
+        return 1;
+    }
     for (int i = 0; i < g.touch_count; i++)
         if (g.frame >= g.touches[i].from && g.frame < g.touches[i].to) {
             *x = g.touches[i].x;
@@ -349,6 +434,8 @@ static int usage(void) {
           "                 [--syms module.sym] [--trace-fns]\n"
           "                 [--window] [--window-size WxH] [--fullscreen] [--title TEXT]\n"
           "  --touch X,Y@F-T a finger on the front panel at display pixel X,Y (of 960 by 544)\n"
+          "  --control FILE  orders read from FILE as it grows, a line each: press NAMES [N],\n"
+          "                 stick L|R X Y [N], touch X Y [N], shot PATH, wait N, quit\n"
           "                 from vblank F to T\n"
           "  --stick S,X,Y@F-T the left (L) or right (R) stick at X,Y, each -100 to 100\n"
           "  --window       show each frame in a window at sixty a second. Arrows: the pad;\n"
@@ -422,6 +509,8 @@ int vita_host_main(int argc, char **argv) {
             g.fullscreen = 1;
         } else if (strcmp(argv[i], "--title") == 0 && i + 1 < argc) {
             g.title = argv[++i];
+        } else if (strcmp(argv[i], "--control") == 0 && i + 1 < argc) {
+            g.control = argv[++i];
         } else if (strcmp(argv[i], "--trace-insns") == 0 && i + 1 < argc) {
             unsigned lo, hi;
             if (sscanf(argv[++i], "%x-%x", &lo, &hi) != 2) { fprintf(stderr, "vita_host: bad --trace-insns window\n"); return 2; }
