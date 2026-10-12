@@ -106,6 +106,20 @@ void vita_audio_pull(int16_t *out, uint32_t frames);
  * them had nothing queued and went out as silence. */
 void vita_audio_counts(uint64_t *taken, uint64_t *empty);
 
+/* A host that repaints part of a program's picture (the buttons a prompt
+ * shows, for a controller that has others) does it to the program's own
+ * texels, in its memory, before anything draws with them. This is where it
+ * learns of them: when the program gives a texture its palette
+ * (sceGxmTextureSetPalette), by which time the texels are in place, the
+ * function set here is called with where the texels and the palette are in
+ * the program's memory, the texture's format as the console numbers it,
+ * its size, and how its texels are laid out (the console's type: 0
+ * swizzled, 3 linear, 4 tiled...). NULL, as it starts, and nothing is
+ * called. */
+typedef void (*vita_palette_hook)(uint32_t texels, uint32_t palette, uint32_t format,
+                                  uint32_t width, uint32_t height, int type);
+extern vita_palette_hook vita_gxm_palette_hook;
+
 /* Time that moves only with what the program does, so that a run repeats
  * exactly: a sixtieth of a second at each vertical blank, the length of a
  * wait when every thread waits. Called before the program starts; without

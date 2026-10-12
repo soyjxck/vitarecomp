@@ -31,6 +31,7 @@
 
 #include "vitarecomp/dispatch.h"
 #include "vitarecomp/hle.h"
+#include "vitarecomp/host.h"
 #include "vitarecomp/recomp_rt.h"
 #include "gxm_draw.h"
 #include "gxm_surfaces.h"
@@ -229,6 +230,8 @@ void vita_hle_sceGxmRenderTargetGetDriverMemBlock(void) {
 static uint32_t log2_u(uint32_t v) { uint32_t n = 0; while (v > 1) { v >>= 1; n++; } return n; }
 static int tex_type(uint32_t t) { return (int)(rd(t + 4) >> 29); }
 
+vita_palette_hook vita_gxm_palette_hook;
+
 static void texture_format_set(uint32_t t, uint32_t format) {
     field_set(t + 0, 0x80000000u, format);
     field_set(t + 4, 0x1F000000u, format);
@@ -316,6 +319,14 @@ void vita_hle_sceGxmTextureGetPalette(void) {
 void vita_hle_sceGxmTextureSetPalette(void) {
     if (r1 & 63) { r0 = E_INVALID_ALIGN; return; }
     field_set(r0 + 12, 0x03FFFFFFu, r1 >> 6);
+    /* a texture that is given its palette has its texels by then: the moment
+     * a host that repaints part of a program's picture is told of it (host.h) */
+    if (vita_gxm_palette_hook) {
+        const uint32_t w1 = rd(r0 + 4), logs = (uint32_t)tex_sides_are_logs(r0);
+        vita_gxm_palette_hook(rd(r0 + 8) & ~3u, r1, texture_format(r0),
+                              logs ? 1u << ((w1 >> 16) & 0xF) : ((w1 >> 12) & 0xFFF) + 1,
+                              logs ? 1u << (w1 & 0xF) : (w1 & 0xFFF) + 1, tex_type(r0));
+    }
     r0 = 0;
 }
 static uint32_t tex_mip_count(uint32_t t) { return tex_type(t) == GXM_TEX_LINEAR_STRIDED ? 0 : (((rd(t) >> 17) & 0xF) + 1) & 0xF; }
