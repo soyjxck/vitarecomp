@@ -44,6 +44,22 @@
 #define QUEUE_FRAMES 16384u                 /* a third of a second; a power of two */
 #define QUEUE_MOST   3072u                  /* a block waits while more than this is still to be heard */
 
+/* How far ahead of the device a port is kept: what is queued and not yet
+ * heard when a block has to wait. It is what a program's sound survives of
+ * its sound thread being kept from its turn, and it is how late everything
+ * is heard. VITARECOMP_AUDIO_AHEAD=<milliseconds> sets it, for a host on
+ * which the turns come late: 64 unless it says, 20 to 250. */
+static uint32_t queue_most(void) {
+    static uint32_t most;
+    if (!most) {
+        const char *e = getenv("VITARECOMP_AUDIO_AHEAD");
+        long ms = e && *e ? strtol(e, NULL, 10) : 0;
+        most = QUEUE_MOST;
+        if (ms >= 20 && ms <= 250) most = (uint32_t)ms * (VITA_AUDIO_RATE / 1000);
+    }
+    return most;
+}
+
 typedef struct {
     int      used;
     uint32_t len, freq, channels;
@@ -195,7 +211,7 @@ void vita_hle_sceAudioOutOutput(void) {
     }
     if (samples) queue_block(p, samples, p->len);
     /* the device takes it at its own pace; a queue that stays full is a device that stopped */
-    for (int waited = 0; queued(p) > QUEUE_MOST && waited < 500 && port_of(handle) == p; waited++) vita_sched_delay(1000);
+    for (int waited = 0; queued(p) > queue_most() && waited < 500 && port_of(handle) == p; waited++) vita_sched_delay(1000);
     r0 = 0;
 }
 

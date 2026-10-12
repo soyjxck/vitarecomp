@@ -69,6 +69,37 @@ int32_t vita_slice = VITA_SLICE;
 
 static uint64_t now_us(void) { return vita_clock_us(); }
 
+/* A slice is a count of backward branches, and how long that many take is
+ * the host's affair: a hundredth of a millisecond on one machine, a tenth
+ * of a second where the title is run through an emulator of its host. A
+ * thread that should have had its turn in the meantime, the one that keeps
+ * a sound port fed above all, is then late by more than the port holds. So
+ * the count gives way to the clock where the clock is real: a slice that
+ * took longer than SLICE_US makes the next ones shorter in proportion, and
+ * slices that take a small part of it grow back to the whole count. By the
+ * virtual clock no time passes while a thread computes, a slice is always
+ * the whole count, and a run schedules the same way every time, as it did. */
+#define SLICE_US    3000u
+#define SLICE_LEAST 250
+static int32_t  g_slice_len = VITA_SLICE;
+static uint64_t g_slice_began;
+
+static void slice_begun(void) {
+    vita_slice = g_slice_len;
+    g_slice_began = now_us();
+}
+
+static void slice_measured(void) {
+    uint64_t took = now_us() - g_slice_began;
+    if (took > SLICE_US) {
+        int64_t n = (int64_t)g_slice_len * SLICE_US / (int64_t)took;
+        if (n < g_slice_len / 4) n = g_slice_len / 4;       /* one long call from the library is not the measure of a loop */
+        g_slice_len = n < SLICE_LEAST ? SLICE_LEAST : (int32_t)n;
+    } else if (took < SLICE_US / 4 && g_slice_len < VITA_SLICE) {
+        g_slice_len = g_slice_len > VITA_SLICE / 2 ? VITA_SLICE : g_slice_len * 2;
+    }
+}
+
 static void save_regs(vthread *t) {
     uint32_t *rr = t->regs.r;
     rr[0] = r0; rr[1] = r1; rr[2] = r2;  rr[3] = r3;  rr[4] = r4;  rr[5] = r5; rr[6] = r6;
@@ -231,7 +262,7 @@ static void switch_to(vthread *cur, vthread *next) {
     while (!cur->go) cnd_wait(&cur->wake, &g_mtx);
     cur->go = 0;
     cur->state = T_RUNNING;
-    vita_slice = VITA_SLICE;
+    slice_begun();
 }
 
 /* A new guest thread's host thread: waits for its first turn, then runs the
@@ -243,7 +274,7 @@ static int thread_main(void *arg) {
     while (!t->go) cnd_wait(&t->wake, &g_mtx);
     t->go = 0;
     t->state = T_RUNNING;
-    vita_slice = VITA_SLICE;
+    slice_begun();
     mtx_unlock(&g_mtx);
 
     vita_dispatch(0, t->entry);
@@ -420,7 +451,8 @@ void vita_sched_yield(void) {
  * Timed waits that have come due count as runnable, so a thread that
  * computes without a firmware call no longer holds a sleeper past its time. */
 void vita_slice_end(void) {
-    vita_slice = VITA_SLICE;
+    slice_measured();
+    slice_begun();
     if (!g_init) return;                   /* one thread, and no one to give way to */
     mtx_lock(&g_mtx);
     vthread *cur = g_cur;
