@@ -1201,10 +1201,21 @@ static colour_record *whole_of(const colour_record *r) {
  * ends on the card with a surface to keep leaves it on the card, as that
  * surface's, with nothing written to memory. */
 
-enum { IN_PLANES = 0, ON_CARD };
+/* And a third place: the title's memory, not yet read. A scene that loads
+ * its depth from a surface the card does not hold would have it fetched
+ * from memory before its first draw, and whatever the card holds newer of
+ * that memory sent there first, which waits for the card and goes through
+ * every pixel twice. A title that keeps one depth buffer for its frame and
+ * shrinks its picture beside it, in scenes of other sizes that neither test
+ * depth nor write it, pays that three times a frame for depth nothing looks
+ * at. So the fetching waits for a list that looks (depth_fetched), and a
+ * scene that ends without one leaves its depth where it was, as it was. */
+enum { IN_PLANES = 0, ON_CARD, IN_MEMORY };
 
 static struct {
     int      active;
+    depth_record *from;                     /* IN_MEMORY: the surface it is loaded from, and that surface's five words */
+    uint32_t control[5];
     depth_record *of;                       /* the surface the scene's depth becomes at its end; NULL when it keeps none */
     gpu_surface *card;                      /* where its depth is drawn on the card: the surface's own, or a spare */
     int      where;
@@ -1327,17 +1338,61 @@ int gxm_gpu_scene_begin(const uint32_t control[5], uint32_t width, uint32_t heig
             return 1;
         }
     }
-    /* The caller reads the scene's depth out of memory, then. Whatever the card holds newer of that memory, this
-     * surface or another laid over it, goes there first. */
+    /* The scene's depth is in memory, then, under whatever the card holds newer of that memory. Depth that is whole
+     * numbers is left there until a list looks at it, and the caller told the planes need nothing; a float's top bit
+     * is a mask every list is turned away by or not, and that is fetched now, by the caller, after what the card
+     * holds has gone to memory. */
+    if (load && g_scene.format != GPU_D32FS8) {
+        g_scene.where = IN_MEMORY;
+        g_scene.from = d;
+        memcpy(g_scene.control, control, sizeof(g_scene.control));
+        return 1;
+    }
     if (load) surfaces_back(d->lo, d->hi, NULL);
     return 0;
+}
+
+/* Whether a draw looks at its scene's depth or stencil, or leaves either
+ * other than it found it. */
+static int looks_at_depth(const queued *q) {
+    const gxm_draw_state *s = &q->s;
+    for (int k = 0; k < (s->two_sided ? 2 : 1); k++) {
+        const gxm_face *f = &s->face[k];
+        if (f->depth_func != 7 || f->depth_write || f->stencil_func != 7) return 1;
+        if ((f->stencil_fail | f->depth_fail | f->depth_pass) && f->write_mask) return 1;
+    }
+    return 0;
+}
+
+/* The depth of a scene that left it in memory, into the planes, now that
+ * something looks: what the card holds newer of that memory goes there
+ * first. */
+static void depth_fetched(const gxm_draw_state *s) {
+    if (!g_scene.active || g_scene.where != IN_MEMORY) return;
+    if (logging()) fprintf(stderr, "gxm gpu: list %u: a scene's depth of %ux%u is fetched from memory, a draw looks at it\n", g_list, g_scene.width, g_scene.height);
+    surfaces_back(g_scene.from->lo, g_scene.from->hi, NULL);
+    gxm_depth_surface_load(g_scene.control, g_scene.width, g_scene.height, s->depth, s->stencil, s->mask);
+    g_scene.where = IN_PLANES;
+    g_scene.cleared = 0;
 }
 
 int gxm_gpu_scene_end(int store, float *depth, uint8_t *stencil) {
     int kept = 0;
     if (g_mode != GXM_GPU_DRAW || !g_scene.active) return 0;
+    if (g_scene.where == IN_MEMORY) {
+        /* nothing looked at its depth: it is what it was, where it was, and there is nothing to write */
+        g_scene.active = 0;
+        return 1;
+    }
     if (g_scene.of) {
         depth_record *d = g_scene.of;
+        if (store && g_scene.where == IN_PLANES && g_scene.cleared && d->card) {
+            /* A scene that loads nothing, draws nothing and keeps its depth is how a title clears a depth surface. The
+             * card's is cleared, and is the surface from here on: nothing goes to memory, and the scene that loads it
+             * next finds it on the card. */
+            gpu_surface_clear(d->card, g_scene.clear_depth, g_scene.clear_stencil);
+            g_scene.where = ON_CARD;
+        }
         if (store && g_scene.where == ON_CARD) {
             /* another surface over the same memory that the card held goes to memory before this one is laid over it */
             for (unsigned i = 0; i < g_depth_count; i++)
@@ -1365,6 +1420,7 @@ int gxm_gpu_scene_end(int store, float *depth, uint8_t *stencil) {
 /* The scene's depth into the renderer's planes, for a list the processor
  * is about to draw; and from then on the planes are where it is. */
 static void planes_wanted(const gxm_draw_state *s) {
+    if (g_scene.active && g_scene.where == IN_MEMORY) { depth_fetched(s); return; }
     if (!g_scene.active || g_scene.where != ON_CARD || !g_scene.card) { g_scene.where = IN_PLANES; g_scene.cleared = 0; return; }
     size_t pixels = (size_t)s->width * s->height, bytes = depth_bytes_of(g_scene.format);
     if (bytes_for(&g_depth_rows, &g_depth_rows_cap, pixels * bytes) &&
@@ -1769,9 +1825,11 @@ static gpu_texture *view_for(texture_slot *slot, const gxm_tex *t, const colour_
             int fields = a->bytes == b->bytes && a->fields == b->fields && !memcmp(a->f, b->f, sizeof(a->f));
             int within = layout == GXM_SURFACE_LINEAR && row_bytes && row_bytes == c->s.colour_stride * b->bytes && !(constants[0] % b->bytes);
             if (within) {
-                /* and every texel of it one of the surface's pixels */
+                /* and every texel of it one of the surface's pixels, or in what is left of a row past the surface's
+                 * last pixel: a title that draws 960 pixels into rows of 1024 reads them back as a texture 1024 wide.
+                 * No draw puts anything there, and the program gives nothing for it */
                 uint32_t row = (uint32_t)constants[0] / row_bytes, col = ((uint32_t)constants[0] - row * row_bytes) / b->bytes;
-                within = col + t->level_w[0] <= c->s.width && row + t->level_h[0] <= c->s.height;
+                within = col + t->level_w[0] <= c->s.colour_stride && row + t->level_h[0] <= c->s.height;
             }
             if (!fields || !(alike || within))
                 return by_memory("a surface the card keeps as floats (%ux%u, %u bytes a pixel, %u a row, layout %u) read another way "
@@ -2068,7 +2126,20 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
         }
     }
 
-    if (kept && g_scene.active && g_scene.format == depth && g_scene.width == width && g_scene.height == height) {
+    /* A scene whose depth is still in memory: fetched if this list looks at it, and if not, the list is drawn beside
+     * a depth surface that holds nothing and is not kept. */
+    int unlooked = 0;
+    if (!aside && g_scene.active && g_scene.where == IN_MEMORY) {
+        int looks = 0;
+        for (uint32_t i = 0; i < count && !looks; i++) looks = looks_at_depth(list[i]);
+        if (looks) depth_fetched(s0);
+        else unlooked = 1;
+    }
+    if (unlooked) {
+        deep = spare_for(depth, width, height);
+        if (!deep) return refuse("the card would not take a target of %u by %u", width, height);
+        kept = 0;
+    } else if (kept && g_scene.active && g_scene.format == depth && g_scene.width == width && g_scene.height == height) {
         if (!g_scene.card) g_scene.card = spare_for(depth, width, height);
         deep = g_scene.card;
         if (!deep) return refuse("the card would not take a target of %u by %u", width, height);
@@ -2233,7 +2304,9 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
          * small is put in memory at once; it costs little, and there is no telling otherwise. */
         if (!keeping() || (size_t)(record->hi - record->lo) <= SMALL_BYTES) colour_back(record);
     }
-    if (kept) {
+    if (unlooked) {
+        /* its depth is where it was, in memory: the list neither read it nor changed it */
+    } else if (kept) {
         g_scene.where = ON_CARD;
         g_scene.cleared = 0;
     } else {

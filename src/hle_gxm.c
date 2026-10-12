@@ -1449,6 +1449,9 @@ static void depth_transfer(int store) {
 
 /* For the card's path (gxm_gpu.h): a depth surface it has kept, written
  * where the title keeps it. */
+void gxm_depth_surface_load(const uint32_t control[5], uint32_t width, uint32_t height, float *depth, uint8_t *stencil, uint8_t *mask) {
+    depth_planes(control, 0, width, height, depth, stencil, mask);
+}
 void gxm_depth_surface_store(const uint32_t control[5], uint32_t width, uint32_t height, const float *depth, const uint8_t *stencil) {
     depth_planes(control, 1, width, height, (float *)depth, (uint8_t *)stencil, NULL);
 }

@@ -56,4 +56,9 @@ int gxm_gpu_scene_end(int store, float *depth, uint8_t *stencil);
  * `width` by `height`, into the surface these five words describe. */
 void gxm_depth_surface_store(const uint32_t control[5], uint32_t width, uint32_t height, const float *depth, const uint8_t *stencil);
 
+/* And the other way: the surface those five words describe, into planes of
+ * depth, stencil and mask. For a scene whose depth the card's path left in
+ * memory until a list looked at it. */
+void gxm_depth_surface_load(const uint32_t control[5], uint32_t width, uint32_t height, float *depth, uint8_t *stencil, uint8_t *mask);
+
 #endif /* VITARECOMP_GXM_SURFACES_H */
