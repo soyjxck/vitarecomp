@@ -426,9 +426,11 @@ by `VITARECOMP_GXM_GPU=1` and is not yet the default. What is left:
    system which pages had been written, and are gone (LESSONS.md).
    There is time to spare on the machine this was measured on; what a
    slower one makes of it is not known.
-4. **Textures in their own form.** A compressed texture goes to the card
-   as four floats a texel; the card has the compressed forms. It costs
-   memory and the first frame of a scene, not the frames after.
+4. **Textures in their own form.** A texture whose texels are bytes
+   goes to the card as bytes (four a texel, where it was four floats);
+   a compressed one is still decoded first, and the card has the
+   compressed forms. It costs memory and the first frame of a scene,
+   not the frames after.
 5. **A machine that is busy, and a window that is covered.** By the
    real clock a frame is 33.3 ms with nothing else at work; with
    another program building on every core it was 36 to 50, and the

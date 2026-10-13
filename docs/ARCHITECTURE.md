@@ -897,6 +897,17 @@ the interpreter's thing in so many words:
 - **Depth.** A surface of twenty-four bits is one on the card too, the
   same whole numbers, so a draw that passes only where the depth equals
   what an earlier draw left finds it equal.
+- **A texture goes to the card as bytes when that loses nothing.** It is
+  decoded to four floats a texel, as the processor's renderer reads it,
+  and then looked at: when every number is one a byte stands for on the
+  card (k / 255 to the last bit) it is handed over as four bytes a
+  texel, and the card makes the same numbers of them. Anything else, a
+  texture of floats, of signed channels, one with its gamma curve taken
+  out, goes as floats. The first title's first level handed the card
+  1.2 GB of texels as floats and hands it 450 MB so. A card weighs four
+  bytes with fewer bits than four floats, and the frames show it: one
+  pixel in a hundred a level or two away in the worst frame of a
+  hundred and seven. So the check keeps to floats.
 - **Textures** are known to be unchanged by a hash of all their bytes.
   A title writes into its textures where it pleases, and a scene's depth
   is a later scene's texture.
@@ -930,6 +941,7 @@ through the first title's front end and its first minute of play.
 | The shaders | `VITARECOMP_GXM_GPU_SHADERS=<dir>` | each program's text as it was compiled, HLSL or GLSL as the card reads |
 | What travels | `VITARECOMP_GXM_GPU_LOG=1` | each texture made from memory: size, levels, format, filters; each surface filled from memory or sent back to it |
 | The long way round | `VITARECOMP_GXM_GPU_KEEP=0` | every surface back in memory after every list |
+| Texels as floats | `VITARECOMP_GXM_GPU_TEXELS=float` | every texture handed to the card as four floats a texel, none as bytes; the check does this by itself |
 | Another card | `VITARECOMP_GPU_WARP=1`, `VITARECOMP_GPU_DEBUG=1` | the system's own rasteriser in place of the card; Direct3D's checking layer. Under OpenGL the second is the library's own complaints as they are made and, at the end, how often the card's context changed threads and how long that took |
 | Programs kept | `VITARECOMP_GPU_CACHE=<dir>` | compiled programs kept in that directory from one run to the next; with the log, each program compiled and how long it took |
 | A larger picture | `VITARECOMP_GXM_GPU_SCALE=<n>` | every surface the card keeps `n` times as wide and as high as the title made it, `n` from 2 to 8 |

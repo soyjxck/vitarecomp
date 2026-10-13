@@ -222,10 +222,49 @@ static uint64_t content_stamp(const gxm_tex *t) {
     return h;
 }
 
+/* Whether a texture goes to the card as a byte a channel where that loses
+ * nothing. A card keeps a texture as it is given it, and four floats a
+ * texel are sixteen bytes where most textures were made of four: a
+ * level's worth of them was a gigabyte and a half of the card's memory.
+ * So what was decoded is looked at, and when every number in it is one a
+ * byte stands for on the card (k / 255, to the last bit) the texture is
+ * handed over as bytes. The card then makes the same numbers of them, and
+ * a texture of anything else (floats, signed channels, a gamma curve
+ * taken out) goes as floats as before.
+ *
+ * Not while the card is checked against the processor: the two then agree
+ * on every texel but a card may weigh four bytes with fewer bits than it
+ * weighs four floats, and the check is of everything else.
+ * VITARECOMP_GXM_GPU_TEXELS=float keeps every texture in floats. */
+static int bytes_wanted(void) {
+    static int wanted = -1;
+    if (wanted < 0) {
+        const char *e = getenv("VITARECOMP_GXM_GPU_TEXELS");
+        wanted = !(e && !strcmp(e, "float")) && gxm_gpu_mode() != GXM_GPU_CHECK;
+    }
+    return wanted;
+}
+
+/* `count` numbers as bytes, if every one of them is a byte's. */
+static int as_bytes(const float *in, size_t count, uint8_t *out) {
+    static float unit[256];
+    if (unit[255] != 1.0f)
+        for (unsigned k = 0; k < 256; k++) unit[k] = (float)k / 255.0f;
+    for (size_t i = 0; i < count; i++) {
+        const float v = in[i];
+        if (!(v >= 0.0f && v <= 1.0f)) return 0;
+        const unsigned k = (unsigned)(v * 255.0f + 0.5f);
+        if (unit[k] != v) return 0;
+        out[i] = (uint8_t)k;
+    }
+    return 1;
+}
+
 static gpu_texture *upload(const gxm_tex *t) {
     const void *images[6 * GXM_TEX_LEVELS];
     unsigned faces = t->cube ? 6 : 1, levels = t->levels < GXM_TEX_LEVELS ? t->levels : GXM_TEX_LEVELS, made = 0;
     gpu_texture *out = NULL;
+    int bytes = bytes_wanted();
     if (levels > 16) levels = 16;
     /* the card wants each level half the last: stop where the texture's own levels are not */
     for (unsigned level = 1; level < levels; level++) {
@@ -239,13 +278,36 @@ static gpu_texture *upload(const gxm_tex *t) {
             gxm_tex_level_floats(t, NULL, face, level, texels);
             images[made++] = texels;
         }
-    out = gpu_texture_make(GPU_RGBA32F, t->level_w[0], t->level_h[0], levels, t->cube, images);
+    /* as bytes, if every level of every face is bytes: each image's floats give way to a quarter as much */
+    for (unsigned i = 0, level = 0; bytes && level < levels; level++)
+        for (unsigned face = 0; bytes && face < faces; face++, i++) {
+            const size_t count = (size_t)t->level_w[level] * t->level_h[level] * 4;
+            uint8_t *small = malloc(count);
+            if (small && as_bytes((const float *)images[i], count, small)) {
+                free((void *)images[i]);
+                images[i] = small;
+            } else {
+                /* one that is not: the ones before it are made floats again, the long way round */
+                free(small);
+                bytes = 0;
+                for (unsigned j = 0, l = 0; j < i; l++)
+                    for (unsigned f = 0; f < faces && j < i; f++, j++) {
+                        float *texels = malloc((size_t)t->level_w[l] * t->level_h[l] * 4 * sizeof(float));
+                        if (!texels) goto done;
+                        gxm_tex_level_floats(t, NULL, f, l, texels);
+                        free((void *)images[j]);
+                        images[j] = texels;
+                    }
+            }
+        }
+    out = gpu_texture_make(bytes ? GPU_RGBA8 : GPU_RGBA32F, t->level_w[0], t->level_h[0], levels, t->cube, images);
     {
         if (logging())
             fprintf(stderr, "gxm gpu: texture at 0x%08X: %u by %u, %u of %u levels (second level %u by %u)%s, format 0x%08X kind %u, "
-                            "filters %u %u %u, lod bias %g min %u, modes %u %u: %s\n", t->data, t->level_w[0], t->level_h[0], levels, t->levels,
-                    t->levels > 1 ? t->level_w[1] : 0, t->levels > 1 ? t->level_h[1] : 0, t->cube ? ", a cube" : "", t->format, t->kind,
-                    t->min_filter, t->mag_filter, t->mip_filter, (double)t->lod_bias, t->lod_min, t->u_mode, t->v_mode, out ? "made" : "REFUSED");
+                            "filters %u %u %u, lod bias %g min %u, modes %u %u, as %s: %s\n", t->data, t->level_w[0], t->level_h[0], levels,
+                    t->levels, t->levels > 1 ? t->level_w[1] : 0, t->levels > 1 ? t->level_h[1] : 0, t->cube ? ", a cube" : "", t->format,
+                    t->kind, t->min_filter, t->mag_filter, t->mip_filter, (double)t->lod_bias, t->lod_min, t->u_mode, t->v_mode,
+                    bytes ? "bytes" : "floats", out ? "made" : "REFUSED");
     }
 done:
     for (unsigned i = 0; i < made; i++) free((void *)images[i]);
