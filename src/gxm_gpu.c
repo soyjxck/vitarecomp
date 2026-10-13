@@ -2305,7 +2305,7 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
         /* a program that writes the target itself is told which channels (gxp_hlsl.h) */
         if (call.reads_pixel == 2) { uint32_t keep = call.write_mask; memcpy(&c[1].viewport[10], &keep, 4); }
         call.count = aside || q->tally != 0;
-        gpu_tween_about(&vp->gxp, s->vertex_buffers, c[0].memory);
+        gpu_tween_about(&vp->gxp, s->vertex_buffers, c[0].memory, (q->count * 16u + q->primitive) | 0x80000000u);
         counted[i] = gpu_draw(&call);
         g_ns[P_DRAW] += now_ns() - lap;
     }

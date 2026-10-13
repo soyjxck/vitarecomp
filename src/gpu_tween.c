@@ -30,7 +30,7 @@ int gpu_tween_on(void) {
         g_dump = g_dump_dir;
     }
     e = getenv("VITARECOMP_TWEEN_LOG");
-    g_says = e && *e && *e != '0';
+    g_says = e && *e ? atoi(e) : 0;
     if (g_on) fprintf(stderr, "gpu tween: a frame is shown between each two of the title's\n");
     return g_on;
 }
@@ -85,6 +85,80 @@ static gpu_surface *beside(gpu_surface *s) {
     return p->twin;
 }
 
+/* --- the geometry kept on the card ----------------------------------------------------------- */
+
+/* A mesh gxm_gpu.c keeps on the card. Its vertices are there and nowhere
+ * else, and a title that writes what moves into two buffers turn and turn
+ * about draws a thing from one mesh in this frame and from another in the
+ * next: to tell that the two are the same thing, and to draw it half way,
+ * its vertices have to be at hand. So those of a small mesh are kept here
+ * as it is made. `steady` says the mesh was drawn in the frame before as
+ * well: it is then its own like, and nothing of it need be looked at. */
+typedef struct {
+    gpu_mesh *mesh;
+    uint32_t *vertices, *indices;           /* NULL: more than is kept of one */
+    uint32_t vertex_count, stride, index_count;
+    uint32_t seen;                          /* the frame it was last drawn in */
+    uint8_t  steady;
+} known;
+
+#define KNOWN_SLOTS    32768u               /* a power of two, several times the meshes gxm_gpu.c keeps */
+#define KNOWN_VERTICES 256u                 /* a mesh of more vertices than this is not kept here */
+#define KNOWN_BYTES    ((size_t)48 << 20)   /* nor is any, once this much is */
+static known *g_known[KNOWN_SLOTS];
+static known g_known_gone;                  /* stands where a mesh was: looked past, and used again */
+static uint32_t g_known_filled;             /* slots that are not empty */
+static size_t g_known_bytes;
+static uint32_t g_frame_no = 2;             /* counts the frames written down */
+
+static uint32_t known_slot(const gpu_mesh *m) {
+    return (uint32_t)(((uintptr_t)m >> 4) * 2654435761u) & (KNOWN_SLOTS - 1);
+}
+
+static known *known_of(const gpu_mesh *m) {
+    for (uint32_t at = known_slot(m), tries = 0; tries < KNOWN_SLOTS; tries++, at = (at + 1) & (KNOWN_SLOTS - 1)) {
+        if (!g_known[at]) return NULL;
+        if (g_known[at]->mesh == m) return g_known[at];
+    }
+    return NULL;
+}
+
+static int known_put(known *k) {
+    if (g_known_filled > KNOWN_SLOTS / 4 * 3) {
+        /* too many of the slots stand for meshes that have gone: the table is made again of those that have not */
+        static known *live[KNOWN_SLOTS];
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < KNOWN_SLOTS; i++)
+            if (g_known[i] && g_known[i] != &g_known_gone) live[n++] = g_known[i];
+        memset(g_known, 0, sizeof(g_known));
+        g_known_filled = 0;
+        if (n > KNOWN_SLOTS / 2) return 1;
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t at = known_slot(live[i]->mesh);
+            while (g_known[at]) at = (at + 1) & (KNOWN_SLOTS - 1);
+            g_known[at] = live[i];
+            g_known_filled++;
+        }
+    }
+    uint32_t at = known_slot(k->mesh);
+    while (g_known[at] && g_known[at] != &g_known_gone) at = (at + 1) & (KNOWN_SLOTS - 1);
+    if (!g_known[at]) g_known_filled++;
+    g_known[at] = k;
+    return 0;
+}
+
+static void known_gone(const gpu_mesh *m) {
+    for (uint32_t at = known_slot(m), tries = 0; tries < KNOWN_SLOTS && g_known[at]; tries++, at = (at + 1) & (KNOWN_SLOTS - 1)) {
+        known *k = g_known[at];
+        if (k->mesh != m) continue;
+        if (k->vertices) g_known_bytes -= (size_t)k->vertex_count * k->stride + (size_t)k->index_count * 4;
+        free(k->vertices);
+        free(k);
+        g_known[at] = &g_known_gone;
+        return;
+    }
+}
+
 /* What gxm_gpu.c has let go of is let go of when nothing written down can
  * name it any more: after the frame it was let go in has been gone
  * through. */
@@ -124,6 +198,7 @@ static void left(void) {
             }
             gpu_texture_free(it);
         } else {
+            known_gone(it);
             gpu_mesh_free(it);
         }
     }
@@ -302,6 +377,13 @@ typedef struct {
     uint32_t range_first[8], range_words[8];
     uint64_t key;
     int32_t  was;                           /* the draw of the frame before that this one is, or -1 */
+    /* its vertices and indices, where they are at hand: its own, or those of a small mesh that was not drawn in the
+     * frame before; NULL where they are on the card alone */
+    const uint32_t *vertices, *indices;
+    uint32_t vertex_count, index_count;
+    float    middle[4], size;               /* where those vertices are (placed) */
+    uint8_t  steady;                        /* its geometry is on the card, and was drawn from in the frame before */
+    float    gap;                           /* how far it is from the draw it was (apart) */
 } drawn;
 
 typedef struct { uint32_t first, count; unsigned format; uint32_t width, height; } listed;
@@ -324,8 +406,10 @@ static int g_listing;                       /* between tween_begin and tween_end
 static int g_told;                          /* gpu_tween_flip has been called: frames end there */
 static int g_ready;                         /* the surfaces beside hold the frame between, for the frame now to be shown */
 static uint32_t g_moved, g_found, g_drawn;  /* of the frame last gone through: draws that moved, that had a draw before, in all */
+static uint32_t g_untold;                   /* and those from geometry on the card that the frame before did not draw from, with no more known of it */
+static float g_furthest;                    /* and the furthest a draw was from the one it was taken for */
 
-static struct { const motion *moves; uint8_t buffer[8]; uint32_t first[8], words[8]; int said; } g_about;
+static struct { const motion *moves; uint8_t buffer[8]; uint32_t first[8], words[8], shape; int said; } g_about;
 
 static void *grown(void *list, uint32_t *cap, uint32_t count, size_t each) {
     if (count < *cap) return list;
@@ -353,9 +437,10 @@ static void frame_emptied(frame *f) {
     emptied(&f->bytes);
 }
 
-void gpu_tween_about(const gxp_program *vertex, const uint32_t buffers[GXP_BUFFERS], const uint32_t memory[8][4]) {
+void gpu_tween_about(const gxp_program *vertex, const uint32_t buffers[GXP_BUFFERS], const uint32_t memory[8][4], uint32_t shape) {
     if (!gpu_tween_on()) return;
     g_about.moves = vertex ? motion_of(vertex) : NULL;
+    g_about.shape = shape;
     for (int k = 0; k < 8; k++) {
         g_about.buffer[k] = 255;
         g_about.first[k] = memory ? memory[k][2] : 0;
@@ -465,6 +550,32 @@ void tween_texture_free(gpu_texture *t) {
     leave(A_TEXTURE, t);
 }
 
+gpu_mesh *tween_mesh_make(const void *vertices, uint32_t vertex_count, uint32_t stride, const uint32_t *indices, uint32_t index_count) {
+    gpu_mesh *m = gpu_mesh_make(vertices, vertex_count, stride, indices, index_count);
+    if (!m || !gpu_tween_on()) return m;
+    known *k = calloc(1, sizeof(*k));
+    if (!k) return m;
+    size_t vertex_bytes = (size_t)vertex_count * stride, index_bytes = (size_t)index_count * 4;
+    k->mesh = m;
+    k->vertex_count = vertex_count;
+    k->stride = stride;
+    k->index_count = index_count;
+    k->seen = g_frame_no - 2;
+    if (vertex_count && vertex_count <= KNOWN_VERTICES && !(stride & 3) && g_known_bytes + vertex_bytes + index_bytes <= KNOWN_BYTES &&
+        (k->vertices = malloc(vertex_bytes + index_bytes)) != NULL) {
+        k->indices = (uint32_t *)((uint8_t *)k->vertices + vertex_bytes);
+        memcpy(k->vertices, vertices, vertex_bytes);
+        memcpy(k->indices, indices, index_bytes);
+        g_known_bytes += vertex_bytes + index_bytes;
+    }
+    if (known_put(k)) {
+        if (k->vertices) g_known_bytes -= vertex_bytes + index_bytes;
+        free(k->vertices);
+        free(k);
+    }
+    return m;
+}
+
 void tween_mesh_free(gpu_mesh *m) {
     if (!m) return;
     if (!gpu_tween_on()) { gpu_mesh_free(m); return; }
@@ -506,11 +617,18 @@ int tween_begin(gpu_surface *colour, gpu_surface *depth) {
     return r;
 }
 
-static uint64_t key_of(const gpu_draw_call *d) {
+/* What a draw has to share with a draw of the frame before to be the same
+ * thing, before anything of the two is looked at (apart): its programs,
+ * the form of its geometry and how it is put on the target. Not where its
+ * geometry lies: a title that writes what moves into two buffers turn and
+ * turn about draws each thing from another place than the frame before,
+ * and from the same as the frame before that. */
+static uint64_t key_of(const gpu_draw_call *d, uint32_t shape) {
     uint64_t h = 1469598103934665603ull;
 #define MIX(v) h = (h ^ (uint64_t)(v)) * 1099511628211ull
-    MIX((uintptr_t)d->vertex); MIX((uintptr_t)d->fragment); MIX((uintptr_t)d->mesh);
-    MIX(d->vertex_count); MIX(d->index_count); MIX(d->vertex_stride); MIX(d->strip);
+    MIX((uintptr_t)d->vertex); MIX((uintptr_t)d->fragment); MIX(shape);
+    if (!shape) { MIX(d->mesh != NULL); MIX(d->vertex_count); MIX(d->index_count); }
+    MIX(d->vertex_stride); MIX(d->strip);
     MIX(d->constants_bytes[0]); MIX(d->memory_words[0]);
     MIX(d->blend); MIX(d->cull); MIX(d->depth_func | (unsigned)d->depth_write << 4);
 #undef MIX
@@ -535,13 +653,31 @@ int tween_draw(const gpu_draw_call *d) {
     w->call = *d;
     w->call.count = 0;
     w->was = -1;
-    w->key = key_of(d);
+    w->key = key_of(d, said ? g_about.shape : 0);
     if (d->mesh) {
+        known *k = known_of(d->mesh);
         w->call.vertices = w->call.indices = NULL;
+        if (k && k->seen != g_frame_no) {
+            k->steady = k->seen + 1 == g_frame_no;
+            k->seen = g_frame_no;
+        }
+        w->steady = k && k->steady;
+        if (k && !k->steady && k->vertices && k->stride == d->vertex_stride) {
+            w->vertices = kept(&f->bytes, k->vertices, (size_t)k->vertex_count * k->stride);
+            w->indices = kept(&f->bytes, k->indices, (size_t)k->index_count * 4);
+            if (w->vertices && w->indices) { w->vertex_count = k->vertex_count; w->index_count = k->index_count; }
+            else w->vertices = w->indices = NULL;
+        }
     } else {
         w->call.vertices = kept(&f->bytes, d->vertices, (size_t)d->vertex_count * d->vertex_stride);
         w->call.indices = kept(&f->bytes, d->indices, (size_t)d->index_count * d->index_size);
         if (!w->call.vertices || !w->call.indices) f->whole = 0;
+        if (d->index_size == 4 && !(d->vertex_stride & 3)) {
+            w->vertices = w->call.vertices;
+            w->indices = w->call.indices;
+            w->vertex_count = d->vertex_count;
+            w->index_count = d->index_count;
+        }
     }
     for (int k = 0; k < 2; k++) {
         if (d->constants[k] && d->constants_bytes[k]) {
@@ -639,9 +775,50 @@ static const uint32_t *far_words(const drawn *d, const far_range *r, uint32_t *w
     return NULL;
 }
 
+/* Whether the vertices of two draws are at hand, and one for one. */
 static int vertices_alike(const drawn *now, const drawn *was) {
-    return !now->call.mesh && !was->call.mesh && now->call.vertex_count == was->call.vertex_count &&
-           now->call.vertex_stride == was->call.vertex_stride && now->call.vertices && was->call.vertices;
+    return now->vertices && was->vertices && now->vertex_count && now->vertex_count == was->vertex_count &&
+           now->call.vertex_stride == was->call.vertex_stride;
+}
+
+/* Where a draw's vertices are, taken together: the middle of them, and the
+ * length of the box around them, over the words of a vertex that are its
+ * place. */
+static void placed(drawn *d) {
+    const motion *m = d->moves;
+    uint32_t stride = d->call.vertex_stride / 4, look = m->pa_words < stride ? m->pa_words : stride, dims = 0;
+    float size = 0.0f;
+    for (uint32_t k = 0; k < look && dims < 4; k++) {
+        if (!m->pa[k]) continue;
+        float lo = 0.0f, hi = 0.0f;
+        double sum = 0.0;
+        uint32_t n = 0;
+        for (uint32_t v = 0; v < d->vertex_count; v++) {
+            float x;
+            memcpy(&x, &d->vertices[(size_t)v * stride + k], 4);
+            if (!sane(x)) continue;
+            if (!n || x < lo) lo = x;
+            if (!n || x > hi) hi = x;
+            sum += x;
+            n++;
+        }
+        d->middle[dims++] = n ? (float)(sum / n) : 0.0f;
+        size += (hi - lo) * (hi - lo);
+    }
+    d->size = sqrtf(size);
+}
+
+/* How far one vertex is from another, over the words that are its place. */
+static float moved_by(const uint32_t *was, const uint32_t *now, const uint8_t *place, uint32_t place_words) {
+    float far = 0.0f;
+    for (uint32_t k = 0; k < place_words; k++) {
+        float x, y;
+        if (!place[k]) continue;
+        memcpy(&x, &was[k], 4);
+        memcpy(&y, &now[k], 4);
+        if (sane(x) && sane(y)) far += (x - y) * (x - y);
+    }
+    return sqrtf(far);
 }
 
 /* Whether a vertex is the vertex it was: everything of it but its place is
@@ -657,11 +834,35 @@ static int same_vertex(const uint32_t *was, const uint32_t *now, const uint8_t *
 
 #define FAR_ENOUGH 0.25f                    /* further than this in a thirtieth of a second is a jump, not a move */
 
-/* How far a draw is from one of the frame before. */
+/* How far the vertices of a draw have gone, taken together, from those of
+ * a draw of the frame before: FAR_ENOUGH at half their own size. A thing
+ * does not go further than that in a thirtieth of a second; what lies
+ * further off is another thing of the same kind, the next of a row of
+ * people's shadows. */
+static float shifted(const drawn *now, const drawn *was) {
+    float far = 0.0f, size = now->size > was->size ? now->size : was->size;
+    for (int k = 0; k < 4; k++) far += (now->middle[k] - was->middle[k]) * (now->middle[k] - was->middle[k]);
+    far = sqrtf(far);
+    if (far == 0.0f) return 0.0f;
+    return size > 0.0f ? 2.0f * FAR_ENOUGH * far / size : 2.0f * FAR_ENOUGH;
+}
+
+/* How far a draw is from one of the frame before; more than FAR_ENOUGH
+ * when nothing says the two are the same thing. They are when both draw
+ * the same geometry on the card, or when the vertices of both are at hand
+ * and lie where the others lay. Geometry on the card that is not the
+ * other's, and of which no more is known, is another thing: a title draws
+ * many things of one form with the same programs, and one that comes into
+ * view put half way to another is seen. */
 static float apart(const drawn *now, const drawn *was) {
     const motion *m = now->moves;
     float most = 0.0f, d;
     if (!m || was->moves != m) return 0.0f;
+    if (!now->call.mesh || now->call.mesh != was->call.mesh) {
+        if (!vertices_alike(now, was)) return 2.0f * FAR_ENOUGH;
+        if (m->pa_words) most = shifted(now, was);
+        if (most > FAR_ENOUGH) return most;
+    }
     if (m->sa_words && now->call.constants[0] && was->call.constants[0] && now->call.constants_bytes[0] >= m->sa_words * 4 &&
         was->call.constants_bytes[0] >= m->sa_words * 4) {
         d = went(was->call.constants[0], now->call.constants[0], m->sa, m->sa_words);
@@ -674,30 +875,88 @@ static float apart(const drawn *now, const drawn *was) {
         d = went(a, b, NULL, a_words < b_words ? a_words : b_words);
         if (d > most) most = d;
     }
-    if (m->pa_words && vertices_alike(now, was)) {
-        uint32_t stride = now->call.vertex_stride / 4, look = m->pa_words < stride ? m->pa_words : stride;
-        const uint32_t *a = was->call.vertices, *b = now->call.vertices;
-        for (uint32_t v = 0; v < now->call.vertex_count && most <= FAR_ENOUGH; v++) {
-            if (!same_vertex(a + (size_t)v * stride, b + (size_t)v * stride, m->pa, look, stride)) continue;
-            d = went(a + (size_t)v * stride, b + (size_t)v * stride, m->pa, look);
-            if (d > most) most = d;
-        }
-    }
     return most;
 }
 
 #define LOOK 16                             /* how far either side of where a draw is expected its like is looked for */
 
+static int g_telling;                       /* this going-through is one that is told draw by draw */
+
+/* VITARECOMP_TWEEN_LOG=2: why a draw found none of the frame before. */
+static void why_not(const frame *f, const frame *b, const listed *o, uint32_t i, uint32_t lo, uint32_t hi, const uint8_t *taken) {
+    const drawn *d = &f->draws[i];
+    unsigned near = 0, near_taken = 0, in_list = 0, anywhere = 0, programs = 0, mesh = 0;
+    float nearest = -1.0f;
+    for (uint32_t c = 0; c < b->draw_count; c++) {
+        const drawn *w = &b->draws[c];
+        int within = c >= o->first && c < o->first + o->count;
+        if (within && w->call.vertex == d->call.vertex && w->call.fragment == d->call.fragment) programs++;
+        if (within && w->call.mesh == d->call.mesh && d->call.mesh) mesh++;
+        if (w->key != d->key) continue;
+        anywhere++;
+        if (!within) continue;
+        in_list++;
+        if (c < lo || c >= hi) continue;
+        near++;
+        if (taken[c]) { near_taken++; continue; }
+        float gap = apart(d, w);
+        if (nearest < 0.0f || gap < nearest) nearest = gap;
+    }
+    fprintf(stderr, "tween draw %3u: none: looked at %u to %u of the list at %u (%u draws); the same key %u times in the frame, %u in the list, "
+                    "%u near, %u of those taken, the nearest left %.3f away; the same programs %u times in the list, the same mesh %u\n",
+            i, lo, hi, o->first, o->count, anywhere, in_list, near, near_taken, nearest, programs, mesh);
+}
+
+/* What a draw would be of the frame before, were it asked alone. */
+typedef struct { float score, gap; uint32_t draw, lo, hi, expect; int32_t best; } wish;
+
+static int by_score(const void *a, const void *b) {
+    const wish *x = a, *y = b;
+    if (x->score != y->score) return x->score < y->score ? -1 : 1;
+    return x->draw < y->draw ? -1 : x->draw > y->draw;
+}
+
+/* The draw of the frame before, of those from `lo` up to `hi` that none
+ * has taken, that a draw is likeliest to be: one of its kind (key_of) that
+ * it is not far from (apart), the nearest, with the same picture on it and
+ * the same place in the list counting for more than a little distance.
+ * -1 when there is none. */
+static int32_t likeliest(const drawn *d, const frame *b, uint32_t lo, uint32_t hi, uint32_t expect, const uint8_t *taken, float *score,
+                         float *gap_of) {
+    int32_t best = -1;
+    for (uint32_t c = lo; c < hi; c++) {
+        const drawn *w = &b->draws[c];
+        if ((taken && taken[c]) || w->key != d->key) continue;
+        float gap = apart(d, w);
+        if (gap > FAR_ENOUGH) continue;
+        float s = gap + (w->call.textures[1][0] == d->call.textures[1][0] ? 0.0f : FAR_ENOUGH) +
+                  1e-5f * (float)(c > expect ? c - expect : expect - c);
+        if (best < 0 || s < *score) { best = (int32_t)c; *score = s; *gap_of = gap; }
+    }
+    return best;
+}
+
 /* For each draw of a frame, the draw of the frame before that it is: of
- * the list in the same place among lists of the same form, a draw with the
- * same programs and geometry near the same place in it, the nearest in
- * what it holds, and with the same texture first. */
+ * the list in the same place among lists of the same form, the likeliest
+ * near the same place in it. The draws that are surest of theirs choose
+ * first: one that has just come into view finds among the frame before's
+ * only things that are others, and asked in its turn it would take from
+ * the thing behind it the draw that thing was. */
 static void match(frame *f, const frame *b) {
     static uint8_t *taken;
     static uint32_t taken_cap;
+    static wish *wishes;
+    static uint32_t wish_cap;
     g_found = 0;
     g_drawn = f->draw_count;
-    for (uint32_t i = 0; i < f->draw_count; i++) f->draws[i].was = -1;
+    g_untold = 0;
+    g_furthest = 0.0f;
+    for (uint32_t i = 0; i < f->draw_count; i++) {
+        drawn *d = &f->draws[i];
+        d->was = -1;
+        if (d->moves && d->moves->pa_words && d->vertices) placed(d);
+        if (d->call.mesh && !d->vertices && !d->steady) g_untold++;
+    }
     if (!b || !b->draw_count) return;
     if (b->draw_count > taken_cap) {
         uint8_t *more = realloc(taken, b->draw_count);
@@ -717,27 +976,46 @@ static void match(frame *f, const frame *b) {
             if (seen++ == turn) o = c;
         }
         if (!o) continue;
-        uint32_t expect = o->first, end = o->first + o->count;
+        uint32_t expect = o->first, end = o->first + o->count, count = 0;
+        if (l->count > wish_cap) {
+            wish *more = realloc(wishes, (size_t)l->count * sizeof(*more));
+            if (!more) return;
+            wishes = more;
+            wish_cap = l->count;
+        }
+        /* what each would be, asked alone, and where the next is then looked for */
         for (uint32_t i = l->first; i < l->first + l->count; i++) {
-            drawn *d = &f->draws[i];
-            uint32_t lo = expect > o->first + LOOK ? expect - LOOK : o->first, hi = expect + LOOK < end ? expect + LOOK : end;
-            int32_t best = -1;
-            float best_score = 0.0f;
-            for (uint32_t c = lo; c < hi; c++) {
-                const drawn *w = &b->draws[c];
-                if (taken[c] || w->key != d->key) continue;
-                float gap = apart(d, w);
-                if (gap > FAR_ENOUGH) continue;
-                /* the same picture on it counts for more than a little distance, and so does the same place in the list */
-                float score = gap + (w->call.textures[1][0] == d->call.textures[1][0] ? 0.0f : FAR_ENOUGH) +
-                              1e-5f * (float)(c > expect ? c - expect : expect - c);
-                if (best < 0 || score < best_score) { best = (int32_t)c; best_score = score; }
+            wish *n = &wishes[count];
+            n->draw = i;
+            n->expect = expect;
+            n->lo = expect > o->first + LOOK ? expect - LOOK : o->first;
+            n->hi = expect + LOOK < end ? expect + LOOK : end;
+            n->score = n->gap = 0.0f;
+            n->best = likeliest(&f->draws[i], b, n->lo, n->hi, expect, NULL, &n->score, &n->gap);
+            if (n->best < 0) {
+                if (g_telling) why_not(f, b, o, i, n->lo, n->hi, taken);
+                /* its like of the frame before went unfound as it did: the next is looked for one further on */
+                if (expect < end) expect++;
+                continue;
             }
-            if (best < 0) continue;
-            d->was = best;
-            taken[best] = 1;
-            expect = (uint32_t)best + 1;
+            expect = (uint32_t)n->best + 1;
+            count++;
+        }
+        /* and the surest first: one whose draw another was surer of looks again among what is left */
+        qsort(wishes, count, sizeof(*wishes), by_score);
+        for (uint32_t k = 0; k < count; k++) {
+            wish *n = &wishes[k];
+            drawn *d = &f->draws[n->draw];
+            if (taken[n->best]) n->best = likeliest(d, b, n->lo, n->hi, n->expect, taken, &n->score, &n->gap);
+            if (n->best < 0) {
+                if (g_telling) why_not(f, b, o, n->draw, n->lo, n->hi, taken);
+                continue;
+            }
+            d->was = n->best;
+            taken[n->best] = 1;
             g_found++;
+            d->gap = n->gap;
+            if (n->gap > g_furthest) g_furthest = n->gap;
         }
     }
 }
@@ -788,18 +1066,89 @@ static void draw_between(const frame *b, const drawn *d) {
             }
             if (words) call.memory[0] = words;
         }
-        if (m->pa_words && vertices_alike(d, w)) {
-            uint32_t stride = call.vertex_stride / 4, look = m->pa_words < stride ? m->pa_words : stride;
-            uint32_t *v = spare(2, call.vertices, (size_t)call.vertex_count * call.vertex_stride);
+        if (m->pa_words && vertices_alike(d, w) && !(d->call.mesh && d->call.mesh == w->call.mesh)) {
+            uint32_t stride = call.vertex_stride / 4, look = m->pa_words < stride ? m->pa_words : stride, count = d->vertex_count;
+            uint32_t *v = spare(2, d->vertices, (size_t)count * call.vertex_stride);
             if (v) {
-                const uint32_t *a = w->call.vertices;
-                for (uint32_t i = 0; i < call.vertex_count; i++)
-                    if (same_vertex(a + (size_t)i * stride, v + (size_t)i * stride, m->pa, look, stride))
-                        changed += halved(v + (size_t)i * stride, a + (size_t)i * stride, m->pa, look);
-                call.vertices = v;
+                const uint32_t *a = w->vertices;
+                uint32_t same = 0, went_half = 0;
+                for (uint32_t i = 0; i < count; i++) {
+                    const uint32_t *was = a + (size_t)i * stride;
+                    uint32_t *now = v + (size_t)i * stride;
+                    if (!same_vertex(was, now, m->pa, look, stride)) continue;
+                    same++;
+                    /* one that went further than half the size of the whole is one that jumped */
+                    if (moved_by(was, now, m->pa, look) * 2.0f > d->size) continue;
+                    went_half += halved(now, was, m->pa, look);
+                }
+                if (same < count && count <= 4) {
+                    /* one sprite, showing another picture of itself: its vertices are not what they were, and it is
+                     * the thing it was all the same (match saw to that). The later frame's shape, put half way back
+                     * to where the earlier one was. */
+                    uint32_t dim = 0;
+                    memcpy(v, d->vertices, (size_t)count * call.vertex_stride);
+                    went_half = 0;
+                    for (uint32_t k = 0; k < look && dim < 4; k++) {
+                        if (!m->pa[k]) continue;
+                        float back = 0.5f * (d->middle[dim] - w->middle[dim]);
+                        dim++;
+                        if (back == 0.0f) continue;
+                        for (uint32_t i = 0; i < count; i++) {
+                            float x;
+                            memcpy(&x, &v[(size_t)i * stride + k], 4);
+                            if (!sane(x)) continue;
+                            x -= back;
+                            memcpy(&v[(size_t)i * stride + k], &x, 4);
+                            went_half++;
+                        }
+                    }
+                }
+                if (went_half) {
+                    call.vertices = v;
+                    call.vertex_count = count;
+                    if (call.mesh) {
+                        /* geometry on the card cannot be put elsewhere: drawn from its vertices here, this once */
+                        call.mesh = NULL;
+                        call.indices = d->indices;
+                        call.index_count = d->index_count;
+                        call.index_size = 4;
+                    }
+                    changed += went_half;
+                }
             }
         }
         if (changed) g_moved++;
+    }
+    if (g_telling) {
+        /* VITARECOMP_TWEEN_LOG=2: a frame now and then, draw by draw: what it was taken for, and what of it differed */
+        unsigned differ = 0, may = 0, vertices_differ = 0;
+        int first = -1;
+        if (d->was >= 0 && call.constants_bytes[0] && d->call.constants[0] && b->draws[d->was].call.constants[0]) {
+            const uint32_t *now = d->call.constants[0], *was = b->draws[d->was].call.constants[0];
+            for (unsigned k = 0; k < USSE_WORDS && k * 4 < d->call.constants_bytes[0]; k++) {
+                if (now[k] == was[k]) continue;
+                differ++;
+                if (first < 0) first = (int)k;
+                if (m && k < m->sa_words && m->sa[k]) may++;
+            }
+        }
+        if (d->was >= 0 && vertices_alike(d, &b->draws[d->was]))
+            vertices_differ = memcmp(d->vertices, b->draws[d->was].vertices, (size_t)d->vertex_count * d->call.vertex_stride) != 0;
+        fprintf(stderr, "tween draw %3u: was %4d, %s, %u vertices of %u words, %u indices; may move: sa to %u, pa to %u, %u far; "
+                        "%u words of its constants differ (%u that may move, the first sa%d)%s%s\n",
+                (unsigned)(d - g_frames[g_now].draws), d->was,
+                !d->call.mesh ? "own vertices" : d->steady ? "kept mesh" : d->vertices ? "mesh new to the frame" : "mesh new to the frame and large",
+                d->vertex_count, d->call.vertex_stride / 4, d->index_count, m ? m->sa_words : 0, m ? m->pa_words : 0, m ? m->far_count : 0,
+                differ, may, first, vertices_differ ? ", its vertices differ" : "", call.mesh != d->call.mesh ? ", drawn from its vertices" : "");
+        if (d->was >= 0 && d->gap > 0.0f) {
+            const drawn *w = &b->draws[d->was];
+            fprintf(stderr, "tween draw %3u: %.3f from the one it was; its vertices %.2f large about %.2f %.2f %.2f, the other's %.2f about "
+                            "%.2f %.2f %.2f\n", (unsigned)(d - g_frames[g_now].draws), d->gap, d->size, d->middle[0], d->middle[1],
+                    d->middle[2], w->size, w->middle[0], w->middle[1], w->middle[2]);
+        }
+        if (g_says >= 3)
+            fprintf(stderr, "tween draw %3u: is mesh %p, programs %p %p, texture %p\n", (unsigned)(d - g_frames[g_now].draws),
+                    (void *)d->call.mesh, (void *)d->call.vertex, (void *)d->call.fragment, (void *)d->call.textures[1][0]);
     }
     gpu_draw(&call);
 }
@@ -808,6 +1157,7 @@ static void go_through(const frame *f, const frame *b) {
     int listing = 0;
     g_going++;
     g_moved = 0;
+    if (g_telling) fprintf(stderr, "tween frame %u, draw by draw:\n", g_going);
     for (uint32_t i = 0; i < f->step_count; i++) {
         const step *s = &f->steps[i];
         gpu_surface *into, *from;
@@ -872,18 +1222,24 @@ static void made_alike(void) {
 static uint32_t g_pictures[2];              /* shown since it was last said: the title's own frames, frames between */
 
 static void said(void) {
-    static uint32_t frames, found, moved, drawn_in_all, given_up;
+    static uint32_t frames, found, moved, drawn_in_all, given_up, untold;
+    static float furthest;
     if (!g_says) return;
     frames++;
     found += g_found;
     moved += g_moved;
     drawn_in_all += g_drawn;
+    untold += g_untold;
+    if (g_furthest > furthest) furthest = g_furthest;
     if (!g_ready) given_up++;
     if (frames < 30) return;
     fprintf(stderr, "gpu tween: %u frames: %u draws a frame, %u of them found in the frame before and %u moved; %u frames not gone "
-                    "through; %u pictures shown, %u of them frames between\n",
-            frames, drawn_in_all / frames, found / frames, moved / frames, given_up, g_pictures[0] + g_pictures[1], g_pictures[1]);
-    frames = found = moved = drawn_in_all = given_up = 0;
+                    "through; %u pictures shown, %u of them frames between; %u draws a frame from geometry new on the card and too "
+                    "large to tell by; the furthest a draw went %.3f\n",
+            frames, drawn_in_all / frames, found / frames, moved / frames, given_up, g_pictures[0] + g_pictures[1], g_pictures[1],
+            untold / frames, furthest);
+    frames = found = moved = drawn_in_all = given_up = untold = 0;
+    furthest = 0.0f;
     g_pictures[0] = g_pictures[1] = 0;
 }
 
@@ -895,6 +1251,7 @@ static void settle(void) {
     if (g_listing) return;
     if (f->step_count || !f->whole) {
         if (f->whole) {
+            g_telling = g_says >= 2 && (g_going + 1) % 90 < (g_says >= 3 ? 4u : 1u);
             match(f, g_before ? b : NULL);
             go_through(f, b);
             g_ready = 1;
@@ -908,6 +1265,7 @@ static void settle(void) {
         said();
         g_before = f->whole;
         g_now = !g_now;
+        g_frame_no++;
         frame_emptied(&g_frames[g_now]);
     }
     left();
@@ -932,11 +1290,34 @@ static void dump(gpu_surface *s, int between) {
     snprintf(path, sizeof(path), "%s/tween-%06u-%c.ppm", g_dump, g_turn, between ? 't' : 'r');
     FILE *out = rows && !gpu_surface_get(s, rows, p->width * 4) ? fopen(path, "wb") : NULL;
     if (out) {
-        fprintf(out, "P6\n%u %u\n255\n", (unsigned)p->width, (unsigned)p->height);
-        for (size_t i = 0, n = (size_t)p->width * p->height; i < n; i++) fwrite(rows + i * 4, 1, 3, out);
+        /* a surface several times the title's size is written at about the title's: each pixel the mean of a square */
+        uint32_t by = p->width / 960 ? p->width / 960 : 1, w = p->width / by, h = p->height / by;
+        uint8_t *line = malloc((size_t)w * 3);
+        fprintf(out, "P6\n%u %u\n255\n", (unsigned)w, (unsigned)h);
+        for (uint32_t y = 0; line && y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                uint32_t sum[3] = { 0, 0, 0 };
+                for (uint32_t j = 0; j < by; j++)
+                    for (uint32_t i = 0; i < by; i++) {
+                        const uint8_t *px = rows + ((size_t)(y * by + j) * p->width + x * by + i) * 4;
+                        sum[0] += px[0]; sum[1] += px[1]; sum[2] += px[2];
+                    }
+                for (int c = 0; c < 3; c++) line[x * 3 + c] = (uint8_t)(sum[c] / (by * by));
+            }
+            fwrite(line, 1, (size_t)w * 3, out);
+        }
+        free(line);
         fclose(out);
     }
     free(rows);
+}
+
+void gpu_tween_pictures(const char *directory, unsigned count) {
+    if (!gpu_tween_on() || !directory || !*directory) return;
+    snprintf(g_dump_dir, sizeof(g_dump_dir), "%s", directory);
+    g_dump = g_dump_dir;
+    g_dump_from = g_turn + 1;
+    g_dump_to = g_turn + (count ? count : 1);
 }
 
 /* VITARECOMP_SHOW_LOG=1: once a second, how the pictures shown were spaced.

@@ -186,4 +186,6 @@ int vita_display_show(void *window, uint32_t *width, uint32_t *height) {
 
 int vita_display_on_the_beat(void) { return gpu_tween_on(); }
 
+void vita_display_pictures(const char *directory, unsigned count) { gpu_tween_pictures(directory, count); }
+
 uint32_t vita_display_flips(void) { return g_flips; }

@@ -278,6 +278,9 @@ static void window_vblank(void) {
  *                       100, for N blanks, 30 unless said
  *   touch X Y [N]       a finger on the front panel at display pixel X,Y
  *   shot PATH           the frame being shown, written as a picture (PPM)
+ *   pictures N DIR      the pictures shown at the next N blanks written
+ *                       into DIR (vita_display_pictures): the frames
+ *                       between as well as the program's own
  *   wait N              read no further order for N vertical blanks: what
  *                       comes after it in the file is done then
  *   quit                end the run
@@ -314,6 +317,8 @@ static void control_order(char *line) {
         g.finger_to = g.frame + (uint32_t)(n > 0 ? n : 6);
     } else if (!strcmp(what, "shot") && sscanf(line, "%*s %599[^\n]", arg) == 1) {
         write_ppm(arg);
+    } else if (!strcmp(what, "pictures") && sscanf(line, "%*s %d %599[^\n]", &n, arg) == 2) {
+        vita_display_pictures(arg, (unsigned)(n > 0 ? n : 1));
     } else if (!strcmp(what, "quit")) {
         finish(0);
     }

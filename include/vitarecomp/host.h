@@ -98,6 +98,12 @@ int vita_display_show(void *window, uint32_t *width, uint32_t *height);
  * then a long wait. On the beat they are a sixtieth apart. */
 int vita_display_on_the_beat(void);
 
+/* Where frames between are made: the pictures shown at the next `count`
+ * vertical blanks written into a directory, tween-NNNNNN-t.ppm for a frame
+ * between and -r for one of the program's own, at about the program's own
+ * size. For looking at what a watched run is showing. */
+void vita_display_pictures(const char *directory, unsigned count);
+
 /* sceDisplaySetFrameBuf calls so far. */
 uint32_t vita_display_flips(void);
 
