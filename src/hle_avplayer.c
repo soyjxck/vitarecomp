@@ -385,6 +385,14 @@ void vita_hle_sceAvPlayerInit(void) {
     r0 = p->handle;
 }
 
+void vita_movie_warm(void) { movie_warm(); }
+
+/* While the system makes a movie's decoders ready the program's other
+ * threads have their turns (movie.h): a millisecond's wait at a time. Not
+ * by the virtual clock, where how long the system took would be in the
+ * run: there the caller waits as it did. */
+static void meanwhile(void) { vita_sched_delay(1000); }
+
 /* int sceAvPlayerAddSource(SceAvPlayerHandle handle, const char *filename) */
 void vita_hle_sceAvPlayerAddSource(void) {
     player *p = by_handle(r0);
@@ -406,6 +414,7 @@ void vita_hle_sceAvPlayerAddSource(void) {
     if (wanted && wanted[0] == '0') snprintf(why, sizeof why, "VITARECOMP_MOVIES says none is");
     else if (!open_file(p, path_addr, path)) snprintf(why, sizeof why, "no such file");
     reader.size = p->file_bytes;
+    movie_meanwhile = vita_clock_is_virtual() ? NULL : meanwhile;
     if (!why[0]) p->film = movie_open(&reader, why, sizeof why);
     if (!p->film) {
         vita_hle_trace("sceAvPlayerAddSource(\"%.200s\"): no movie is played: %s", path, why);

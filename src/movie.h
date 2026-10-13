@@ -75,6 +75,19 @@ static inline size_t movie_picture_bytes(uint32_t width, uint32_t height) {
 movie *movie_open(const movie_reader *from, char *why, size_t why_cap);
 void   movie_close(movie *m);
 
+/* What a caller does while movie_open waits for the system to make a
+ * decoder ready, which can take half a second and reads nothing of the
+ * file: called again and again until the decoder is ready, each call a
+ * short wait. A runtime sets it to a wait in which its program's other
+ * threads run. NULL, as it starts, and movie_open simply waits. */
+extern void (*movie_meanwhile)(void);
+
+/* What the first movie_open would wait for, done ahead of time and aside:
+ * whatever the decoders have to bring in before they can be made. Called
+ * once when a program starts, it returns at once; a movie opened before it
+ * has finished waits as it would have. */
+void   movie_warm(void);
+
 /* The streams, in the file's order. */
 uint32_t            movie_streams(const movie *m);
 const movie_stream *movie_stream_at(const movie *m, uint32_t stream);

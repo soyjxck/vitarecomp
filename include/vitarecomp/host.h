@@ -117,6 +117,12 @@ void vita_audio_pull(int16_t *out, uint32_t frames);
  * them had nothing queued and went out as silence. */
 void vita_audio_counts(uint64_t *taken, uint64_t *empty);
 
+/* Movies. Whatever the movie decoders have to bring in before the first of
+ * them can be made is brought in now, on a thread of its own, so that a
+ * program that opens a movie while its sound plays does not stop for it.
+ * For a host to call once as a program starts; it returns at once. */
+void vita_movie_warm(void);
+
 /* A host that repaints part of a program's picture (the buttons a prompt
  * shows, for a controller that has others) does it to the program's own
  * texels, in its memory, before anything draws with them. This is where it

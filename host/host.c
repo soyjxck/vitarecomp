@@ -535,6 +535,8 @@ int vita_host_main(int argc, char **argv) {
     const char *audio = getenv("VITARECOMP_AUDIO");
     if (g.window && !g.virtual_clock && !(audio && audio[0] == '0') && vita_host_audio_start())
         fprintf(stderr, "vita_host: no sound device; running without sound\n");
+    /* and what a movie's decoders bring in is brought in now, aside, where a run is one that is watched */
+    if (g.window && !g.virtual_clock) vita_movie_warm();
 
     vita_load_info info;
     if (vita_probe_elf(g.elf, &info)) {

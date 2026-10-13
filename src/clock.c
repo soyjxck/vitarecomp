@@ -13,6 +13,7 @@ static int      g_virtual;
 static uint64_t g_now;                          /* the virtual clock, in microseconds */
 
 void vita_clock_virtual(void) { g_virtual = 1; }
+int vita_clock_is_virtual(void) { return g_virtual; }
 
 static uint64_t host_unix_us(void) {
     struct timespec t;

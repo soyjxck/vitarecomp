@@ -575,6 +575,62 @@ static int64_t file_read(void *user, uint64_t offset, void *dst, uint32_t length
     return m->from.read(m->from.user, offset, dst, length);
 }
 
+/* The first decoder a program makes brings the system's libraries in, which
+ * takes a few tenths of a second, and a title opens its movie from a
+ * thread while its sound plays. So they are brought in ahead of time, on a
+ * thread nothing waits for: a decoder of each kind made and let go, and the
+ * system's media layer started and left started. */
+static DWORD WINAPI warm(void *unused) {
+    IMFTransform *made = NULL;
+    (void)unused;
+    (void)CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) return 0;
+    if (SUCCEEDED(CoCreateInstance(&H264_DECODER, NULL, CLSCTX_INPROC_SERVER, &IID_IMFTransform, (void **)&made))) RELEASE(made);
+    if (SUCCEEDED(CoCreateInstance(&AAC_DECODER, NULL, CLSCTX_INPROC_SERVER, &IID_IMFTransform, (void **)&made))) RELEASE(made);
+    return 0;
+}
+
+void movie_warm(void) {
+    static int asked;
+    if (asked) return;
+    asked = 1;
+    HANDLE thread = CreateThread(NULL, 0, warm, NULL, 0, NULL);
+    if (thread) CloseHandle(thread);
+}
+
+/* Making a decoder ready takes the system half a second, and none of it is
+ * the program's: nothing of the file is read in that time. So it is done on
+ * a thread of its own while the caller waits by movie_meanwhile, which a
+ * runtime sets to a wait that lets the program's other threads have their
+ * turns (its sound, above all, which half a second without is a hole in
+ * what is heard). With none set the caller simply waits. */
+void (*movie_meanwhile)(void);
+
+typedef struct {
+    movie *m;
+    const mp4_track *t;
+    movie_stream *st;
+    char *why;
+    size_t cap;
+    int started;
+} starting;
+
+static DWORD WINAPI start_aside(void *arg) {
+    starting *s = (starting *)arg;
+    (void)CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    s->started = s->t->codec == MP4_H264 ? video_start(s->m, s->t, s->why, s->cap) : audio_start(s->m, s->t, s->st, s->why, s->cap);
+    return 0;
+}
+
+static int decoder_started(movie *m, const mp4_track *t, movie_stream *st, char *why, size_t cap) {
+    starting s = { m, t, st, why, cap, 0 };
+    HANDLE thread = movie_meanwhile ? CreateThread(NULL, 0, start_aside, &s, 0, NULL) : NULL;
+    if (!thread) return t->codec == MP4_H264 ? video_start(m, t, why, cap) : audio_start(m, t, st, why, cap);
+    while (WaitForSingleObject(thread, 0) == WAIT_TIMEOUT) movie_meanwhile();
+    CloseHandle(thread);
+    return s.started;
+}
+
 movie *movie_open(const movie_reader *from, char *why, size_t why_cap) {
     char none[1];
     if (!why || !why_cap) { why = none; why_cap = sizeof none; }
@@ -603,10 +659,10 @@ movie *movie_open(const movie_reader *from, char *why, size_t why_cap) {
         st->rate = t->rate;
         /* the first of each kind that a decoder takes is the one decoded; a failure's sentence is kept for when nothing is */
         if (t->codec == MP4_H264 && m->video < 0 && t->samples && t->width && t->height) {
-            if (video_start(m, t, why, why_cap)) { m->video = (int)k; st->decoded = 1; }
+            if (decoder_started(m, t, st, why, why_cap)) { m->video = (int)k; st->decoded = 1; }
             else { RELEASE(m->vdec); free(m->sets); m->sets = NULL; }
         } else if (t->codec == MP4_AAC && m->audio < 0 && t->samples) {
-            if (audio_start(m, t, st, why, why_cap)) { m->audio = (int)k; st->decoded = 1; }
+            if (decoder_started(m, t, st, why, why_cap)) { m->audio = (int)k; st->decoded = 1; }
             else RELEASE(m->adec);
         }
     }

@@ -29,4 +29,8 @@ void vita_clock_wait(uint64_t us);
 /* A vertical blank has passed. */
 void vita_clock_vblank(void);
 
+/* Whether the clock is the virtual one: for whatever would let the host's
+ * own time into a run that is meant to repeat. */
+int vita_clock_is_virtual(void);
+
 #endif /* VITARECOMP_CLOCK_H */

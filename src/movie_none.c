@@ -16,6 +16,10 @@ movie *movie_open(const movie_reader *from, char *why, size_t why_cap) {
 
 void movie_close(movie *m) { (void)m; }
 
+void movie_warm(void) { }
+
+void (*movie_meanwhile)(void);
+
 uint32_t movie_streams(const movie *m) { (void)m; return 0; }
 
 const movie_stream *movie_stream_at(const movie *m, uint32_t stream) { (void)m; (void)stream; return NULL; }
