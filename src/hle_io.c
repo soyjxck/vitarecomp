@@ -13,7 +13,9 @@
 #include "vitarecomp/recomp_rt.h"
 #include "hle_vfs.h"
 
+#include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -68,6 +70,43 @@ void vita_io_mount(const char *prefix, const char *host_dir) {
     g_nmounts++;
 }
 
+/* Whether a host has said this path is not to be found, whatever the
+ * mounts hold: VITARECOMP_IO_HIDE names such paths as a program names them,
+ * "app0:patch.bin", several with a semicolon between. A folder of a title's
+ * data can hold more than the title's module was made for (an update's
+ * archive beside a module from before the update), and a module that finds
+ * it reads what it cannot use. Slashes after the colon are not part of the
+ * name, and case is not looked at. */
+static int hidden(const char *guest) {
+    static const char *list;
+    static int asked;
+    if (!asked) { list = getenv("VITARECOMP_IO_HIDE"); asked = 1; }
+    if (!list || !*list) return 0;
+    const char *colon = strchr(guest, ':');
+    if (!colon) return 0;
+    const char *rest = colon + 1;
+    while (*rest == '/' || *rest == '\\') rest++;
+    for (const char *at = list; *at;) {
+        const char *end = strchr(at, ';');
+        if (!end) end = at + strlen(at);
+        const char *c = memchr(at, ':', (size_t)(end - at));
+        if (c && c - at == colon - guest) {
+            const char *want = c + 1, *have = rest;
+            int same = 1;
+            for (ptrdiff_t k = 0; k < c - at; k++)
+                if ((at[k] | 0x20) != (guest[k] | 0x20)) { same = 0; break; }
+            while (want < end && (*want == '/' || *want == '\\')) want++;
+            for (; same && want < end; want++, have++) {
+                const char a = *want == '\\' ? '/' : *want, b = *have == '\\' ? '/' : *have;
+                if ((a >= 'A' && a <= 'Z' ? a + 32 : a) != (b >= 'A' && b <= 'Z' ? b + 32 : b)) same = 0;
+            }
+            if (same && !*have) return 1;
+        }
+        at = *end ? end + 1 : end;
+    }
+    return 0;
+}
+
 /* "app0:dir/file" or "app0:/dir/file" under the mount's directory, with the
  * console's separators turned into the host's. Case is kept: the dumps keep
  * the console's names, and the console's file system is case-sensitive.
@@ -78,7 +117,7 @@ void vita_io_mount(const char *prefix, const char *host_dir) {
  * mount, so that a create lands somewhere definite. */
 int vita_io_resolve(const char *guest, char *host, size_t cap) {
     const char *colon = strchr(guest, ':');
-    if (!colon) return 0;
+    if (!colon || hidden(guest)) return 0;
     size_t plen = (size_t)(colon - guest);
     int found = 0;
     for (int i = 0; i < g_nmounts; i++) {

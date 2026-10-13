@@ -641,6 +641,14 @@ resolve through the table, and a path under no mount is reported missing.
 The same prefix mounted twice is an overlay in the order given, which is how
 a title's patch sits over its data on the console.
 
+A path can also be said not to be there, whatever the mounts hold:
+`VITARECOMP_IO_HIDE=app0:patch.bin`, several with a semicolon between. A
+folder of a title's data can hold more than a module was made for. The
+first title's update lays an archive of its own beside the game's, the
+module from before the update opens it when it finds it, and stops at the
+first thing in it that it cannot use; a host that runs that module hides
+the archive.
+
 ### The contract
 
 `include/vitarecomp/host.h` is the whole interface. The HLE calls five
