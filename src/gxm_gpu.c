@@ -985,6 +985,7 @@ typedef struct {
     uint32_t moment;                        /* at this moment (mem.h) */
     uint32_t version;                       /* counts the lists drawn to it: a texture made from it is made from one of them */
     uint32_t drawn;                         /* the list that drew to it last: of two laid over each other in memory, which is on top */
+    uint32_t since;                         /* the moment (mem.h) after which a write to its memory is the title's, and not this path's */
     uint32_t used;
 } colour_record;
 
@@ -1021,6 +1022,44 @@ static void colour_extent(const gxm_draw_state *s, const uint8_t **lo, const uin
 }
 
 /* The card's surface into the title's memory, if the card's is the newer. */
+static void forget_views_of(const void *record);
+
+/* A surface the card holds newer than memory is the surface for as long as
+ * the title leaves that memory alone. A title lets go of a target and puts
+ * its next textures where it lay, or clears one with a loop of its own;
+ * from then on what is in memory is newer than what the card holds, and
+ * the card's must neither be written back over it nor read in its place.
+ * The letters of a place newly come to were once the last place's frame,
+ * written back over them when they were first drawn with.
+ *
+ * So each surface keeps the moment it was last drawn, and one whose memory
+ * has been written since is let go of: of all the card holds newer, before
+ * a list is made ready. Where writes are not known (mem.h) the question
+ * always answers yes, and is not asked. */
+static void stale_surfaces(void) {
+    for (unsigned i = 0; i < g_colour_count; i++) {
+        colour_record *r = &g_colours[i];
+        if (!r->newer || vita_mem_written(r->lo, 0, 0)) continue;           /* nothing known of writes: nothing to go by */
+        if (!vita_mem_written(r->lo, (size_t)(r->hi - r->lo), r->since)) continue;
+        if (logging())
+            fprintf(stderr, "gxm gpu: list %u: a colour surface of %ux%u is let go: the title has written where it lay\n", g_list, r->s.width,
+                    r->s.height);
+        r->newer = 0;
+        r->agreed = 0;
+        forget_views_of(r);
+    }
+}
+
+/* This path's own writing into memory is not the title's: the surfaces the
+ * card still holds newer over the same bytes are from this moment on. */
+static void written_here(const colour_record *by) {
+    uint32_t now = vita_mem_moment();
+    for (unsigned i = 0; i < g_colour_count; i++) {
+        colour_record *o = &g_colours[i];
+        if (o != by && o->newer && o->lo < by->hi && o->hi > by->lo) o->since = now;
+    }
+}
+
 static int colour_back(colour_record *r) {
     if (!r->newer) return 1;
     size_t pixels = (size_t)r->s.width * r->s.height;
@@ -1037,6 +1076,7 @@ static int colour_back(colour_record *r) {
     r->agreed = 1;
     r->stamp = fold(0, r->lo, (size_t)(r->hi - r->lo));
     r->moment = g_now;                              /* its own writing is after that moment: the bytes are hashed once more, then no more */
+    written_here(r);
     g_ns[P_OUT] += now_ns() - at;
     g_backs++;
     return 1;
@@ -1049,6 +1089,7 @@ static void depth_back(depth_record *d);
  * other in memory go in the order they were drawn, so that what was drawn
  * last is what memory ends with. */
 static void surfaces_back(const uint8_t *lo, const uint8_t *hi, const colour_record *but) {
+    stale_surfaces();
     for (;;) {
         colour_record *first = NULL;
         for (unsigned i = 0; i < g_colour_count; i++) {
@@ -2003,6 +2044,7 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
     g_list++;
     g_now = vita_mem_moment();
     retired_go();
+    stale_surfaces();
 
     /* --- is it a list the card's path draws as the processor's would? --- */
     if (!s0->depth || !s0->stencil) return refuse("a scene with no depth or stencil planes");
@@ -2293,12 +2335,14 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
         /* drawn through the larger surface it is a corner of: that one has it, and this one holds nothing of its own */
         whole->version++;
         whole->drawn = g_list;
+        whole->since = vita_mem_moment();
         record->agreed = 0;
     } else if (record) {
         record->newer = 1;
         record->agreed = 0;
         record->version++;
         record->drawn = g_list;
+        record->since = vita_mem_moment();
         /* A title's own code reads what it has drawn, too, and nothing says when: the brightness a frame came out at,
          * off a surface of a few pixels, to set the next frame's exposure by. What the card holds of a surface that
          * small is put in memory at once; it costs little, and there is no telling otherwise. */
