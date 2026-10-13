@@ -63,9 +63,11 @@
  *
  * A frame between is the title's frame drawn a second time. Where the
  * card has not the time for both, the title would be made to wait and
- * run slow; so when the title's frames slow down, a second's worth are
- * drawn without, and if the title is faster for it none are made for a
- * while, and then they are tried again (gpu_tween.c, "giving way").
+ * run slow; so when the title's frames slow down, and not for a few
+ * frames only, two seconds' worth are drawn without, and if the title is
+ * faster for it none are made for a while, and then they are tried again
+ * (gpu_tween.c, "giving way"). VITARECOMP_TWEEN_GIVE_WAY=0 has a frame
+ * between each two whatever it costs.
  *
  * And two things for finding what is wrong with a frame between.
  * VITARECOMP_TWEEN_STILL=1 puts nothing half way: a frame gone through

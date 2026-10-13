@@ -1385,66 +1385,105 @@ static void said(void) {
  * What a title's own pace is cannot be told by looking: it draws sixty
  * frames a second on one screen and thirty on the next, and fewer while it
  * loads. So it is told by trying. The time the title's frames take is
- * measured, sixty frames together. When they take longer than at the pace
- * last found to be the title's own, no frames between are made for the
- * next sixty, and the two are compared. No faster without them: that is
- * the title's pace now, and they go on. Faster: they were holding it up,
- * and none are made for twenty seconds; then they are tried again,
- * against what the title did without, and each time that fails the rest
- * is twice as long, up to two minutes.
+ * measured, sixty frames together, and their pace is the mean of the
+ * fifty-four quickest: a place that loads, a menu that opens or a program
+ * compiled is a few long frames and no change of pace, and a card that is
+ * behind is behind on most. When the pace is slower than the one last
+ * found to be the title's own, no frames between are made for the next
+ * sixty, and the two are compared. No faster without them: that is the
+ * title's pace now, and they go on. Faster: they were holding it up, and
+ * none are made for twenty seconds; then they are tried again, against
+ * what the title did without, and each time that fails the rest is twice
+ * as long, up to two minutes. A rest also ends when the title's frames
+ * are of another make than when it began, sixty running with another
+ * number of lists of draws: a menu has closed, a place has been left,
+ * and what held the title up there may not here. (Its pace without them
+ * says nothing of that: without them it was never held up.)
  *
  * The time is the runtime's clock. On the virtual clock a frame takes the
  * time the title gives it and no more, and what is tried is always found
- * to make no difference. */
+ * to make no difference. VITARECOMP_TWEEN_GIVE_WAY=0: none of this, and
+ * a frame between each two whatever it costs. */
 
-#define PACE_FRAMES 60u                     /* frames whose time is taken together */
+#define PACE_FRAMES 60u                     /* frames whose time is taken together, */
+#define PACE_LONG   6u                      /* and how many of them, the longest, are left out of their pace */
 #define PACE_SLOWER 1.04f                   /* more than this many times another pace is slower */
 #define REST_FIRST  600u                    /* frames */
 #define REST_MOST   3600u
 
+static int g_gives_way = -1;
 static uint64_t g_frame_at;                 /* when the title's last frame was shown, in the clock's microseconds */
 static uint32_t g_pace_frames;              /* of the frames being taken together: how many, */
-static uint64_t g_pace_time;                /* and how long they took */
+static uint32_t g_pace_times[PACE_FRAMES];  /* and how long each took */
 static float g_pace_own;                    /* microseconds a frame, with frames between, at a pace they were found not to slow; 0, none yet */
 static float g_pace_without;                /* and over the last sixty frames that had none */
+static uint32_t g_lists_now;                /* how many lists of draws the title's last frame was */
+static uint32_t g_rest_lists, g_rest_unlike;    /* the same when the rest in progress began, and frames of the sixty that were not so */
 static uint32_t g_rest, g_rest_next = REST_FIRST;   /* frames left with none between; how long the next rest is */
 static int g_trying;                        /* the frames between have just come back, and are being held against going without */
 static int g_rested;                        /* a rest has just ended: the surfaces beside are behind */
 
+static int by_time(const void *a, const void *b) {
+    const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* The pace of the frames taken together, and the count begun again. */
+static float pace_taken(void) {
+    uint64_t sum = 0;
+    uint32_t n = g_pace_frames > PACE_LONG * 2 ? g_pace_frames - PACE_LONG : g_pace_frames;
+    qsort(g_pace_times, g_pace_frames, sizeof(g_pace_times[0]), by_time);
+    for (uint32_t i = 0; i < n; i++) sum += g_pace_times[i];
+    g_pace_frames = 0;
+    return n ? (float)sum / (float)n : 0.0f;
+}
+
+static void rest_over(float pace) {
+    g_pace_without = pace;
+    g_rest = 0;
+    g_rested = g_trying = 1;
+}
+
 /* The title has shown a frame. */
 static void paced(void) {
+    if (g_gives_way < 0) { const char *e = getenv("VITARECOMP_TWEEN_GIVE_WAY"); g_gives_way = !(e && *e == '0'); }
+    if (!g_gives_way) return;
     const uint64_t now = vita_clock_us(), took = now - g_frame_at;
     const int first = !g_frame_at;
     g_frame_at = now;
     if (first || took > 10000000u) return;          /* the first, or one after a long silence */
-    g_pace_frames++;
-    g_pace_time += took;
+    g_pace_times[g_pace_frames++] = (uint32_t)took;
+    if (g_pace_frames == 1) g_rest_unlike = 0;
+    if (g_rest && g_lists_now != g_rest_lists) g_rest_unlike++;
     if (g_rest && !--g_rest) {
         /* a rest is over: what the title did in the last of it is what the frames between are held against */
-        g_pace_without = (float)g_pace_time / (float)g_pace_frames;
-        g_pace_frames = 0;
-        g_pace_time = 0;
-        g_rested = g_trying = 1;
+        rest_over(pace_taken());
         return;
     }
     if (g_pace_frames < PACE_FRAMES) return;
-    const float pace = (float)g_pace_time / (float)g_pace_frames;
-    g_pace_frames = 0;
-    g_pace_time = 0;
-    if (g_rest) return;                             /* resting still: the last sixty frames of a rest are the ones kept */
+    const float pace = pace_taken();
+    if (g_rest) {
+        /* resting: and if none of these sixty frames was of the make the rest began with, the rest was for somewhere else */
+        if (g_rest_unlike >= PACE_FRAMES && g_rest > PACE_FRAMES) rest_over(pace);
+        return;
+    }
     if (g_trying) {
         g_trying = 0;
         if (pace > g_pace_without * PACE_SLOWER) {
             g_rest = g_rest_next;
+            g_rest_lists = g_lists_now;
             fprintf(stderr, "gpu tween: the title's frames take %.1f ms with a frame between each two and %.1f without; none are made "
                             "for the next %u frames\n", (double)pace * 1e-3, (double)g_pace_without * 1e-3, g_rest);
-            if (g_rest_next < REST_MOST) g_rest_next *= 2;
+            g_rest_next = g_rest_next * 2 < REST_MOST ? g_rest_next * 2 : REST_MOST;
         } else {
             g_pace_own = pace;
             g_rest_next = REST_FIRST;
         }
-    } else if (g_pace_own == 0.0f || pace > g_pace_own * PACE_SLOWER) {
+    } else if (g_pace_own == 0.0f) {
+        g_pace_own = pace;                          /* the first pace there is: taken for the title's own until one is slower */
+    } else if (pace > g_pace_own * PACE_SLOWER) {
         g_rest = PACE_FRAMES;                       /* slower than it was: sixty frames without, to see whose doing it is */
+        g_rest_lists = g_lists_now;
     } else if (pace < g_pace_own) {
         g_pace_own = pace;
     }
@@ -1455,6 +1494,7 @@ static void settle(void) {
     g_ready = 0;
     if (g_listing) return;
     if (f->step_count || !f->whole) {
+        g_lists_now = f->list_count;
         if (f->whole && g_rest) {
             /* resting: the frame is kept for the next to be told by, and not gone through */
             g_found = g_moved = 0;
