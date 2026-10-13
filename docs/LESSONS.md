@@ -1404,3 +1404,82 @@ of them was arithmetic.
    nothing, and a window of no size is one there is nothing to show in.
    The console itself is asked now. The log was all good news; the
    picture was the test.
+
+## Frames between, on a title that lights its picture afterwards (2026-10-13)
+
+The frame between two frames was made for the second title and switched
+on for the first. Its geometry was right at once. Its lighting was wrong
+in two frames between of every three: the sun gone from the ground, lit
+wedges on walls. A count of the pixels that lay further from both of the
+title's own frames than those lay from each other came to fifteen in a
+hundred.
+
+1. **Ask whether the going through is at fault before asking what moved.**
+   A frame gone through again with nothing put half way
+   (`VITARECOMP_TWEEN_STILL`) was the title's frame byte for byte, which
+   settled in one run that surfaces, textures and depth were all
+   carried rightly and the fault was in what moved. Moving the draws of
+   some lists and not others (`VITARECOMP_TWEEN_LISTS`) then put it in
+   one list of twenty, the one the lights are drawn in.
+2. **Two things with nothing to tell them apart are not thereby the
+   same thing.** The title registers one program's bytes at several
+   addresses. The card is given one program for them, so two draws with
+   them were of one kind; what moves was kept by the address, so they
+   were of two; and the distance between two draws of different kinds
+   was given as nothing, because there was nothing to measure it by.
+   Nothing was the best distance there is. A light was taken for the
+   light beside it and drawn half way between the two. Programs are the
+   same when they say the same, and stray pixels fell from 70,000 a
+   frame to 14,000, which are the edges of things that move.
+3. **A guess about where the fault is costs a run to disprove; so make
+   the run cheap.** The first guess was the camera in the fragment
+   programs, which a deferred renderer has, and two ways of moving it
+   were written before either was measured. The first changed nothing
+   and the second did harm (every number of a fragment program that
+   had moved a little, put half way: colours with them). The matrices
+   are moved now and the rest is not, and the measure that showed both
+   was thirty frames and a count.
+4. **A pace is found by trying, not by looking.** Frames between are
+   the card's work twice. Where it has not the time the title waits for
+   it and runs slow, which is worse than thirty pictures a second. How
+   slow is too slow cannot be read off a frame's time: the title draws
+   sixty frames a second on one screen and thirty on the next. Counting
+   late frames against the least time seen rested the frames between
+   through every menu. What works is the comparison itself: sixty
+   frames without, and if the title is no faster for it, that is its
+   pace.
+5. **Count in the clock the program counts in.** The first count was of
+   how often a picture was asked for, which is twice a frame whatever
+   the time; nothing was ever late by it. The runtime's clock is the
+   real one in a window and the counted one in a run that is meant to
+   repeat, where a frame takes what the title gives it and nothing is
+   ever found to be slower.
+
+## A synthesiser with everything but the voices (2026-10-13)
+
+The first title made no sound after the second title's sound went in,
+though both play through the same library. The second streams ATRAC9
+through the plain voice; the first plays a hundred and ten voices of the
+definitions made for Sony's own sound engine, each a player, an envelope
+and four filters, and those kept time in silence.
+
+1. **Print what the title gives before writing what takes it.** A line
+   for each voice told to play (`VITARECOMP_NGS_LOG`), with its
+   parameters as words and the first bytes of its buffers, said in one
+   run what a day of reading would not have: which voices are PCM and
+   which ADPCM, that every ADPCM block names one of the five old
+   predictors, that the envelopes are four points with the first at
+   nothing and a release of two seconds on the loops of jungle and none
+   on a footstep, and that each voice goes to a compressor with two
+   sends to reverbs at no volume.
+2. **A voice is told to play before it is told what.** Every one of them
+   was started with the parameters of whatever it had played last, and
+   written to afterwards. Read at the start, an envelope began at its
+   last sound's height and a sample at its last sound's place. What a
+   voice begins from is what stands when its first block is made.
+3. **A test of the old behaviour is a specification.** The test that a
+   silent voice lasts as long as its sample failed when the voice was
+   given sound: the sound ran one block past its data, because data
+   that ends where a block ends was only found to have ended when more
+   was asked for. A voice whose last frame fills a block finishes with
+   that block.

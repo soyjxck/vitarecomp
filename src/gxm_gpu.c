@@ -2368,6 +2368,7 @@ int gxm_gpu_list(queued **list, uint32_t count, int aside) {
         if (call.reads_pixel == 2) { uint32_t keep = call.write_mask; memcpy(&c[1].viewport[10], &keep, 4); }
         call.count = aside || q->tally != 0;
         gpu_tween_about(&vp->gxp, s->vertex_buffers, c[0].memory, (q->count * 16u + q->primitive) | 0x80000000u);
+        if (fp && call.fragment) gpu_tween_about_fragment(&fp->gxp, s->fragment_buffers, c[1].memory);
         counted[i] = gpu_draw(&call);
         g_ns[P_DRAW] += now_ns() - lap;
     }

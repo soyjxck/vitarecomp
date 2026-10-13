@@ -52,7 +52,27 @@
  * their draw of the frame before, and how many of those moved; 2 also
  * goes through a frame now and then draw by draw: what each was taken
  * for, what of it differed, and why one found nothing; 3 does so for four
- * frames running and names each draw's mesh, programs and texture.
+ * frames running and names each draw's mesh, programs and texture, and
+ * the numbers of it that may move as they were and as they are.
+ *
+ * A fragment program's matrices move as a vertex program's do. A title
+ * that lights its picture in passes of its own keeps the camera there: a
+ * light's volume is placed by a vertex program, and what makes a place of
+ * a depth or a shadow of a place may be a fragment program's.
+ * VITARECOMP_TWEEN_FRAGMENT=0 leaves those the later frame's.
+ *
+ * A frame between is the title's frame drawn a second time. Where the
+ * card has not the time for both, the title would be made to wait and
+ * run slow; so when the title's frames slow down, a second's worth are
+ * drawn without, and if the title is faster for it none are made for a
+ * while, and then they are tried again (gpu_tween.c, "giving way").
+ *
+ * And two things for finding what is wrong with a frame between.
+ * VITARECOMP_TWEEN_STILL=1 puts nothing half way: a frame gone through
+ * again is then the frame, byte for byte, or the going through is at
+ * fault and not the moving. VITARECOMP_TWEEN_LISTS=A-B moves only the
+ * draws of a frame's lists A to B, counted from 0 as the log's second
+ * level names them, which finds the list whose moving does the harm.
  */
 
 #ifndef VITARECOMP_GPU_TWEEN_H
@@ -74,6 +94,15 @@ int gpu_tween_on(void);
  * the same one, wherever their vertices lie. A draw nothing was said about
  * is drawn in a frame between as it is in the later frame. */
 void gpu_tween_about(const gxp_program *vertex, const uint32_t buffers[GXP_BUFFERS], const uint32_t memory[8][4], uint32_t shape);
+
+/* And its fragment program, said after the above and before the draw: its
+ * buffers and the ranges of them its load instructions reach, as for the
+ * vertex stage. A title that lights its picture in a pass of its own
+ * keeps the camera there too: the matrices that make a place of a depth,
+ * and a shadow's of a place, are a fragment program's, and a frame
+ * between whose geometry is half way and whose lighting is not has its
+ * shadows where the later frame's camera would see them. */
+void gpu_tween_about_fragment(const gxp_program *fragment, const uint32_t buffers[GXP_BUFFERS], const uint32_t memory[8][4]);
 
 /* The title has set the frame it shows: what was drawn since the last time
  * is a frame, whole. */

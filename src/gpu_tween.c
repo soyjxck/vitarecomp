@@ -1,6 +1,7 @@
 /* gpu_tween.c — the frame between two frames. See gpu_tween.h. */
 
 #include "gpu_tween.h"
+#include "clock.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -11,6 +12,9 @@
 /* --- what was asked ------------------------------------------------------------------------- */
 
 static int g_on = -1, g_says;
+static unsigned g_only_from, g_only_to = ~0u, g_list_at;   /* VITARECOMP_TWEEN_LISTS=A-B: only the draws of those lists of a frame move */
+static int g_still;                         /* nothing is put half way: a frame gone through again should then be the frame */
+static int g_after = 1;                     /* whether a fragment program's matrices move */
 static char g_dump_dir[900];
 static const char *g_dump;
 static unsigned g_dump_from, g_dump_to = ~0u;   /* the turns of the display whose pictures are written */
@@ -29,6 +33,12 @@ int gpu_tween_on(void) {
         else { g_dump_from = 0; g_dump_to = ~0u; }
         g_dump = g_dump_dir;
     }
+    e = getenv("VITARECOMP_TWEEN_LISTS");
+    if (e && sscanf(e, "%u-%u", &g_only_from, &g_only_to) != 2) { g_only_from = 0; g_only_to = ~0u; }
+    e = getenv("VITARECOMP_TWEEN_STILL");
+    g_still = e && *e && *e != '0';
+    e = getenv("VITARECOMP_TWEEN_FRAGMENT");
+    if (e && *e) g_after = *e != '0';
     e = getenv("VITARECOMP_TWEEN_LOG");
     g_says = e && *e ? atoi(e) : 0;
     if (g_on) fprintf(stderr, "gpu tween: a frame is shown between each two of the title's\n");
@@ -227,7 +237,7 @@ typedef struct {
 #define MATRIX_WORDS 12                     /* a uniform of so many floats or more is a matrix, or several */
 #define SEMANTIC_POSITION 11
 
-static motion g_motions[128];
+static motion g_motions[512];
 static unsigned g_motion_count;
 
 static uint32_t word_at(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
@@ -311,6 +321,16 @@ static const motion *motion_of(const gxp_program *p) {
     return m;
 }
 
+/* Whether two programs' are the same in all but where the program lies. A
+ * title may register one program's bytes more than once, at an address
+ * each: the card is given one program for them (gxm_gpu.c knows a program
+ * by what it says), and a draw with one is the draw the frame before made
+ * with the other. Taken for different, two such draws had nothing to be
+ * told apart by, and a light was put half way to the light beside it. */
+static int alike(const motion *a, const motion *b) {
+    return a == b || (a && b && a->stamp == b->stamp && a->size == b->size);
+}
+
 /* --- a frame, written down ------------------------------------------------------------------- */
 
 /* The bytes a frame's draws are kept in: never moved, so what is written
@@ -375,6 +395,9 @@ typedef struct {
     const motion *moves;
     uint8_t  range_buffer[8];               /* each range of its memory words: which buffer, or 255 */
     uint32_t range_first[8], range_words[8];
+    const motion *moves_after;              /* the same of its fragment program, where one was told of */
+    uint8_t  after_buffer[8];
+    uint32_t after_first[8], after_words[8];
     uint64_t key;
     int32_t  was;                           /* the draw of the frame before that this one is, or -1 */
     /* its vertices and indices, where they are at hand: its own, or those of a small mesh that was not drawn in the
@@ -410,6 +433,7 @@ static uint32_t g_untold;                   /* and those from geometry on the ca
 static float g_furthest;                    /* and the furthest a draw was from the one it was taken for */
 
 static struct { const motion *moves; uint8_t buffer[8]; uint32_t first[8], words[8], shape; int said; } g_about;
+static struct { const motion *moves; uint8_t buffer[8]; uint32_t first[8], words[8]; } g_about_after;
 
 static void *grown(void *list, uint32_t *cap, uint32_t count, size_t each) {
     if (count < *cap) return list;
@@ -441,6 +465,7 @@ void gpu_tween_about(const gxp_program *vertex, const uint32_t buffers[GXP_BUFFE
     if (!gpu_tween_on()) return;
     g_about.moves = vertex ? motion_of(vertex) : NULL;
     g_about.shape = shape;
+    g_about_after.moves = NULL;
     for (int k = 0; k < 8; k++) {
         g_about.buffer[k] = 255;
         g_about.first[k] = memory ? memory[k][2] : 0;
@@ -450,6 +475,19 @@ void gpu_tween_about(const gxp_program *vertex, const uint32_t buffers[GXP_BUFFE
             if (buffers[b] && buffers[b] == memory[k][0]) { g_about.buffer[k] = (uint8_t)b; break; }
     }
     g_about.said = 1;
+}
+
+void gpu_tween_about_fragment(const gxp_program *fragment, const uint32_t buffers[GXP_BUFFERS], const uint32_t memory[8][4]) {
+    if (!gpu_tween_on()) return;
+    g_about_after.moves = fragment ? motion_of(fragment) : NULL;
+    for (int k = 0; k < 8; k++) {
+        g_about_after.buffer[k] = 255;
+        g_about_after.first[k] = memory ? memory[k][2] : 0;
+        g_about_after.words[k] = memory ? memory[k][1] / 4 : 0;
+        if (!memory || !memory[k][1] || !buffers) continue;
+        for (unsigned b = 0; b < GXP_BUFFERS; b++)
+            if (buffers[b] && buffers[b] == memory[k][0]) { g_about_after.buffer[k] = (uint8_t)b; break; }
+    }
 }
 
 /* --- the card's functions, written down ------------------------------------------------------ */
@@ -689,14 +727,22 @@ int tween_draw(const gpu_draw_call *d) {
             if (!w->call.memory[k]) f->whole = 0;
         }
     }
+    memset(w->after_buffer, 255, sizeof(w->after_buffer));
     if (said) {
         w->moves = g_about.moves;
         memcpy(w->range_buffer, g_about.buffer, sizeof(w->range_buffer));
         memcpy(w->range_first, g_about.first, sizeof(w->range_first));
         memcpy(w->range_words, g_about.words, sizeof(w->range_words));
+        if (g_about_after.moves) {
+            w->moves_after = g_about_after.moves;
+            memcpy(w->after_buffer, g_about_after.buffer, sizeof(w->after_buffer));
+            memcpy(w->after_first, g_about_after.first, sizeof(w->after_first));
+            memcpy(w->after_words, g_about_after.words, sizeof(w->after_words));
+        }
     } else {
         memset(w->range_buffer, 255, sizeof(w->range_buffer));
     }
+    g_about_after.moves = NULL;
     return r;
 }
 
@@ -710,6 +756,8 @@ int tween_end(uint64_t *counts, unsigned max_counts) {
 }
 
 /* --- which draw is which, and how far it went ------------------------------------------------ */
+
+#define FAR_ENOUGH 0.25f                    /* further than this in a thirtieth of a second is a jump, not a move */
 
 /* A number that is a place, a length or a part of a matrix, and not a
  * count, an address or a handful of bits read as a float. */
@@ -760,20 +808,24 @@ static uint32_t halved(uint32_t *out, const uint32_t *was, const uint8_t *may, u
 
 /* Where a draw's memory words have the words of a matrix it reads from a
  * buffer, and how many of them are there. */
-static const uint32_t *far_words(const drawn *d, const far_range *r, uint32_t *words) {
+static const uint32_t *far_words_of(const drawn *d, int stage, const far_range *r, uint32_t *words) {
+    const uint8_t *buffer = stage ? d->after_buffer : d->range_buffer;
+    const uint32_t *firsts = stage ? d->after_first : d->range_first, *counts = stage ? d->after_words : d->range_words;
     *words = 0;
-    if (!d->call.memory[0]) return NULL;
+    if (!d->call.memory[stage]) return NULL;
     for (int k = 0; k < 8; k++) {
-        if (d->range_buffer[k] != r->buffer || d->range_words[k] <= r->first) continue;
-        uint32_t first = d->range_first[k] + r->first, n = d->range_words[k] - r->first;
+        if (buffer[k] != r->buffer || counts[k] <= r->first) continue;
+        uint32_t first = firsts[k] + r->first, n = counts[k] - r->first;
         if (n > r->words) n = r->words;
-        if (first >= d->call.memory_words[0]) return NULL;
-        if (first + n > d->call.memory_words[0]) n = d->call.memory_words[0] - first;
+        if (first >= d->call.memory_words[stage]) return NULL;
+        if (first + n > d->call.memory_words[stage]) n = d->call.memory_words[stage] - first;
         *words = n;
-        return d->call.memory[0] + first;
+        return d->call.memory[stage] + first;
     }
     return NULL;
 }
+
+static const uint32_t *far_words(const drawn *d, const far_range *r, uint32_t *words) { return far_words_of(d, 0, r, words); }
 
 /* Whether the vertices of two draws are at hand, and one for one. */
 static int vertices_alike(const drawn *now, const drawn *was) {
@@ -832,8 +884,6 @@ static int same_vertex(const uint32_t *was, const uint32_t *now, const uint8_t *
     return 1;
 }
 
-#define FAR_ENOUGH 0.25f                    /* further than this in a thirtieth of a second is a jump, not a move */
-
 /* How far the vertices of a draw have gone, taken together, from those of
  * a draw of the frame before: FAR_ENOUGH at half their own size. A thing
  * does not go further than that in a thirtieth of a second; what lies
@@ -857,7 +907,7 @@ static float shifted(const drawn *now, const drawn *was) {
 static float apart(const drawn *now, const drawn *was) {
     const motion *m = now->moves;
     float most = 0.0f, d;
-    if (!m || was->moves != m) return 0.0f;
+    if (!m || !alike(was->moves, m)) return 0.0f;
     if (!now->call.mesh || now->call.mesh != was->call.mesh) {
         if (!vertices_alike(now, was)) return 2.0f * FAR_ENOUGH;
         if (m->pa_words) most = shifted(now, was);
@@ -1022,8 +1072,8 @@ static void match(frame *f, const frame *b) {
 
 /* --- a frame gone through again -------------------------------------------------------------- */
 
-static uint8_t *g_spare[3];
-static size_t g_spare_cap[3];
+static uint8_t *g_spare[5];
+static size_t g_spare_cap[5];
 
 static void *spare(int which, const void *from, size_t bytes) {
     if (bytes > g_spare_cap[which]) {
@@ -1045,6 +1095,7 @@ static void draw_between(const frame *b, const drawn *d) {
             if (k && k->twin) call.textures[stage][unit] = k->twin;
         }
     const motion *m = d->moves;
+    if (g_still || g_list_at < g_only_from || g_list_at > g_only_to) { gpu_draw(&call); return; }
     if (d->was >= 0 && m) {
         const drawn *w = &b->draws[d->was];
         uint32_t changed = 0;
@@ -1119,6 +1170,44 @@ static void draw_between(const frame *b, const drawn *d) {
         }
         if (changed) g_moved++;
     }
+    /* And the fragment program's matrices, which go half way too unless
+     * they went further than a thing goes in a thirtieth of a second: that
+     * is a cut, and half way between two cameras is nowhere.
+     * VITARECOMP_TWEEN_FRAGMENT=0 leaves a fragment program as the later
+     * frame has it. */
+    const motion *after = d->moves_after;
+    if (g_after && d->was >= 0 && after && alike(b->draws[d->was].moves_after, after)) {
+        const drawn *w = &b->draws[d->was];
+        const int in_registers = after->sa_words && call.constants[1] && w->call.constants[1] &&
+                                 call.constants_bytes[1] >= after->sa_words * 4 && w->call.constants_bytes[1] >= after->sa_words * 4;
+        float far = in_registers ? went(w->call.constants[1], call.constants[1], after->sa, after->sa_words) : 0.0f;
+        for (uint32_t i = 0; i < after->far_count; i++) {
+            uint32_t a_words, b_words;
+            const uint32_t *a = far_words_of(w, 1, &after->far[i], &a_words), *now = far_words_of(d, 1, &after->far[i], &b_words);
+            if (!a || !now) continue;
+            float f = went(a, now, NULL, a_words < b_words ? a_words : b_words);
+            if (f > far) far = f;
+        }
+        if (far > 0.0f && far <= FAR_ENOUGH) {
+            if (in_registers) {
+                uint32_t *c = spare(3, call.constants[1], call.constants_bytes[1]);
+                if (c) {
+                    halved(c, w->call.constants[1], after->sa, after->sa_words);
+                    call.constants[1] = c;
+                }
+            }
+            if (after->far_count && call.memory[1]) {
+                uint32_t *words = spare(4, call.memory[1], (size_t)call.memory_words[1] * 4);
+                for (uint32_t i = 0; words && i < after->far_count; i++) {
+                    uint32_t a_words, b_words;
+                    const uint32_t *a = far_words_of(w, 1, &after->far[i], &a_words), *now = far_words_of(d, 1, &after->far[i], &b_words);
+                    if (!a || !now) continue;
+                    halved(words + (now - d->call.memory[1]), a, NULL, a_words < b_words ? a_words : b_words);
+                }
+                if (words) call.memory[1] = words;
+            }
+        }
+    }
     if (g_telling) {
         /* VITARECOMP_TWEEN_LOG=2: a frame now and then, draw by draw: what it was taken for, and what of it differed */
         unsigned differ = 0, may = 0, vertices_differ = 0;
@@ -1146,6 +1235,42 @@ static void draw_between(const frame *b, const drawn *d) {
                             "%.2f %.2f %.2f\n", (unsigned)(d - g_frames[g_now].draws), d->gap, d->size, d->middle[0], d->middle[1],
                     d->middle[2], w->size, w->middle[0], w->middle[1], w->middle[2]);
         }
+        if (d->was >= 0 && d->call.constants[1] && b->draws[d->was].call.constants[1]) {
+            /* and its fragment program's constants: which differ from the draw it was, and which of those may move */
+            const uint32_t *now = d->call.constants[1], *was = b->draws[d->was].call.constants[1];
+            unsigned differ_after = 0, may_after = 0, memory_differ = 0;
+            char which[160] = "";
+            int n = 0;
+            for (unsigned k = 0; k < USSE_WORDS && k * 4 < d->call.constants_bytes[1] && k * 4 < b->draws[d->was].call.constants_bytes[1]; k++) {
+                if (now[k] == was[k]) continue;
+                differ_after++;
+                if (after && k < after->sa_words && after->sa[k]) may_after++;
+                else if (n < 140) n += snprintf(which + n, sizeof(which) - (size_t)n, " sa%u", k);
+            }
+            if (d->call.memory[1] && b->draws[d->was].call.memory[1]) {
+                uint32_t words = d->call.memory_words[1] < b->draws[d->was].call.memory_words[1] ? d->call.memory_words[1]
+                                                                                             : b->draws[d->was].call.memory_words[1];
+                for (uint32_t k = 0; k < words; k++) memory_differ += d->call.memory[1][k] != b->draws[d->was].call.memory[1][k];
+            }
+            if (differ_after || memory_differ)
+                fprintf(stderr, "tween draw %3u: fragment program %p: %u words of its constants differ, %u that may move (sa to %u, %u far), "
+                                "%u words of the memory it reads differ; those that stay:%s\n", (unsigned)(d - g_frames[g_now].draws),
+                        (void *)d->call.fragment, differ_after, may_after, after ? after->sa_words : 0, after ? after->far_count : 0,
+                        memory_differ, which);
+        }
+        if (g_says >= 3 && d->was >= 0 && m && m->sa_words && d->call.constants[0] && b->draws[d->was].call.constants[0]) {
+            const uint32_t *now = d->call.constants[0], *was = b->draws[d->was].call.constants[0];
+            char text[1400];
+            int n = 0;
+            for (unsigned k = 0; k < m->sa_words && k < 40 && k * 4 < d->call.constants_bytes[0] && n < 1300; k++) {
+                float x, y;
+                if (!m->sa[k]) continue;
+                memcpy(&x, &was[k], 4);
+                memcpy(&y, &now[k], 4);
+                n += snprintf(text + n, sizeof(text) - (size_t)n, " %u:%g>%g", k, (double)x, (double)y);
+            }
+            fprintf(stderr, "tween draw %3u: moves:%s\n", (unsigned)(d - g_frames[g_now].draws), text);
+        }
         if (g_says >= 3)
             fprintf(stderr, "tween draw %3u: is mesh %p, programs %p %p, texture %p\n", (unsigned)(d - g_frames[g_now].draws),
                     (void *)d->call.mesh, (void *)d->call.vertex, (void *)d->call.fragment, (void *)d->call.textures[1][0]);
@@ -1157,6 +1282,7 @@ static void go_through(const frame *f, const frame *b) {
     int listing = 0;
     g_going++;
     g_moved = 0;
+    g_list_at = 0;
     if (g_telling) fprintf(stderr, "tween frame %u, draw by draw:\n", g_going);
     for (uint32_t i = 0; i < f->step_count; i++) {
         const step *s = &f->steps[i];
@@ -1193,6 +1319,10 @@ static void go_through(const frame *f, const frame *b) {
             into = s->a ? beside(s->a) : NULL;
             from = beside(s->b);
             listing = from && (!s->a || into) && !gpu_begin(into, from);
+            if (g_telling && g_list_at < f->list_count)
+                fprintf(stderr, "tween list %u: %u by %u, format %u, %u draws from %u%s\n", g_list_at, f->lists[g_list_at].width,
+                        f->lists[g_list_at].height, f->lists[g_list_at].format, f->lists[g_list_at].count, f->lists[g_list_at].first,
+                        s->a ? "" : ", depth alone");
             break;
         case DRAW:
             if (listing) draw_between(b, &f->draws[s->draw]);
@@ -1200,6 +1330,7 @@ static void go_through(const frame *f, const frame *b) {
         case END:
             if (listing) gpu_end(NULL, 0);
             listing = 0;
+            g_list_at++;
             break;
         }
     }
@@ -1245,12 +1376,90 @@ static void said(void) {
 
 /* The frame that was being written is whole: gone through, and the next
  * begun. */
+/* --- giving way ------------------------------------------------------------------------------
+ * A frame between is the title's frame drawn twice, and a card that has
+ * not the time for both makes the title wait for it: thirty frames a
+ * second become twenty-four, and a title that counts its time in frames
+ * runs slow, its sound with it. That is worse than thirty pictures.
+ *
+ * What a title's own pace is cannot be told by looking: it draws sixty
+ * frames a second on one screen and thirty on the next, and fewer while it
+ * loads. So it is told by trying. The time the title's frames take is
+ * measured, sixty frames together. When they take longer than at the pace
+ * last found to be the title's own, no frames between are made for the
+ * next sixty, and the two are compared. No faster without them: that is
+ * the title's pace now, and they go on. Faster: they were holding it up,
+ * and none are made for twenty seconds; then they are tried again,
+ * against what the title did without, and each time that fails the rest
+ * is twice as long, up to two minutes.
+ *
+ * The time is the runtime's clock. On the virtual clock a frame takes the
+ * time the title gives it and no more, and what is tried is always found
+ * to make no difference. */
+
+#define PACE_FRAMES 60u                     /* frames whose time is taken together */
+#define PACE_SLOWER 1.04f                   /* more than this many times another pace is slower */
+#define REST_FIRST  600u                    /* frames */
+#define REST_MOST   3600u
+
+static uint64_t g_frame_at;                 /* when the title's last frame was shown, in the clock's microseconds */
+static uint32_t g_pace_frames;              /* of the frames being taken together: how many, */
+static uint64_t g_pace_time;                /* and how long they took */
+static float g_pace_own;                    /* microseconds a frame, with frames between, at a pace they were found not to slow; 0, none yet */
+static float g_pace_without;                /* and over the last sixty frames that had none */
+static uint32_t g_rest, g_rest_next = REST_FIRST;   /* frames left with none between; how long the next rest is */
+static int g_trying;                        /* the frames between have just come back, and are being held against going without */
+static int g_rested;                        /* a rest has just ended: the surfaces beside are behind */
+
+/* The title has shown a frame. */
+static void paced(void) {
+    const uint64_t now = vita_clock_us(), took = now - g_frame_at;
+    const int first = !g_frame_at;
+    g_frame_at = now;
+    if (first || took > 10000000u) return;          /* the first, or one after a long silence */
+    g_pace_frames++;
+    g_pace_time += took;
+    if (g_rest && !--g_rest) {
+        /* a rest is over: what the title did in the last of it is what the frames between are held against */
+        g_pace_without = (float)g_pace_time / (float)g_pace_frames;
+        g_pace_frames = 0;
+        g_pace_time = 0;
+        g_rested = g_trying = 1;
+        return;
+    }
+    if (g_pace_frames < PACE_FRAMES) return;
+    const float pace = (float)g_pace_time / (float)g_pace_frames;
+    g_pace_frames = 0;
+    g_pace_time = 0;
+    if (g_rest) return;                             /* resting still: the last sixty frames of a rest are the ones kept */
+    if (g_trying) {
+        g_trying = 0;
+        if (pace > g_pace_without * PACE_SLOWER) {
+            g_rest = g_rest_next;
+            fprintf(stderr, "gpu tween: the title's frames take %.1f ms with a frame between each two and %.1f without; none are made "
+                            "for the next %u frames\n", (double)pace * 1e-3, (double)g_pace_without * 1e-3, g_rest);
+            if (g_rest_next < REST_MOST) g_rest_next *= 2;
+        } else {
+            g_pace_own = pace;
+            g_rest_next = REST_FIRST;
+        }
+    } else if (g_pace_own == 0.0f || pace > g_pace_own * PACE_SLOWER) {
+        g_rest = PACE_FRAMES;                       /* slower than it was: sixty frames without, to see whose doing it is */
+    } else if (pace < g_pace_own) {
+        g_pace_own = pace;
+    }
+}
+
 static void settle(void) {
     frame *f = &g_frames[g_now], *b = &g_frames[!g_now];
     g_ready = 0;
     if (g_listing) return;
     if (f->step_count || !f->whole) {
-        if (f->whole) {
+        if (f->whole && g_rest) {
+            /* resting: the frame is kept for the next to be told by, and not gone through */
+            g_found = g_moved = 0;
+        } else if (f->whole) {
+            if (g_rested) { made_alike(); g_rested = 0; }
             g_telling = g_says >= 2 && (g_going + 1) % 90 < (g_says >= 3 ? 4u : 1u);
             match(f, g_before ? b : NULL);
             go_through(f, b);
@@ -1383,10 +1592,11 @@ int tween_show(void *window, gpu_surface *s, int fresh) {
     }
     g_turn++;
     if (fresh && !g_told) settle();         /* nobody says when a frame ends: it ends where it is shown */
+    if (fresh) paced();
     if (fresh) {
         const pair *p = s ? pair_of(s) : NULL;
         /* the frame between, when there is one and something in it is not where the title's frame has it */
-        gpu_surface *between = g_ready && g_moved && p && p->twin && p->drawn == g_going && !written_since(s) ? p->twin : NULL;
+        gpu_surface *between = g_ready && (g_moved || g_still) && p && p->twin && p->drawn == g_going && !written_since(s) ? p->twin : NULL;
         g_ready = 0;
         owed = between ? s : NULL;
         return shown(window, between ? between : s, 1, between != NULL);
