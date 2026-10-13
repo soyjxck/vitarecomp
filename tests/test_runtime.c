@@ -790,7 +790,175 @@ static void test_ngs(void) {
 
     assert(vita_mem_bad_access == 0);
     vita_mem_free();
-    printf("  audio synthesiser, silent      ok\n");
+    printf("  audio synthesiser, in time     ok\n");
+}
+
+/* The synthesiser heard: a sample player's PCM and its ADPCM down a patch
+ * to a master buss, at the patch's volumes; and an envelope's release. */
+void vita_hle_sceNgsVoiceDefGetMasterBuss(void);
+void vita_hle_sceNgsVoicePatchSetVolumesMatrix(void);
+void vita_hle_sceNgsVoiceKill(void);
+
+static void put_float(uint32_t addr, float f) { uint32_t u; memcpy(&u, &f, 4); vita_write32(addr, u); }
+
+/* The master buss's block as it stands: frame `k`, left or right. */
+static int ngs_heard(uint32_t master, uint32_t k, int right) {
+    r0 = master; r1 = 1; r2 = NB + 0x4000; r3 = 512 * 4; vita_hle_sceNgsVoiceGetStateData();
+    assert(r0 == 0);
+    return (int16_t)vita_read16(NB + 0x4000 + 4 * k + (right ? 2 : 0));
+}
+
+static void test_ngs_sound(void) {
+    assert(vita_mem_init(NB, 0x100000) == 0);
+    vita_memblock_init(NB + 0x80000, 0x10000);
+    vita_mem_bad_access = 0;
+    static const vita_dispatch_entry table[] = { { NB + 0x500, finished_entry } };
+    vita_dispatch_init(table, 1);
+    sp = NB + 0x70000;
+    g_finished = 0;
+
+    uint32_t params = NB + 0x1000;
+    vita_write32(params, 8); vita_write32(params + 4, 64); vita_write32(params + 8, 512);
+    vita_write32(params + 12, 48000); vita_write32(params + 16, 0);
+    r0 = params; r1 = NB + 0x1100; vita_hle_sceNgsSystemGetRequiredMemorySize();
+    r0 = NB + 0x10000; r1 = vita_read32(NB + 0x1100); r2 = params; r3 = NB + 0x1104;
+    vita_hle_sceNgsSystemInit();
+    assert(r0 == 0);
+    uint32_t sys = vita_read32(NB + 0x1104);
+
+    /* a master buss of two channels, and a rack of two one-channel voices that play samples */
+    uint32_t desc = NB + 0x1200;
+    vita_hle_sceNgsVoiceDefGetMasterBuss();
+    vita_write32(desc, r0); vita_write32(desc + 4, 1); vita_write32(desc + 8, 2);
+    vita_write32(desc + 12, 0); vita_write32(desc + 16, 1); vita_write32(desc + 20, 0);
+    r0 = sys; r1 = desc; r2 = NB + 0x1300; vita_hle_sceNgsRackGetRequiredMemorySize();
+    vita_write32(NB + 0x1310, NB + 0x20000); vita_write32(NB + 0x1314, vita_read32(NB + 0x1300));
+    r0 = sys; r1 = NB + 0x1310; r2 = desc; r3 = NB + 0x1320; vita_hle_sceNgsRackInit();
+    assert(r0 == 0);
+    r0 = vita_read32(NB + 0x1320); r1 = 0; r2 = NB + 0x1400; vita_hle_sceNgsRackGetVoiceHandle();
+    uint32_t master = vita_read32(NB + 0x1400);
+    r0 = master; vita_hle_sceNgsVoicePlay();
+    assert(r0 == 0);
+
+    vita_hle_sceNgsVoiceDefGetScreamVoice();
+    vita_write32(desc, r0); vita_write32(desc + 4, 2); vita_write32(desc + 8, 1);
+    vita_write32(desc + 12, 0); vita_write32(desc + 16, 2); vita_write32(desc + 20, 0);
+    r0 = sys; r1 = desc; r2 = NB + 0x1300; vita_hle_sceNgsRackGetRequiredMemorySize();
+    vita_write32(NB + 0x1310, NB + 0x28000); vita_write32(NB + 0x1314, vita_read32(NB + 0x1300));
+    r0 = sys; r1 = NB + 0x1310; r2 = desc; r3 = NB + 0x1320; vita_hle_sceNgsRackInit();
+    assert(r0 == 0);
+    uint32_t rack = vita_read32(NB + 0x1320);
+    r0 = rack; r1 = 0; r2 = NB + 0x1400; vita_hle_sceNgsRackGetVoiceHandle();
+    uint32_t voice = vita_read32(NB + 0x1400);
+
+    /* its first output to the master buss: half of it to the left, a quarter to the right */
+    uint32_t setup = NB + 0x1700;
+    vita_write32(setup, voice); vita_write32(setup + 4, 0); vita_write32(setup + 8, 0xFFFFFFFFu);
+    vita_write32(setup + 12, master); vita_write32(setup + 16, 0);
+    r0 = setup; r1 = NB + 0x1720; vita_hle_sceNgsPatchCreateRouting();
+    assert(r0 == 0);
+    uint32_t patch = vita_read32(NB + 0x1720);
+    put_float(NB + 0x1780, 0.5f); put_float(NB + 0x1784, 0.25f); put_float(NB + 0x1788, 0.0f); put_float(NB + 0x178C, 0.0f);
+    r0 = patch; r1 = NB + 0x1780; vita_hle_sceNgsVoicePatchSetVolumesMatrix();
+    assert(r0 == 0);
+
+    /* PCM: 1024 samples that rise by 20, played once at the system's rate */
+    for (uint32_t i = 0; i < 1024; i++) vita_write16(NB + 0x30000 + 2 * i, (uint16_t)(int16_t)(20 * (int)i - 9000));
+    r0 = voice; r1 = 0; r2 = 0x01015CE6u; r3 = NB + 0x1410; vita_hle_sceNgsVoiceLockParams();
+    assert(r0 == 0);
+    uint32_t block = vita_read32(NB + 0x1410);
+    vita_write32(block + 4, 84);
+    vita_write32(block + 8, NB + 0x30000); vita_write32(block + 12, 2048);
+    vita_write16(block + 16, 0); vita_write16(block + 18, 0xFFFF);
+    put_float(block + 56, 48000.0f); put_float(block + 60, 1.0f);
+    vita_write8(block + 76, 1); vita_write8(block + 79, 0);
+    r0 = voice; r1 = 0; vita_hle_sceNgsVoiceUnlockParams();
+    r0 = voice; r1 = NB + 0x501; r2 = 0xBEEF; vita_hle_sceNgsVoiceSetFinishedCallback();
+    r0 = voice; vita_hle_sceNgsVoicePlay();
+    ngs_update(sys, 1);
+    for (uint32_t k = 0; k < 512; k += 73) {
+        const int x = 20 * (int)k - 9000;
+        assert(ngs_heard(master, k, 0) == (int)floorf((float)x * 0.5f + 0.5f));
+        assert(ngs_heard(master, k, 1) == (int)floorf((float)x * 0.25f + 0.5f));
+    }
+    ngs_update(sys, 1);
+    assert(ngs_heard(master, 511, 0) == (20 * 1023 - 9000) / 2 && g_finished == 1 && g_finished_user == 0xBEEF);
+    ngs_update(sys, 1);
+    assert(ngs_heard(master, 0, 0) == 0 && ngs_heard(master, 300, 1) == 0);     /* a voice that has finished is not heard */
+
+    /* The same at half the rate: each of the system's frames half a sample on, the ones between on the line between. */
+    put_float(block + 60, 0.5f);
+    r0 = voice; vita_hle_sceNgsVoicePlay();
+    ngs_update(sys, 1);
+    assert(ngs_heard(master, 0, 0) == -4500 && ngs_heard(master, 2, 0) == -4490 && ngs_heard(master, 1, 0) == -4495);
+    r0 = voice; vita_hle_sceNgsVoiceKill();
+    put_float(block + 60, 1.0f);
+
+    /* ADPCM: two blocks. The first has no predictor and shifts its four
+     * bits up by four, so its samples are sixteen times its nibbles, the
+     * low four of each byte first; the second adds 60/64 of the sample
+     * before to four bits shifted up by twelve. */
+    uint32_t ad = NB + 0x38000;
+    vita_write8(ad, 0x08); vita_write8(ad + 1, 0);
+    for (uint32_t i = 0; i < 14; i++) vita_write8(ad + 2 + i, (uint8_t)(0x21 + 0x22 * (i % 4)));   /* 1,2 3,4 5,6 7,8 again and again */
+    vita_write8(ad + 16, 0x10); vita_write8(ad + 17, 0);
+    for (uint32_t i = 0; i < 14; i++) vita_write8(ad + 18 + i, i == 0 ? 0x01 : 0x00);             /* one, and then nothing */
+    put_float(NB + 0x1780, 1.0f); put_float(NB + 0x1784, 1.0f);
+    r0 = patch; r1 = NB + 0x1780; vita_hle_sceNgsVoicePatchSetVolumesMatrix();
+    r0 = voice; r1 = 0; r2 = 0x01015CE6u; r3 = NB + 0x1410; vita_hle_sceNgsVoiceLockParams();
+    assert(r0 == 0);
+    vita_write32(block + 8, ad); vita_write32(block + 12, 32);
+    vita_write8(block + 79, 1);
+    r0 = voice; r1 = 0; vita_hle_sceNgsVoiceUnlockParams();
+    r0 = voice; vita_hle_sceNgsVoicePlay();
+    ngs_update(sys, 1);
+    assert(ngs_heard(master, 0, 0) == 16 && ngs_heard(master, 1, 1) == 32 && ngs_heard(master, 6, 0) == 112);
+    assert(ngs_heard(master, 7, 0) == -128);                /* four bits are a number from -8 to 7 */
+    assert(ngs_heard(master, 27, 0) == 64);
+    assert(ngs_heard(master, 28, 0) == 4096 + 64 * 60 / 64);
+    assert(ngs_heard(master, 29, 0) == (4096 + 60) * 60 / 64);
+    assert(ngs_heard(master, 30, 0) == ((4096 + 60) * 60 / 64) * 60 / 64);
+    assert(ngs_heard(master, 56, 0) == 0 && g_finished == 2);   /* fifty-six samples, and the voice is over */
+
+    /* An envelope that stands at 1 and takes 32 ms to let go: a voice keyed
+     * off goes on for three blocks of 10.67 ms, lower in each, and
+     * finishes with the third. Volumes that are set while it plays are
+     * reached across a block, not at its edge. */
+    for (uint32_t i = 0; i < 4096; i++) vita_write16(NB + 0x30000 + 2 * i, 8000);
+    r0 = voice; r1 = 0; r2 = 0x01015CE6u; r3 = NB + 0x1410; vita_hle_sceNgsVoiceLockParams();
+    vita_write32(block + 8, NB + 0x30000); vita_write32(block + 12, 8192);
+    vita_write16(block + 16, 0xFFFF);                       /* for ever */
+    vita_write8(block + 79, 0);
+    r0 = voice; r1 = 0; vita_hle_sceNgsVoiceUnlockParams();
+    r0 = voice; r1 = 1; r2 = 0x01015CE3u; r3 = NB + 0x1410; vita_hle_sceNgsVoiceLockParams();
+    assert(r0 == 0);
+    uint32_t env = vita_read32(NB + 0x1410);
+    vita_write32(env + 4, 72);
+    for (uint32_t i = 0; i < 4; i++) { vita_write32(env + 8 + 12 * i, 0); put_float(env + 12 + 12 * i, 1.0f); vita_write32(env + 16 + 12 * i, 0); }
+    vita_write32(env + 56, 32); vita_write32(env + 60, 4); vita_write32(env + 64, 3); vita_write32(env + 68, 0xFFFFFFFFu);
+    r0 = voice; r1 = 1; vita_hle_sceNgsVoiceUnlockParams();
+    r0 = voice; vita_hle_sceNgsVoicePlay();
+    ngs_update(sys, 2);
+    assert(ngs_heard(master, 0, 0) == 8000 && ngs_heard(master, 511, 1) == 8000);
+    put_float(NB + 0x1780, 0.5f); put_float(NB + 0x1784, 0.5f);
+    r0 = patch; r1 = NB + 0x1780; vita_hle_sceNgsVoicePatchSetVolumesMatrix();
+    ngs_update(sys, 1);
+    assert(ngs_heard(master, 0, 0) > 7950 && ngs_heard(master, 255, 0) == 6000 && ngs_heard(master, 511, 0) == 4000);
+    ngs_update(sys, 1);
+    assert(ngs_heard(master, 0, 0) == 4000 && ngs_heard(master, 511, 0) == 4000);
+    r0 = voice; vita_hle_sceNgsVoiceKeyOff();
+    assert(ngs_voice_state(voice) == 0x41);
+    ngs_update(sys, 1);
+    assert(g_finished == 2 && ngs_voice_state(voice) == 0x41);
+    assert(ngs_heard(master, 0, 0) < 4000 && ngs_heard(master, 0, 0) > 3900 && ngs_heard(master, 511, 0) == 2667);
+    ngs_update(sys, 1);
+    assert(g_finished == 2 && ngs_heard(master, 511, 0) == 1333);
+    ngs_update(sys, 1);
+    assert(g_finished == 3 && ngs_voice_state(voice) == 0 && ngs_heard(master, 511, 0) == 0);
+
+    assert(vita_mem_bad_access == 0);
+    vita_mem_free();
+    printf("  audio synthesiser, heard       ok\n");
 }
 
 /* --- the time slice -------------------------------------------------------------
@@ -1224,6 +1392,7 @@ int main(void) {
     test_scanf();
     test_time_slice();
     test_ngs();
+    test_ngs_sound();
     test_touch();
     test_sticks();
     test_coverage();

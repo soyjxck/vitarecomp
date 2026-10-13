@@ -8,23 +8,26 @@
  * how far a voice has played, and waits for the callback that says one has
  * finished. So the graph's bookkeeping is all here.
  *
- * The signal is here for one kind of voice: the ATRAC9 voice, which is what
- * a title streams its music and its speech through. Such a voice is decoded
- * as it plays (atrac9.c). Superframes are taken from its chain of buffers
- * as the block being made needs them; the samples a buffer says to leave
- * out of its two ends are left out; what is decoded is brought from the
- * voice's playback rate to the system's; and the title hears through the
- * module's callback that a buffer has been used up, which is when a title
- * that streams refills it. The block then goes down the voice's patches,
- * each with its volume matrix, through any buss on the way (a buss passes
- * on what it is given: none of the effects is here) to a master buss. The
- * master buss's sum of all it was sent is the state of its output module,
- * sixteen bits and two channels, and that is where a title reads the mix.
+ * The signal is here for the voices that begin with a player: the ATRAC9
+ * player, which is what a title streams its music and its speech through,
+ * and the sample player, sixteen-bit PCM or ADPCM, which is what its
+ * effects are. Such a voice is decoded as it plays (atrac9.c for the
+ * first). Data is taken from its chain of buffers as the block being made
+ * needs it; the samples an ATRAC9 buffer says to leave out of its two ends
+ * are left out; what is decoded is brought from the voice's playback rate
+ * to the system's; and the title hears through the module's callback that
+ * a buffer has been used up, which is when a title that streams refills
+ * it. The voice's envelope then shapes the block: its points from the
+ * moment the voice was started, its release from the moment it was keyed
+ * off, and the voice finishes when the release has run out. The block goes
+ * down the voice's patches, each with its volume matrix, through any buss
+ * on the way (a buss passes on what it is given: none of the effects is
+ * here) to a master buss. The master buss's sum of all it was sent is the
+ * state of its output module, sixteen bits and two channels, and that is
+ * where a title reads the mix.
  *
- * Every other voice makes no sound yet. A PCM or ADPCM player, and the
- * ATRAC9 player of the definitions that follow it with an envelope and
- * filters, plays for as long as its sample lasts at the rate it was given,
- * in silence, and finishes when it would have.
+ * Of a voice's other modules, the filters, the equaliser and the
+ * distortion, none is here: the sound passes them as it came.
  *
  * The first version of this handed out a fresh 64-byte record for every
  * voice handle and every parameter lock. A retail sound engine locks
@@ -52,6 +55,7 @@
 #include "hle_sysmem.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -163,6 +167,8 @@ typedef struct {
     uint32_t dst;                   /* the destination voice's handle */
     int32_t  out_index, sub_index, in_index;
     float    vol[2][2];             /* [output channel][input channel] */
+    float    was[2][2];             /* as they were when the last block went down it: a block moves from those to these */
+    int      settled;               /* `was` is of this patch as it is now, and not of an earlier use of the slot */
 } patch;
 
 /* What a voice that is heard keeps of its stream between updates. */
@@ -176,6 +182,15 @@ typedef struct {
     float    pcm[(SUPERFRAME_MOST + 8) * 2];    /* decoded and not yet heard: left and right, at the voice's own rate */
     uint32_t have;                  /* frames of `pcm` that are real */
     double   at;                    /* where in `pcm` the next frame to be heard lies */
+    int32_t  before[2][2];          /* an ADPCM player's two samples before, of each channel */
+    uint32_t strange;               /* ADPCM blocks met that name a predictor this player has not */
+    /* the envelope: how high it stands, which of its points it left last and how long ago, and its release */
+    float    height;
+    uint32_t point;
+    double   since;                 /* milliseconds */
+    int      releasing;
+    float    released_from;
+    double   released;              /* milliseconds */
 } at9_stream;
 
 typedef struct {
@@ -408,10 +423,8 @@ static int at9_frame(uint32_t config, uint32_t *bytes, uint32_t *samples) {
     return *samples != 0;
 }
 
-/* The voices that are heard: the plain ATRAC9 voice's. The other
- * definitions with an ATRAC9 player shape its sound with modules that are
- * not here, and stay with the players that keep time in silence.
- * VITARECOMP_NGS_SOUND=0 puts the plain ATRAC9 voice back among those, with
+/* The voices that are heard: those whose first module is a player.
+ * VITARECOMP_NGS_SOUND=0 has every one of them keep time in silence, with
  * no module callback made, which is the synthesiser as it was before it
  * had a decoder: for telling a fault in the sound from one in the title. */
 static int heard(const rack *rk) {
@@ -420,7 +433,113 @@ static int heard(const rack *rk) {
         const char *e = getenv("VITARECOMP_NGS_SOUND");
         silent = e && *e == '0';
     }
-    return !silent && rk->def == &DEFS[D_ATRAC9];
+    return !silent && (rk->def->mods[0] == M_ATRAC9 || rk->def->mods[0] == M_PLAYER);
+}
+
+/* --- the envelope -------------------------------------------------------------------------
+ * Its parameters, from 8: four points of twelve bytes, each the
+ * milliseconds from it to the next, its height, and the shape of the way
+ * there; then the milliseconds a release takes (56), how many of the
+ * points are real (60), and the points a loop goes between (64, 68; the
+ * second -1 for none). A voice starts at its first point and stays at its
+ * last. With no points it stands at 1, which is a voice with no envelope. */
+
+/* Which of a voice's modules is its envelope, if it has one that is not passed by. */
+static int envelope_of(const rack *rk, const voice *v) {
+    for (uint32_t m = 1; m < rk->def->nmods; m++)
+        if (rk->def->mods[m] == M_ENV) return (v->bypass >> m) & 1u ? -1 : (int)m;
+    return -1;
+}
+
+static void envelope_start(const rack *rk, uint32_t index, voice *v) {
+    at9_stream *s = v->stream;
+    const int m = envelope_of(rk, v);
+    s->height = 1.0f;
+    s->point = 0;
+    s->since = 0.0;
+    s->releasing = 0;
+    s->released = 0.0;
+    if (m >= 0) {
+        const uint32_t e = params_at(rk, index, (uint32_t)m);
+        if (vita_read32(e + 60) >= 1 && vita_read32(e + 60) <= 4) s->height = readf(e + 8 + 4);
+    }
+}
+
+/* A voice's first block. A title tells a voice to play and then writes
+ * what it is to play: the parameters are the ones that stand when the
+ * first block is made, not the ones a voice's last use left behind when
+ * it was told. So the place a sample player begins from and the height an
+ * envelope begins at are taken here. */
+static void first_block(const rack *rk, uint32_t index, voice *v) {
+    if (rk->def->mods[0] == M_PLAYER) {
+        const uint32_t p = params_at(rk, index, 0);
+        const int32_t start = (int32_t)vita_read32(p + 72);
+        const int8_t  first = (int8_t)vita_read8(p + 81);
+        v->st[0] = start > 0 ? start : 0;
+        v->st[1] = first > 0 && first < 4 ? first : 0;
+    }
+    envelope_start(rk, index, v);
+}
+
+/* The envelope a block's length further on. Returns 1 when a release has run out. */
+static int envelope_step(const rack *rk, uint32_t index, voice *v, double ms) {
+    at9_stream *s = v->stream;
+    const int m = envelope_of(rk, v);
+    if (m < 0) return s->releasing;
+    const uint32_t e = params_at(rk, index, (uint32_t)m);
+    if (s->releasing) {
+        const double all = (double)vita_read32(e + 56);
+        s->released += ms;
+        if (!(s->released < all)) { s->height = 0.0f; return 1; }
+        s->height = s->released_from * (float)(1.0 - s->released / all);
+        return 0;
+    }
+    uint32_t points = vita_read32(e + 60);
+    if (points < 1 || points > 4) return 0;
+    const int32_t loop_from = (int32_t)vita_read32(e + 64), loop_to = (int32_t)vita_read32(e + 68);
+    for (int guard = 0; guard < 16 && ms > 0.0 && s->point + 1 < points; guard++) {
+        const uint32_t a = e + 8 + s->point * 12u, b = a + 12u;
+        const double way = (double)vita_read32(a);
+        if (s->since + ms < way) {
+            s->since += ms;
+            s->height = readf(a + 4) + (readf(b + 4) - readf(a + 4)) * (float)(s->since / way);
+            return 0;
+        }
+        ms -= way - s->since;
+        s->since = 0.0;
+        s->point++;
+        s->height = readf(b + 4);
+        if (loop_to >= 0 && (int32_t)s->point >= loop_to && loop_from >= 0 && loop_from < loop_to) s->point = (uint32_t)loop_from;
+    }
+    return 0;
+}
+
+/* A voice that was keyed off: whether it goes on sounding while its release runs. */
+static int released(const rack *rk, uint32_t index, voice *v) {
+    at9_stream *s = v->stream;
+    const int m = envelope_of(rk, v);
+    if (!heard(rk) || !s || m < 0) return 0;
+    if (s->releasing) return 1;
+    if (!vita_read32(params_at(rk, index, (uint32_t)m) + 56) || !(s->height > 0.0f)) return 0;
+    s->releasing = 1;
+    s->released_from = s->height;
+    s->released = 0.0;
+    return 1;
+}
+
+/* A block through the voice's envelope: from the height it stood at to the height a block later. */
+static int envelope(const ngs_system *sys, const rack *rk, uint32_t index, voice *v, float *block) {
+    const uint32_t frames = sys->granularity;
+    const float from = v->stream->height;
+    const int over = envelope_step(rk, index, v, (double)frames * 1000.0 / (double)sys->rate);
+    const float to = v->stream->height;
+    if (from == 1.0f && to == 1.0f) return over;
+    for (uint32_t k = 0; k < frames; k++) {
+        const float g = from + (to - from) * ((float)(k + 1) / (float)frames);
+        block[2 * k] *= g;
+        block[2 * k + 1] *= g;
+    }
+    return over;
 }
 
 static void voice_start(const rack *rk, uint32_t index, voice *v) {
@@ -444,8 +563,13 @@ static void voice_start(const rack *rk, uint32_t index, voice *v) {
             v->stream->holding = 0;
             v->stream->have = 0;
             v->stream->at = 0;
+            memset(v->stream->before, 0, sizeof(v->stream->before));
             if (v->stream->open) atrac9_reset(&v->stream->dec);
+            envelope_start(rk, index, v);
         }
+        /* and its patches carry this voice's sound from where their volumes stand now */
+        const uint32_t each = slots_each(rk);
+        for (uint32_t slot = 0; slot < each; slot++) rk->p[index * each + slot].settled = 0;
     }
 }
 
@@ -634,6 +758,138 @@ static int stream_step(const rack *rk, uint32_t index) {
     return 1;
 }
 
+/* --- the sample player ------------------------------------------------------------------
+ * Its parameters, as the title writes them: four buffers of twelve bytes
+ * each from offset 8 (the data, its length, how many more times to play
+ * it, the buffer that follows it); the rate to play at (56) and a factor
+ * on that (60); the most samples to play (68); where in the first buffer
+ * to begin (72); the data's channels (76) and which of them the left and
+ * the right are (77, 78); whether it is sixteen-bit PCM or ADPCM (79); and
+ * the buffer to begin with (81).
+ *
+ * ADPCM is in blocks of sixteen bytes that make twenty-eight samples: a
+ * byte of predictor and shift, a byte of flags, and the samples four bits
+ * each, the low four of a byte first. A sample is its four bits shifted,
+ * and added to what one of five fixed predictors makes of the two samples
+ * before it. A block whose flags are 7 holds nothing to play. */
+
+#define PLAYER_END_OF_DATA     0u
+#define PLAYER_SWAPPED_BUFFER  1u
+#define PLAYER_LOOPED_BUFFER   2u
+
+/* Whether the buffer a sample player is in has nothing left to decode. */
+static int player_used_up(const rack *rk, uint32_t index) {
+    const voice *v = &rk->v[index];
+    const uint32_t p = params_at(rk, index, 0);
+    if (v->st[1] < 0 || v->st[1] > 3) return 1;
+    const uint32_t b = p + 8 + (uint32_t)v->st[1] * PCM_LAYOUT.buf_size;
+    const int32_t  size = (int32_t)vita_read32(b + 4);
+    const uint32_t unit = (vita_read8(p + 79) == 1 ? 16u : 2u) * (vita_read8(p + 76) == 2 ? 2u : 1u);
+    return !vita_read32(b) || size <= 0 || (uint32_t)(v->st[0] < 0 ? 0 : v->st[0]) + unit > (uint32_t)size;
+}
+
+static int player_step(const rack *rk, uint32_t index) {
+    static const int32_t PREDICT[5][2] = { { 0, 0 }, { 60, 0 }, { 115, -52 }, { 98, -55 }, { 122, -60 } };
+    voice *v = &rk->v[index];
+    at9_stream *s = v->stream;
+    const uint32_t p = params_at(rk, index, 0), self = voice_handle(rk, index), base = rk->base;
+    const uint32_t cb = v->module_cb, user = v->module_user;
+    const int32_t  cur = v->st[1];
+    if (cur < 0 || cur > 3) return 0;
+    const uint32_t b = p + 8 + (uint32_t)cur * PCM_LAYOUT.buf_size;
+    const uint32_t data = vita_read32(b);
+    const int32_t  size = (int32_t)vita_read32(b + 4);
+    if (!data || size <= 0) return 0;
+    const uint32_t channels = vita_read8(p + 76) == 2 ? 2u : 1u;
+    const int      adpcm = vita_read8(p + 79) == 1;
+    const uint32_t unit = (adpcm ? 16u : 2u) * channels;    /* the least there is to decode: a block, or a frame */
+    if (v->st[0] < 0) v->st[0] = 0;
+
+    if ((uint32_t)v->st[0] + unit > (uint32_t)size) {
+        /* the buffer is used up: once more, or on to the next, or that was all */
+        const int16_t loop = (int16_t)vita_read16(b + 8), next = (int16_t)vita_read16(b + 10);
+        v->st[0] = 0;
+        v->loops++;
+        if (loop < 0 || v->loops <= loop) {
+            call_back(cb, self, base, M_PLAYER, PLAYER_LOOPED_BUFFER, (uint32_t)v->loops, data, user);
+            return 1;
+        }
+        v->loops = 0;
+        v->st[1] = next;
+        const uint32_t nb = next >= 0 && next <= 3 ? p + 8 + (uint32_t)next * PCM_LAYOUT.buf_size : 0;
+        if (!nb || !vita_read32(nb) || (int32_t)vita_read32(nb + 4) <= 0) {
+            call_back(cb, self, base, M_PLAYER, PLAYER_END_OF_DATA, 0, 0, user);
+            return 0;
+        }
+        call_back(cb, self, base, M_PLAYER, PLAYER_SWAPPED_BUFFER, (uint32_t)cur, vita_read32(nb), user);
+        return 1;
+    }
+
+    /* what has been heard makes room for what is decoded now */
+    const uint32_t heard_to = (uint32_t)s->at < s->have ? (uint32_t)s->at : s->have;
+    memmove(s->pcm, s->pcm + 2 * heard_to, (size_t)(s->have - heard_to) * 2 * sizeof(s->pcm[0]));
+    s->have -= heard_to;
+    s->at -= (double)heard_to;
+    const uint32_t room = SUPERFRAME_MOST + 8 - s->have;
+    uint32_t left_of = vita_read8(p + 77), right_of = vita_read8(p + 78);
+    if (left_of >= channels) left_of = 0;
+    if (right_of >= channels) right_of = channels - 1;
+
+    const uint32_t at = (uint32_t)v->st[0];
+    uint32_t units = ((uint32_t)size - at) / unit, took;
+    if (adpcm) {
+        if (units > 16) units = 16;                         /* a hundredth of a second at a time */
+        if (units > room / 28) units = room / 28;
+        if (!units) return 0;
+        took = units * unit;
+        const uint8_t *in = (const uint8_t *)vita_mem_ptr(data + at, took);
+        if (!in) return 0;
+        for (uint32_t u = 0; u < units; u++) {
+            float out[2][28];
+            for (uint32_t c = 0; c < channels; c++) {
+                const uint8_t *blk = in + (u * channels + c) * 16u;
+                const uint32_t predictor = blk[0] >> 4, shift = blk[0] & 15u, flags = blk[1];
+                int32_t one = s->before[c][0], two = s->before[c][1];
+                if (predictor > 4 || (flags & 0xF0)) s->strange++;
+                for (uint32_t n = 0; n < 28; n++) {
+                    const uint32_t four = n & 1 ? blk[2 + n / 2] >> 4 : blk[2 + n / 2] & 15u;
+                    int32_t x = 0;
+                    if (flags != 7 && predictor <= 4) {
+                        x = (int32_t)(int16_t)(four << 12) >> shift;
+                        x += (one * PREDICT[predictor][0] + two * PREDICT[predictor][1]) / 64;
+                        x = x > 32767 ? 32767 : x < -32768 ? -32768 : x;
+                    }
+                    two = one;
+                    one = x;
+                    out[c][n] = (float)x;
+                }
+                s->before[c][0] = one;
+                s->before[c][1] = two;
+            }
+            for (uint32_t n = 0; n < 28; n++, s->have++) {
+                s->pcm[2 * s->have] = out[left_of][n];
+                s->pcm[2 * s->have + 1] = out[right_of][n];
+            }
+        }
+    } else {
+        if (units > 512) units = 512;
+        if (units > room) units = room;
+        if (!units) return 0;
+        took = units * unit;
+        const uint8_t *in = (const uint8_t *)vita_mem_ptr(data + at, took);
+        if (!in) return 0;
+        for (uint32_t u = 0; u < units; u++, s->have++) {
+            const uint8_t *l = in + (u * channels + left_of) * 2u, *r = in + (u * channels + right_of) * 2u;
+            s->pcm[2 * s->have] = (float)(int16_t)(l[0] | l[1] << 8);
+            s->pcm[2 * s->have + 1] = (float)(int16_t)(r[0] | r[1] << 8);
+        }
+    }
+    v->st[0] += (int32_t)took;
+    v->st[3] += (int32_t)took;
+    v->st[5] += (int32_t)took;
+    return 1;
+}
+
 /* One update's block of a voice that is heard: the system's number of
  * frames, left and right, in the scale of sixteen-bit samples. A frame that
  * falls between two of the stream's is on the line between them. Returns 1
@@ -642,24 +898,27 @@ static int stream_step(const rack *rk, uint32_t index) {
 static int voice_sound(const ngs_system *sys, rack *rk, uint32_t index, float *block) {
     const uint32_t base = rk->base, frames = sys->granularity;
     const uint32_t p = params_at(rk, index, 0);
+    const int sampled = rk->def->mods[0] == M_PLAYER;
+    const player_layout *L = sampled ? &PCM_LAYOUT : &AT9_LAYOUT;
     voice *v = &rk->v[index];
-    float freq = readf(p + AT9_LAYOUT.freq), scalar = readf(p + AT9_LAYOUT.scalar);
+    float freq = readf(p + L->freq), scalar = readf(p + L->scalar);
     if (!(freq > 0.0f)) freq = (float)sys->rate;
     if (!(scalar > 0.0f)) scalar = 1.0f;
     /* how far the stream moves in one of the system's samples */
     const double step = (double)freq * (double)scalar / (double)sys->rate;
-    const int32_t limit = (int32_t)vita_read32(p + AT9_LAYOUT.limit);
+    const int32_t limit = (int32_t)vita_read32(p + L->limit);
     int ended = 0;
 
     memset(block, 0, frames * 2 * sizeof(block[0]));
     if (!v->stream) return 1;
+    if (v->updates == 1) first_block(rk, index, v);
     for (uint32_t k = 0, steps = 0; k < frames; k++) {
         at9_stream *s = v->stream;
         uint32_t i = (uint32_t)s->at;
         double between = s->at - (double)i;
         while (!ended && i + (between > 0.0 ? 1u : 0u) >= s->have) {
             /* a stream that goes round without ever giving a sample is one that has ended */
-            if (++steps > 4096 || !stream_step(rk, index)) ended = 1;
+            if (++steps > 4096 || !(sampled ? player_step(rk, index) : stream_step(rk, index))) ended = 1;
             if (!(v = still_playing(rk, base, index))) return -1;
             s = v->stream;
             i = (uint32_t)s->at;
@@ -671,6 +930,12 @@ static int voice_sound(const ngs_system *sys, rack *rk, uint32_t index, float *b
         block[2 * k + 1] = a[1] + (b[1] - a[1]) * (float)between;
         s->at += step;
     }
+    /* A sample that ends where a block does has ended: its voice finishes
+     * with this block and not with the next one's silence. */
+    if (sampled && !ended && (uint32_t)v->stream->at >= v->stream->have && player_used_up(rk, index)) {
+        if (!player_step(rk, index)) ended = 1;
+        if (!(v = still_playing(rk, base, index))) return -1;
+    }
     v->st[2] += (int32_t)((double)frames * step);
     v->st[4] += (int32_t)((double)frames * step);
     if (limit > 0 && v->st[2] >= limit) ended = 1;
@@ -681,33 +946,49 @@ static int voice_sound(const ngs_system *sys, rack *rk, uint32_t index, float *b
  * volumes: from the block's left and right to the destination's. A master
  * buss adds what arrives to its sum. Any other buss sends it on down its
  * own patches, as it came. */
-static void send(const rack *rk, uint32_t index, const float *block, uint32_t frames, int depth) {
+static void send(rack *rk, uint32_t index, const float *block, uint32_t frames, int depth) {
     const uint32_t each = slots_each(rk);
     for (uint32_t slot = 0; slot < each; slot++) {
-        const patch *p = &rk->p[index * each + slot];
+        patch *p = &rk->p[index * each + slot];
         rack *to = NULL;
         uint32_t at = 0;
         if (!p->used) continue;
         const voice *dst = voice_of(p->dst, &to, &at);
         if (!dst || !(dst->state & ST_ACTIVE) || (dst->state & ST_PAUSED)) continue;
+        /* A title moves a sound by setting its volumes, a little at each
+         * of its own turns. A block that took the new volumes whole would
+         * step at its edge, a hundred times a second, and a step is a
+         * click: the block goes from the volumes the last one ended on to
+         * these. */
+        if (!p->settled) { memcpy(p->was, p->vol, sizeof(p->was)); p->settled = 1; }
         /* a rack of one channel has no right */
         const int from_two = rk->channels > 1, to_two = to->channels > 1;
         const float l_l = p->vol[0][0], l_r = to_two ? p->vol[0][1] : 0.0f;
         const float r_l = from_two ? p->vol[1][0] : 0.0f, r_r = from_two && to_two ? p->vol[1][1] : 0.0f;
-        if (to->mix) {
-            float *sum = to->mix + (size_t)at * MAX_GRAIN * 2;
+        const float l_l0 = p->was[0][0], l_r0 = to_two ? p->was[0][1] : 0.0f;
+        const float r_l0 = from_two ? p->was[1][0] : 0.0f, r_r0 = from_two && to_two ? p->was[1][1] : 0.0f;
+        const int moved = memcmp(p->was, p->vol, sizeof(p->was)) != 0;
+        float on[MAX_GRAIN * 2];
+        float *out = NULL;
+        int add = 0;
+        if (to->mix) { out = to->mix + (size_t)at * MAX_GRAIN * 2; add = 1; }
+        else if (to->def->mods[0] == M_INPUT && depth < 4) out = on;
+        memcpy(p->was, p->vol, sizeof(p->was));
+        if (!out) continue;
+        if (!add) memset(on, 0, frames * 2 * sizeof(on[0]));
+        if (moved) {
             for (uint32_t k = 0; k < frames; k++) {
-                sum[2 * k] += block[2 * k] * l_l + block[2 * k + 1] * r_l;
-                sum[2 * k + 1] += block[2 * k] * l_r + block[2 * k + 1] * r_r;
+                const float t = (float)(k + 1) / (float)frames;
+                out[2 * k] += block[2 * k] * (l_l0 + (l_l - l_l0) * t) + block[2 * k + 1] * (r_l0 + (r_l - r_l0) * t);
+                out[2 * k + 1] += block[2 * k] * (l_r0 + (l_r - l_r0) * t) + block[2 * k + 1] * (r_r0 + (r_r - r_r0) * t);
             }
-        } else if (to->def->mods[0] == M_INPUT && depth < 4) {
-            float on[MAX_GRAIN * 2];
+        } else {
             for (uint32_t k = 0; k < frames; k++) {
-                on[2 * k] = block[2 * k] * l_l + block[2 * k + 1] * r_l;
-                on[2 * k + 1] = block[2 * k] * l_r + block[2 * k + 1] * r_r;
+                out[2 * k] += block[2 * k] * l_l + block[2 * k + 1] * r_l;
+                out[2 * k + 1] += block[2 * k] * l_r + block[2 * k + 1] * r_r;
             }
-            send(to, at, on, frames, depth + 1);
         }
+        if (!add) send(to, at, on, frames, depth + 1);
     }
 }
 
@@ -733,12 +1014,13 @@ void vita_hle_sceNgsSystemUpdate(void) {
             int ended;
             if (!(v->state & ST_ACTIVE) || (v->state & ST_PAUSED)) continue;
             v->updates++;
-            if (v->state & ST_KEY_OFF) {
+            if ((v->state & ST_KEY_OFF) && !released(rk, k, v)) {
                 ended = 1;
             } else if (heard(rk)) {
                 float block[MAX_GRAIN * 2];
                 ended = voice_sound(&g_sys[s], rk, k, block);       /* may run the title's code, as below */
                 if (ended < 0) continue;
+                if (envelope(&g_sys[s], rk, k, v, block)) ended = 1;
                 send(rk, k, block, frames, 0);
             } else {
                 ended = voice_advance(&g_sys[s], rk, k, v);
@@ -931,28 +1213,77 @@ void vita_hle_sceNgsVoiceInit(void) {
     r0 = 0;
 }
 
+/* VITARECOMP_NGS_LOG=1: a line for each voice told to play, with what its
+ * modules were given and where it is patched to; and for each told to stop. */
+static int says(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("VITARECOMP_NGS_LOG"); on = e && *e && *e != '0'; }
+    return on;
+}
+
+static void say_voice(const rack *rk, uint32_t index, const voice *v) {
+    char text[1200];
+    int n = snprintf(text, sizeof text, "ngs: play %s %u (bypass %X, callbacks %08X %08X):", rk->def->name, index, v->bypass,
+                     v->module_cb, v->finished_cb);
+    for (uint32_t m = 0; m < rk->def->nmods && m < 2; m++) {
+        const uint32_t at = params_at(rk, index, m), size = params_size(rk->def->mods[m]);
+        const uint8_t *p = (const uint8_t *)vita_mem_ptr(at, size);
+        n += snprintf(text + n, sizeof text - (size_t)n, " [%04X", rk->def->mods[m]);
+        for (uint32_t k = 8; p && k < size && n < 1000; k += 4)
+            n += snprintf(text + n, sizeof text - (size_t)n, " %08X", vita_read32(at + k));
+        n += snprintf(text + n, sizeof text - (size_t)n, "]");
+    }
+    fprintf(stderr, "%s\n", text);
+    if (rk->def->mods[0] == M_PLAYER || rk->def->mods[0] == M_ATRAC9) {
+        const uint32_t p = params_at(rk, index, 0), each = rk->def->mods[0] == M_PLAYER ? 12u : 16u;
+        for (uint32_t b = 0; b < 4; b++) {
+            const uint32_t data = vita_read32(p + 8 + b * each), size = vita_read32(p + 12 + b * each);
+            const uint8_t *d = data && size ? (const uint8_t *)vita_mem_ptr(data, size < 48 ? size : 48) : NULL;
+            if (!d) continue;
+            n = snprintf(text, sizeof text, "ngs:   buffer %u at 0x%08X, %u bytes:", b, data, size);
+            for (uint32_t k = 0; k < 48 && k < size; k++) n += snprintf(text + n, sizeof text - (size_t)n, "%s%02X", k % 16 ? "" : " ", d[k]);
+            fprintf(stderr, "%s\n", text);
+        }
+    }
+    const uint32_t each = slots_each(rk);
+    for (uint32_t slot = 0; slot < each; slot++) {
+        const patch *pt = &rk->p[index * each + slot];
+        rack *to = NULL;
+        uint32_t at = 0;
+        if (!pt->used || !voice_of(pt->dst, &to, &at)) continue;
+        fprintf(stderr, "ngs:   output %d.%d to %s %u input %d, volumes %.3f %.3f / %.3f %.3f\n", pt->out_index, pt->sub_index,
+                to->def->name, at, pt->in_index, (double)pt->vol[0][0], (double)pt->vol[0][1], (double)pt->vol[1][0], (double)pt->vol[1][1]);
+    }
+}
+
 /* SceInt32 sceNgsVoicePlay(SceNgsHVoice) */
 void vita_hle_sceNgsVoicePlay(void) {
     rack *rk; uint32_t index;
     voice *v = voice_of(r0, &rk, &index);
     if (!v) { r0 = NGS_ERROR_INVALID_HANDLE; return; }
     voice_start(rk, index, v);
+    if (says()) say_voice(rk, index, v);
     r0 = 0;
 }
 
 /* SceInt32 sceNgsVoiceKeyOff(SceNgsHVoice): the release begins; with no
  * signal to fade, the voice finishes at the next update. */
 void vita_hle_sceNgsVoiceKeyOff(void) {
-    voice *v = voice_of(r0, NULL, NULL);
+    rack *rk; uint32_t index;
+    voice *v = voice_of(r0, &rk, &index);
     if (!v) { r0 = NGS_ERROR_INVALID_HANDLE; return; }
+    if (says()) fprintf(stderr, "ngs: key off %s %u after %u updates, state %X\n", rk->def->name, index, v->updates, v->state);
     if (v->state & ST_ACTIVE) v->state |= ST_KEY_OFF;
     r0 = 0;
 }
 
 /* SceInt32 sceNgsVoiceKill(SceNgsHVoice): stopped at once, and no callback. */
 void vita_hle_sceNgsVoiceKill(void) {
-    voice *v = voice_of(r0, NULL, NULL);
+    rack *rk; uint32_t index;
+    voice *v = voice_of(r0, &rk, &index);
     if (!v) { r0 = NGS_ERROR_INVALID_HANDLE; return; }
+    if (says()) fprintf(stderr, "ngs: kill %s %u after %u updates, state %X; ADPCM blocks of a predictor it has not: %u\n", rk->def->name,
+                        index, v->updates, v->state, v->stream ? v->stream->strange : 0);
     v->state = 0;
     r0 = 0;
 }

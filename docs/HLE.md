@@ -36,7 +36,7 @@ a type's type_info against the runtime's `__si_class_type_info` by address.
 it, and the loader writes the address at every site the module's relocation
 blocks name (docs/ARCHITECTURE.md, "Variables are bound like functions").
 
-## Audio: the graph, and the one voice that is heard
+## Audio: the graph, and the voices that are heard
 
 SceNgs, the synthesiser, is a graph the title builds and then reads back:
 racks of voices, each voice a fixed chain of modules (a sample player, an
@@ -58,16 +58,44 @@ was keyed off, finishes at that update and its callback runs on the thread
 that asked for the update. The audio output port takes as long to accept a
 block as the block lasts, which is what paces the thread.
 
-One kind of voice has its signal: the ATRAC9 voice, which is what a title
-streams its music and speech through. It is decoded as it plays
-(`src/atrac9.c`, a decoder written for the toolkit): superframes are taken
-from the voice's buffers as the block being made needs them, the samples a
-buffer says to leave out of its ends are left out, and the result goes down
-the voice's patches, each with its volume matrix, to a master buss. The
-master buss's sum is the state of its output module, which is where a
-title that plays the mix itself reads it (`sceNgsVoiceGetStateData`), adds
-what else it has and hands the block to an output port. A buss on the way
-passes on what it is given; none of the effects is here.
+The voices that begin with a player have their signal. There are two
+players. The ATRAC9 player is what a title streams its music and speech
+through, and what the second title keeps its longer effects in: it is
+decoded as it plays (`src/atrac9.c`, a decoder written for the toolkit),
+superframes taken from the voice's buffers as the block being made needs
+them, the samples a buffer says to leave out of its ends left out. The
+sample player is what effects are: sixteen-bit PCM, or ADPCM in blocks of
+sixteen bytes that make twenty-eight samples, each sample four bits
+shifted and added to what one of five fixed predictors makes of the two
+before it. Either way the result is brought from the voice's rate to the
+system's, shaped by the voice's envelope, and sent down the voice's
+patches, each with its volume matrix, to a master buss. The master buss's
+sum is the state of its output module, which is where a title that plays
+the mix itself reads it (`sceNgsVoiceGetStateData`), adds what else it has
+and hands the block to an output port. A buss on the way passes on what it
+is given; none of the effects is here, nor a voice's filters, equaliser
+and distortion.
+
+Three things about a voice were learnt from the second title, which plays
+everything through the definitions made for Sony's own sound engine (a
+player, an envelope, and filters), a hundred and ten voices of them:
+
+- **When its parameters count.** A title tells a voice to play and then
+  writes what it is to play. What a voice begins from (the place in its
+  first buffer, the height of its envelope's first point) is what stands
+  when its first block is made, not what the voice's last use had left
+  there when it was told.
+- **The envelope is how a sound begins and ends.** Four points, each a
+  height and the milliseconds to the next, and a release. A loop of
+  jungle is brought up over half a second and let go over nearly two; a
+  voice keyed off goes on sounding for its release and finishes when that
+  has run out, and its callback is the title's word that the voice is
+  free. With no release it finishes at the next update, as before.
+- **Volumes are how a sound moves.** The engine sets every voice's patch
+  volumes at each of its own turns: distance, direction, its own fades.
+  A block that took the new volumes whole would step at its edge, a
+  hundred times a second, and a step is a click: a block goes from the
+  volumes the last one ended on to these.
 
 A title that streams depends on one thing more than on the samples: the
 player's callback that says a buffer has been used up, which is the
@@ -76,12 +104,11 @@ first two buffers for ever. So the check that matters is of the whole
 chain and not of the decoder alone: what the title hands the output port
 (`VITARECOMP_AUDIO_DUMP`) against another decoder's reading of the same
 file, at the gain the title set, and on across the music's loop.
-`VITARECOMP_NGS_SOUND=0` puts the ATRAC9 voice back among the silent ones.
-
-Every other voice keeps time in silence: the PCM and ADPCM players, and
-the ATRAC9 player of the definitions that follow it with an envelope and
-filters, play for as long as their sample lasts and finish when they would
-have.
+`VITARECOMP_NGS_SOUND=0` has every voice keep time in silence, as all of
+them did before there was a decoder, and `VITARECOMP_NGS_LOG=1` says what
+each voice was given when it was told to play: its player's and its
+envelope's parameters, the first bytes of its buffers, and where it is
+patched to at what volumes.
 
 The voice definitions' module chains, the parameter structures' sizes and
 the ATRAC9 player's buffers and callbacks are the console's interface,
